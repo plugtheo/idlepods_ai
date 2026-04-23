@@ -1,0 +1,41 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dylib
+
+# Distribution / packaging
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Pytest
+.pytest_cache/
+
+# IDEs
+.vscode/
+.idea/
+
+# Environment variables
+.env
+.env.*
+
+# Docker
+docker-compose.override.yml
+docker-compose.*.yml
+
+# Misc
+*.log
+*.sqlite3
+*.db
+
+data/experiences.jsonl
+data/cli_sessions/
+data/lora_checkpoints/
+data/vector_store/

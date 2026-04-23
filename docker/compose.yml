@@ -1,0 +1,324 @@
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared volumes
+# ─────────────────────────────────────────────────────────────────────────────
+volumes:
+  vector_store:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ../data/vector_store
+  experiences:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ../data
+  lora_checkpoints:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ../data/lora_checkpoints
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Network
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  idledev:
+    driver: bridge
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Services
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+
+  # ── Local vLLM servers (only started when INFERENCE__MODE=local) ──────────
+
+  vllm-deepseek:
+    image: vllm/vllm-openai:v0.7.3
+    profiles: ["local"]
+    runtime: nvidia
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    command: >
+      --model deepseek-ai/deepseek-coder-6.7b-instruct
+      --enable-lora
+      --max-lora-rank 64
+      --port 8000
+      --host 0.0.0.0
+      --quantization fp8
+      --max-model-len 4096
+      --gpu-memory-utilization 0.45
+      --tokenizer-mode slow
+      --lora-modules coding_lora=/lora_checkpoints/coding_lora debugging_lora=/lora_checkpoints/debugging_lora review_lora=/lora_checkpoints/review_lora
+    volumes:
+      # Base model weights — pre-downloaded on host at HF_CACHE_DIR
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+      # LoRA adapters — written by Training Service, mounted read-only here
+      - ../data/lora_checkpoints:/lora_checkpoints:ro
+    ports:
+      - "8000:8000"
+    networks:
+      - idledev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  vllm-mistral:
+    image: vllm/vllm-openai:v0.7.3
+    profiles: ["local"]
+    runtime: nvidia
+    depends_on:
+      vllm-deepseek:
+        condition: service_healthy
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    command: >
+      --model mistralai/Mistral-7B-Instruct-v0.1
+      --enable-lora
+      --max-lora-rank 64
+      --port 8001
+      --host 0.0.0.0
+      --quantization fp8
+      --max-model-len 4096
+      --gpu-memory-utilization 0.40
+      --lora-modules planning_lora=/lora_checkpoints/planning_lora research_lora=/lora_checkpoints/research_lora criticism_lora=/lora_checkpoints/criticism_lora
+    volumes:
+      # Base model weights — pre-downloaded on host at HF_CACHE_DIR
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+      # LoRA adapters — written by Training Service, mounted read-only here
+      - ../data/lora_checkpoints:/lora_checkpoints:ro
+    ports:
+      - "8001:8001"
+    networks:
+      - idledev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  # ── Inference Service ──────────────────────────────────────────────────────
+
+  inference:
+    build:
+      context: ..
+      dockerfile: inference/Dockerfile
+    env_file: ../.env
+    environment:
+      - INFERENCE__MODE=${INFERENCE__MODE:-local}
+      - INFERENCE__DEEPSEEK_URL=http://vllm-deepseek:8000
+      - INFERENCE__MISTRAL_URL=http://vllm-mistral:8001
+      - INFERENCE__API_PROVIDER=${INFERENCE__API_PROVIDER:-anthropic}
+      - INFERENCE__API_MODEL=${INFERENCE__API_MODEL:-claude-3-5-haiku-20241022}
+      - INFERENCE__API_KEY=${INFERENCE__API_KEY:-}
+      - INFERENCE__GRPC_PORT=50051
+    networks:
+      - idledev
+    ports:
+      - "8010:8010"
+      - "50051:50051"   # gRPC — internal + host-accessible for direct client access
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── ChromaDB vector store (self-hosted mode) ────────────────────────────
+  #
+  # Two ChromaDB backends are supported — controlled entirely via .env:
+  #
+  #   Cloud       Set CONTEXT__CHROMA_API_KEY (+ TENANT + DATABASE) in .env.
+  #               No container needed; do not start the self-hosted profile.
+  #
+  #   Self-hosted Start with: docker compose --profile self-hosted up
+  #               Set CONTEXT__CHROMA_HOST=chromadb (default) and
+  #               EXPERIENCE__CHROMA_HOST=chromadb in .env.
+  #
+  # Full local GPU + self-hosted: docker compose --profile local --profile self-hosted up
+
+  chromadb:
+    profiles: ["self-hosted"]
+    image: chromadb/chroma:latest
+    volumes:
+      - vector_store:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    networks:
+      - idledev
+    ports:
+      - "8020:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Context Service ────────────────────────────────────────────────────────
+
+  context:
+    build:
+      context: ..
+      dockerfile: context/Dockerfile
+    env_file: ../.env
+    environment:
+      # ChromaDB Cloud — set these in .env for cloud mode (takes precedence)
+      - CONTEXT__CHROMA_API_KEY=${CONTEXT__CHROMA_API_KEY:-}
+      - CONTEXT__CHROMA_TENANT=${CONTEXT__CHROMA_TENANT:-}
+      - CONTEXT__CHROMA_DATABASE=${CONTEXT__CHROMA_DATABASE:-}
+      # ChromaDB self-hosted — set CONTEXT__CHROMA_HOST=chromadb in .env when
+      # using the self-hosted profile; ignored when CHROMA_API_KEY is set
+      - CONTEXT__CHROMA_HOST=${CONTEXT__CHROMA_HOST:-}
+      - CONTEXT__CHROMA_PORT=${CONTEXT__CHROMA_PORT:-8000}
+    depends_on:
+      chromadb:
+        condition: service_healthy
+        required: false   # chromadb container is absent in cloud/local-persist modes
+    networks:
+      - idledev
+    ports:
+      - "8011:8011"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8011/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Experience Service ─────────────────────────────────────────────────────
+
+  experience:
+    build:
+      context: ..
+      dockerfile: experience/Dockerfile
+    env_file: ../.env
+    volumes:
+      - experiences:/data
+    environment:
+      - EXPERIENCE__JSONL_PATH=/data/experiences.jsonl
+      # ChromaDB Cloud — set these in .env for cloud mode (takes precedence)
+      - EXPERIENCE__CHROMA_API_KEY=${EXPERIENCE__CHROMA_API_KEY:-}
+      - EXPERIENCE__CHROMA_TENANT=${EXPERIENCE__CHROMA_TENANT:-}
+      - EXPERIENCE__CHROMA_DATABASE=${EXPERIENCE__CHROMA_DATABASE:-}
+      # ChromaDB self-hosted — set EXPERIENCE__CHROMA_HOST=chromadb in .env when
+      # using the self-hosted profile; ignored when CHROMA_API_KEY is set
+      - EXPERIENCE__CHROMA_HOST=${EXPERIENCE__CHROMA_HOST:-}
+      - EXPERIENCE__CHROMA_PORT=${EXPERIENCE__CHROMA_PORT:-8000}
+      # Set to http://training:8013 in local mode; leave empty in API mode
+      # (Training Service is not started, notification is skipped automatically).
+      - EXPERIENCE__TRAINING_URL=${EXPERIENCE__TRAINING_URL:-}
+    depends_on:
+      chromadb:
+        condition: service_healthy
+        required: false   # chromadb container is absent in cloud/local-persist modes
+    networks:
+      - idledev
+    ports:
+      - "8012:8012"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8012/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Training Service (local mode only) ────────────────────────────────────
+  # Only needed when INFERENCE__MODE=local — start with: docker compose --profile local up
+  # In API mode the Experience Service still collects data; it just skips the
+  # training notification when EXPERIENCE__TRAINING_URL is unset.
+
+  training:
+    profiles: ["local"]
+    build:
+      context: ..
+      dockerfile: training/Dockerfile
+    env_file: ../.env
+    runtime: nvidia          # GPU access for LoRA fine-tuning subprocess
+    volumes:
+      - experiences:/data
+      - lora_checkpoints:/data/lora_checkpoints
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+    environment:
+      - TRAINING__JSONL_PATH=/data/experiences.jsonl
+      - TRAINING__OUTPUT_DIR=/data/lora_checkpoints
+      - TRAINING__HF_TOKEN=${HF_TOKEN:-}
+      # Mirrors the operator-controlled INFERENCE__MODE so the Training Service
+      # can refuse triggers when there are no local base model weights to train on.
+      - TRAINING__MODE=${INFERENCE__MODE:-local}
+      # Without these flags the Hugging Face client checks for model updates on
+      # every load, adding latency and failing hard in air-gapped environments.
+      # Models are already downloaded to the HF cache volume at first startup;
+      # disabling the update check prevents unnecessary network calls during training.
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+    networks:
+      - idledev
+    ports:
+      - "8013:8013"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8013/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Orchestration Service ──────────────────────────────────────────────────
+
+  orchestration:
+    build:
+      context: ..
+      dockerfile: orchestration/Dockerfile
+    env_file: ../.env
+    environment:
+      - ORCHESTRATION__INFERENCE_URL=http://inference:8010
+      - ORCHESTRATION__CONTEXT_URL=http://context:8011
+      - ORCHESTRATION__EXPERIENCE_URL=http://experience:8012
+      - ORCHESTRATION__DEFAULT_MAX_ITERATIONS=${ORCHESTRATION__DEFAULT_MAX_ITERATIONS:-2}
+      - ORCHESTRATION__CONVERGENCE_THRESHOLD=${ORCHESTRATION__CONVERGENCE_THRESHOLD:-0.65}
+      - ORCHESTRATION__INFERENCE_USE_GRPC=true
+      - ORCHESTRATION__INFERENCE_GRPC_HOST=inference
+      - ORCHESTRATION__INFERENCE_GRPC_PORT=50051
+    networks:
+      - idledev
+    ports:
+      - "8014:8001"
+    depends_on:
+      inference:
+        condition: service_healthy
+      context:
+        condition: service_healthy
+      experience:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Gateway Service ────────────────────────────────────────────────────────
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    env_file: ../.env
+    environment:
+      - GATEWAY__ORCHESTRATION_URL=http://orchestration:8001
+      - GATEWAY__API_KEY=${GATEWAY_API_KEY:-}
+    networks:
+      - idledev
+    ports:
+      - "8080:8080"
+    depends_on:
+      orchestration:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+

@@ -1,0 +1,69 @@
+// Inference Service gRPC contract
+// Generate Python stubs with:
+//   python -m grpc_tools.protoc \
+//     -I shared/proto \
+//     --python_out=shared/grpc_stubs \
+//     --grpc_python_out=shared/grpc_stubs \
+//     shared/proto/inference.proto
+
+syntax = "proto3";
+
+package inference.v1;
+
+service InferenceService {
+  // Run one LLM inference call.  Mirrors POST /v1/generate.
+  rpc Generate (GenerateRequest) returns (GenerateResponse);
+
+  // Stream tokens as they are produced — server-side streaming.
+  // Mirrors POST /v1/generate/stream (SSE) for the gRPC transport.
+  // Every chunk carries a non-empty token fragment.
+  // The final chunk has is_final=true and tokens_generated set; its token
+  // field is empty (pure metadata marker).
+  rpc GenerateStream (GenerateRequest) returns (stream GenerateStreamChunk);
+}
+
+// Encode the three legal role values as an enum (1 byte varint) instead of a
+// string (4–9 bytes).  With 6–8 turns per request this saves ~50–70 bytes.
+enum MessageRole {
+  ROLE_SYSTEM    = 0;
+  ROLE_USER      = 1;
+  ROLE_ASSISTANT = 2;
+}
+
+message MessageProto {
+  MessageRole role    = 1;
+  string      content = 2;
+}
+
+message GenerateRequest {
+  string              model_family  = 1;  // "deepseek" | "mistral"
+  string              role          = 2;  // agent role, e.g. "coder"
+  repeated MessageProto messages    = 3;
+
+  // Sampling parameters — declared optional so proto3 presence tracking
+  // applies: fields not set by the client are absent on the wire entirely.
+  // The server applies its own defaults when a field is absent.
+  // adapter_name absence = use base model (no LoRA).
+  // max_tokens  absence = server default 1024.
+  // temperature absence = server default 0.2.
+  // top_p       absence = server default 0.95.
+  optional string adapter_name = 4;
+  optional int32  max_tokens   = 5;
+  optional double temperature  = 6;  // double (64-bit) avoids float32 rounding
+  optional double top_p        = 7;  // double (64-bit)
+
+  string session_id = 8;  // log-correlation only; empty string = unknown
+}
+
+message GenerateResponse {
+  string content          = 1;
+  int32  tokens_generated = 2;
+  // model_family, role, session_id intentionally omitted: the caller
+  // already has them from the request — echoing wastes wire bytes.
+}
+
+message GenerateStreamChunk {
+  string token            = 1;  // text fragment; empty string on the is_final sentinel
+  bool   is_final         = 2;  // true on the last chunk only
+  int32  tokens_generated = 3;  // total tokens; only meaningful when is_final=true
+}

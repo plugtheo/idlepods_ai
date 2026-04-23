@@ -1,0 +1,14 @@
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+filterwarnings = [
+    # Treat all deprecation warnings as errors so we catch issues early.
+    "error::DeprecationWarning",
+
+    # chromadb 1.5.x uses asyncio.iscoroutinefunction() in its OpenTelemetry
+    # wrapper, which is deprecated in Python 3.14 and removed in 3.16.
+    # Tracked upstream: https://github.com/chroma-core/chroma
+    # Remove this ignore once a chromadb release that uses
+    # inspect.iscoroutinefunction() instead is pinned in requirements.txt.
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:chromadb",
+]
