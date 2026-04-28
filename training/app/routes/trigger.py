@@ -39,21 +39,7 @@ async def trigger_training(request: TrainingTriggerRequest) -> TrainingTriggerRe
     4. Returns a response indicating whether training was triggered and why.
     """
     # LoRA training requires locally downloaded base model weights (loaded into GPU
-    # RAM by Unsloth before rank-decomposed update matrices can be built).  In API
-    # mode those weight files don't exist on this machine, so training is not
-    # possible regardless of whether a GPU is attached.
-    if settings.mode != "local":
-        logger.debug(
-            "Training trigger ignored — TRAINING__MODE=%s "
-            "(self-training requires local mode with downloaded base model weights)",
-            settings.mode,
-        )
-        return TrainingTriggerResponse(
-            capability=request.capability,
-            triggered=False,
-            reason=f"self-training not supported in {settings.mode!r} mode — no local base model weights",
-        )
-
+    # RAM by Unsloth before rank-decomposed update matrices can be built).
     if is_training_running():
         return TrainingTriggerResponse(
             capability=request.capability,

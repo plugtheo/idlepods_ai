@@ -1,14 +1,8 @@
 """
 Context Service — settings
 ===========================
-ChromaDB backend is selected by which variables are set:
-
-  Cloud       CONTEXT__CHROMA_API_KEY is set.
-              Also requires CONTEXT__CHROMA_TENANT and CONTEXT__CHROMA_DATABASE.
-              Uses chromadb.CloudClient (api.trychroma.com).
-
-  Self-hosted CONTEXT__CHROMA_API_KEY is not set (default).
-              Uses chromadb.HttpClient at CONTEXT__CHROMA_HOST:CONTEXT__CHROMA_PORT.
+The Context Service uses a local self-hosted ChromaDB instance for all
+few-shot retrieval. It connects to the configured HTTP host and port.
 
 Other variables
 ---------------
@@ -32,24 +26,9 @@ class ContextSettings(BaseSettings):
         extra="ignore",
     )
 
-    chroma_api_key: str = Field(
-        default="",
-        description=(
-            "ChromaDB Cloud API key. When set, uses CloudClient (api.trychroma.com). "
-            "Takes precedence over chroma_host."
-        ),
-    )
-    chroma_tenant: str = Field(
-        default="",
-        description="ChromaDB Cloud tenant ID (required when chroma_api_key is set).",
-    )
-    chroma_database: str = Field(
-        default="",
-        description="ChromaDB Cloud database name (required when chroma_api_key is set).",
-    )
     chroma_host: str = Field(
         default="chromadb",
-        description="ChromaDB HTTP server hostname (self-hosted). Ignored when chroma_api_key is set.",
+        description="ChromaDB HTTP server hostname (self-hosted).",
     )
     chroma_port: int = Field(
         default=8000,
@@ -57,7 +36,7 @@ class ContextSettings(BaseSettings):
     )
     chroma_collection: str = Field(
         default="experiences",
-        description="ChromaDB collection name — must match the Experience Service's EXPERIENCE__CHROMA_COLLECTION.",
+        description="ChromaDB collection name — must match the Experience Service.",
     )
     embedding_model: str = Field(
         default="sentence-transformers/all-MiniLM-L6-v2",

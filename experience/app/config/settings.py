@@ -1,5 +1,8 @@
 """
 Experience Service — configuration
+
+The Experience Service stores experience JSONL and upserts embeddings into
+a local self-hosted ChromaDB instance.
 """
 
 from __future__ import annotations
@@ -16,24 +19,9 @@ class ExperienceSettings(BaseSettings):
         "/data/experiences.jsonl",
         description="Append-only JSONL file for experience records",
     )
-    chroma_api_key: str = Field(
-        default="",
-        description=(
-            "ChromaDB Cloud API key. When set, uses CloudClient (api.trychroma.com). "
-            "Takes precedence over chroma_host."
-        ),
-    )
-    chroma_tenant: str = Field(
-        default="",
-        description="ChromaDB Cloud tenant ID (required when chroma_api_key is set).",
-    )
-    chroma_database: str = Field(
-        default="",
-        description="ChromaDB Cloud database name (required when chroma_api_key is set).",
-    )
     chroma_host: str = Field(
         default="chromadb",
-        description="ChromaDB HTTP server hostname (self-hosted). Ignored when chroma_api_key is set.",
+        description="ChromaDB HTTP server hostname (self-hosted).",
     )
     chroma_port: int = Field(
         default=8000,
@@ -50,11 +38,10 @@ class ExperienceSettings(BaseSettings):
 
     # Training trigger
     training_url: str = Field(
-        "",
+        ...,
         description=(
             "Training Service base URL. "
-            "Leave empty (or unset EXPERIENCE__TRAINING_URL) in API mode — "
-            "the Training Service is not started and the notification is skipped."
+            "This must be configured for local self-training mode."
         ),
     )
 

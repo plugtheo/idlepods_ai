@@ -2,7 +2,7 @@
 Tests for the Context Service few-shot retrieval (RAG).
 
 Covers:
-- _init_chroma_sync: cloud vs self-hosted client selection, collection args
+- _init_chroma_sync: self-hosted client selection and collection args
 - _get_collection:   init success/failure, caching (no reinitialisation)
 - retrieve_few_shots: None collection, empty collection, similarity threshold
                       filtering, metadata fallback, query failure, defaults
@@ -50,60 +50,34 @@ def reset_chroma_collection():
 
 class TestInitChromaSync:
 
-    def _settings(self, *, api_key="", tenant="", database="",
-                  host="chromadb", port=8000, collection="experiences"):
+    def _settings(self, *, host="chromadb", port=8000, collection="experiences"):
         s = MagicMock()
-        s.chroma_api_key = api_key
-        s.chroma_tenant = tenant
-        s.chroma_database = database
         s.chroma_host = host
         s.chroma_port = port
         s.chroma_collection = collection
         return s
 
-    def test_cloud_mode_creates_cloud_client(self):
-        mock_col = _make_mock_collection(count=5)
-        mock_client = MagicMock()
-        mock_client.get_or_create_collection.return_value = mock_col
-        mock_settings = self._settings(api_key="sk-test", tenant="my-tenant", database="my-db")
-
-        with (
-            patch("services.context.app.retrieval.few_shot.settings", mock_settings),
-            patch("chromadb.CloudClient", return_value=mock_client) as cloud_cls,
-            patch("chromadb.HttpClient") as http_cls,
-        ):
-            from services.context.app.retrieval.few_shot import _init_chroma_sync
-            result = _init_chroma_sync()
-
-        cloud_cls.assert_called_once_with(
-            tenant="my-tenant", database="my-db", api_key="sk-test"
-        )
-        http_cls.assert_not_called()
-        assert result is mock_col
-
     def test_self_hosted_mode_creates_http_client(self):
         mock_col = _make_mock_collection(count=0)
         mock_client = MagicMock()
         mock_client.get_or_create_collection.return_value = mock_col
-        mock_settings = self._settings(api_key="", host="my-chroma", port=9000)
+        mock_settings = self._settings(host="my-chroma", port=9000)
 
         with (
             patch("services.context.app.retrieval.few_shot.settings", mock_settings),
-            patch("chromadb.CloudClient") as cloud_cls,
             patch("chromadb.HttpClient", return_value=mock_client) as http_cls,
         ):
             from services.context.app.retrieval.few_shot import _init_chroma_sync
             result = _init_chroma_sync()
 
         http_cls.assert_called_once_with(host="my-chroma", port=9000)
-        cloud_cls.assert_not_called()
         assert result is mock_col
 
     def test_collection_created_with_cosine_space_and_correct_name(self):
         mock_col = _make_mock_collection()
         mock_client = MagicMock()
         mock_client.get_or_create_collection.return_value = mock_col
-        mock_settings = self._settings(api_key="", collection="my-experiences")
+        mock_settings = self._settings(collection="my-experiences")
 
         with (
             patch("services.context.app.retrieval.few_shot.settings", mock_settings),

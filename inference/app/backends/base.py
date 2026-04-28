@@ -1,9 +1,8 @@
 """
 InferenceBackend — abstract base contract
 ==========================================
-All concrete backends (local vLLM, LiteLLM/Anthropic, …) implement this
-interface.  The route layer calls `.generate()` without knowing which
-backend is active.
+All concrete backends implement this interface. The route layer calls
+`.generate()` without knowing which backend is active.
 """
 
 from abc import ABC, abstractmethod

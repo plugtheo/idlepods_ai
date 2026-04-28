@@ -28,8 +28,7 @@ _background_tasks: set = set()
 
 
 async def _notify_training(capability: str, new_count: int, session_id: str) -> None:
-    # In API mode the operator leaves EXPERIENCE__TRAINING_URL unset (or empty)
-    # to skip starting the Training Service entirely.  Nothing to notify.
+    # If TRAINING_URL is unset, the service skips training notification.
     if not settings.training_url:
         return
 

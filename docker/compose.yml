@@ -34,11 +34,10 @@ networks:
 # ─────────────────────────────────────────────────────────────────────────────
 services:
 
-  # ── Local vLLM servers (only started when INFERENCE__MODE=local) ──────────
+  # ── Local vLLM servers ───────────────────────────────────────────────────
 
   vllm-deepseek:
     image: vllm/vllm-openai:v0.7.3
-    profiles: ["local"]
     runtime: nvidia
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
@@ -71,7 +70,6 @@ services:
 
   vllm-mistral:
     image: vllm/vllm-openai:v0.7.3
-    profiles: ["local"]
     runtime: nvidia
     depends_on:
       vllm-deepseek:
@@ -112,12 +110,8 @@ services:
       dockerfile: inference/Dockerfile
     env_file: ../.env
     environment:
-      - INFERENCE__MODE=${INFERENCE__MODE:-local}
       - INFERENCE__DEEPSEEK_URL=http://vllm-deepseek:8000
       - INFERENCE__MISTRAL_URL=http://vllm-mistral:8001
-      - INFERENCE__API_PROVIDER=${INFERENCE__API_PROVIDER:-anthropic}
-      - INFERENCE__API_MODEL=${INFERENCE__API_MODEL:-claude-3-5-haiku-20241022}
-      - INFERENCE__API_KEY=${INFERENCE__API_KEY:-}
       - INFERENCE__GRPC_PORT=50051
     networks:
       - idledev
@@ -130,21 +124,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── ChromaDB vector store (self-hosted mode) ────────────────────────────
-  #
-  # Two ChromaDB backends are supported — controlled entirely via .env:
-  #
-  #   Cloud       Set CONTEXT__CHROMA_API_KEY (+ TENANT + DATABASE) in .env.
-  #               No container needed; do not start the self-hosted profile.
-  #
-  #   Self-hosted Start with: docker compose --profile self-hosted up
-  #               Set CONTEXT__CHROMA_HOST=chromadb (default) and
-  #               EXPERIENCE__CHROMA_HOST=chromadb in .env.
-  #
-  # Full local GPU + self-hosted: docker compose --profile local --profile self-hosted up
+  # ── ChromaDB vector store (self-hosted) ──────────────────────────────────
 
   chromadb:
-    profiles: ["self-hosted"]
     image: chromadb/chroma:latest
     volumes:
       - vector_store:/chroma/chroma
@@ -169,18 +151,11 @@ services:
       dockerfile: context/Dockerfile
     env_file: ../.env
     environment:
-      # ChromaDB Cloud — set these in .env for cloud mode (takes precedence)
-      - CONTEXT__CHROMA_API_KEY=${CONTEXT__CHROMA_API_KEY:-}
-      - CONTEXT__CHROMA_TENANT=${CONTEXT__CHROMA_TENANT:-}
-      - CONTEXT__CHROMA_DATABASE=${CONTEXT__CHROMA_DATABASE:-}
-      # ChromaDB self-hosted — set CONTEXT__CHROMA_HOST=chromadb in .env when
-      # using the self-hosted profile; ignored when CHROMA_API_KEY is set
-      - CONTEXT__CHROMA_HOST=${CONTEXT__CHROMA_HOST:-}
-      - CONTEXT__CHROMA_PORT=${CONTEXT__CHROMA_PORT:-8000}
+      - CONTEXT__CHROMA_HOST=chromadb
+      - CONTEXT__CHROMA_PORT=8000
     depends_on:
       chromadb:
         condition: service_healthy
-        required: false   # chromadb container is absent in cloud/local-persist modes
     networks:
       - idledev
     ports:
@@ -202,21 +177,12 @@ services:
       - experiences:/data
     environment:
       - EXPERIENCE__JSONL_PATH=/data/experiences.jsonl
-      # ChromaDB Cloud — set these in .env for cloud mode (takes precedence)
-      - EXPERIENCE__CHROMA_API_KEY=${EXPERIENCE__CHROMA_API_KEY:-}
-      - EXPERIENCE__CHROMA_TENANT=${EXPERIENCE__CHROMA_TENANT:-}
-      - EXPERIENCE__CHROMA_DATABASE=${EXPERIENCE__CHROMA_DATABASE:-}
-      # ChromaDB self-hosted — set EXPERIENCE__CHROMA_HOST=chromadb in .env when
-      # using the self-hosted profile; ignored when CHROMA_API_KEY is set
-      - EXPERIENCE__CHROMA_HOST=${EXPERIENCE__CHROMA_HOST:-}
-      - EXPERIENCE__CHROMA_PORT=${EXPERIENCE__CHROMA_PORT:-8000}
-      # Set to http://training:8013 in local mode; leave empty in API mode
-      # (Training Service is not started, notification is skipped automatically).
-      - EXPERIENCE__TRAINING_URL=${EXPERIENCE__TRAINING_URL:-}
+      - EXPERIENCE__CHROMA_HOST=chromadb
+      - EXPERIENCE__CHROMA_PORT=8000
+      - EXPERIENCE__TRAINING_URL=http://training:8013
     depends_on:
       chromadb:
         condition: service_healthy
-        required: false   # chromadb container is absent in cloud/local-persist modes
     networks:
       - idledev
     ports:
@@ -227,13 +193,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Training Service (local mode only) ────────────────────────────────────
-  # Only needed when INFERENCE__MODE=local — start with: docker compose --profile local up
-  # In API mode the Experience Service still collects data; it just skips the
-  # training notification when EXPERIENCE__TRAINING_URL is unset.
+  # ── Training Service ─────────────────────────────────────────────────────
 
   training:
-    profiles: ["local"]
     build:
       context: ..
       dockerfile: training/Dockerfile
@@ -247,9 +209,6 @@ services:
       - TRAINING__JSONL_PATH=/data/experiences.jsonl
       - TRAINING__OUTPUT_DIR=/data/lora_checkpoints
       - TRAINING__HF_TOKEN=${HF_TOKEN:-}
-      # Mirrors the operator-controlled INFERENCE__MODE so the Training Service
-      # can refuse triggers when there are no local base model weights to train on.
-      - TRAINING__MODE=${INFERENCE__MODE:-local}
       # Without these flags the Hugging Face client checks for model updates on
       # every load, adding latency and failing hard in air-gapped environments.
       # Models are already downloaded to the HF cache volume at first startup;

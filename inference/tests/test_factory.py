@@ -59,11 +59,3 @@ class TestBackendFactory:
             b2 = get_backend()
             assert b1 is b2
 
-    def test_unknown_mode_raises_value_error(self):
-        with patch("services.inference.app.backends.factory.settings", _make_settings("cloud")):
-            import services.inference.app.backends.factory as fmod
-            fmod._backend_instance = None
-
-            from services.inference.app.backends.factory import get_backend
-            with pytest.raises(ValueError, match="Unknown INFERENCE__MODE"):
-                get_backend()

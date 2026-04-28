@@ -49,14 +49,6 @@ class TrainingSettings(BaseSettings):
         description="Minimum quality score for an experience to be included in training data",
     )
 
-    # Inference mode — must match the INFERENCE__MODE set for the Inference Service.
-    # "local" → vLLM running with downloaded base model weights → LoRA training possible.
-    # "api"   → cloud provider, no local weights → LoRA training not supported.
-    mode: str = Field(
-        "local",
-        description='Set to "api" to disable LoRA training (no local model weights available)',
-    )
-
     # HuggingFace auth (optional; required for gated models)
     hf_token: str = Field("", description="HuggingFace Hub token for downloading gated models")
 

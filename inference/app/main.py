@@ -90,8 +90,7 @@ app = FastAPI(
     title="Inference Service",
     description=(
         "Provides LLM generation for the IdleDev multi-agent pipeline. "
-        "In local mode calls vLLM servers; in api mode calls Anthropic (or "
-        "any LiteLLM-supported provider)."
+        "Calls local vLLM servers for all inference requests."
     ),
     version="1.0.0",
     lifespan=lifespan,

@@ -46,7 +46,7 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
     Run one LLM inference call.
 
     - In **local** mode hits the vLLM server matching `model_family`.
-    - In **api** mode calls the configured LiteLLM provider (default: Anthropic).
+    - Calls the local vLLM servers for all requests.
     """
     try:
         backend = get_backend()

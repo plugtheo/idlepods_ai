@@ -1,9 +1,9 @@
 """
 Backend factory
 ================
-Reads INFERENCE__MODE from the environment and returns the appropriate
-InferenceBackend instance.  Import `get_backend()` everywhere you need
-an inference backend — never instantiate backends directly.
+Returns the local vLLM inference backend singleton.
+Import `get_backend()` everywhere you need an inference backend — never
+instantiate backends directly.
 """
 
 from __future__ import annotations
@@ -30,23 +30,9 @@ def get_backend() -> InferenceBackend:
     if _backend_instance is not None:
         return _backend_instance
 
-    mode = settings.mode.lower()
-
-    if mode == "local":
-        from .local_vllm import LocalVLLMBackend
-        logger.info("InferenceBackend: LocalVLLMBackend (deepseek@%s, mistral@%s)",
-                    settings.deepseek_url, settings.mistral_url)
-        _backend_instance = LocalVLLMBackend()
-
-    elif mode == "api":
-        from .api import APIBackend
-        logger.info("InferenceBackend: APIBackend (provider=%s, model=%s)",
-                    settings.api_provider, settings.api_model)
-        _backend_instance = APIBackend()
-
-    else:
-        raise ValueError(
-            f"Unknown INFERENCE__MODE '{mode}'. Use 'local' or 'api'."
-        )
+    from .local_vllm import LocalVLLMBackend
+    logger.info("InferenceBackend: LocalVLLMBackend (deepseek@%s, mistral@%s)",
+                settings.deepseek_url, settings.mistral_url)
+    _backend_instance = LocalVLLMBackend()
 
     return _backend_instance

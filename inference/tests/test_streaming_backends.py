@@ -6,8 +6,6 @@ Covers:
 - LocalVLLMBackend.generate_stream(): handles [DONE] sentinel correctly
 - LocalVLLMBackend.generate_stream(): unknown family raises ValueError
 - LocalVLLMBackend.generate_stream(): skips blank delta.content
-- APIBackend.generate_stream(): yields tokens from litellm stream
-- APIBackend.generate_stream(): skips None/empty deltas
 - InferenceBackend base fallback: default generate_stream yields full content
 """
 
@@ -19,14 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 from typing import AsyncIterator
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse, Message
-
-# ── Stub litellm into sys.modules so patch("litellm.acompletion", …) works
-# without actually installing the package.
-if "litellm" not in sys.modules:
-    _litellm_stub = types.ModuleType("litellm")
-    _litellm_stub.acompletion = None  # placeholder attribute; overridden per test
-    sys.modules["litellm"] = _litellm_stub
-
 
 def _make_request(family="deepseek", role="coder", adapter=None):
     return GenerateRequest(
@@ -186,117 +176,6 @@ class TestLocalVLLMBackendStream:
         assert payload["stream"] is True
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# APIBackend streaming
-# ────────────────────────────────────────────────────────────────────────────
-
-def _make_litellm_settings():
-    s = MagicMock()
-    s.api_model = "claude-3-5-haiku-20241022"
-    s.role_model_overrides = {}
-    s.api_key = "test-key"
-    s.api_provider = "anthropic"
-    return s
-
-
-async def _async_litellm_chunks(*tokens):
-    """Async generator yielding fake litellm stream chunks."""
-    for token in tokens:
-        choice = MagicMock()
-        choice.delta.content = token
-        chunk = MagicMock()
-        chunk.choices = [choice]
-        yield chunk
-
-
-@pytest.mark.asyncio
-class TestAPIBackendStream:
-
-    async def test_yields_tokens_from_litellm_stream(self):
-        """Tokens from litellm acompletion stream are yielded in order."""
-        mock_settings = _make_litellm_settings()
-
-        async_gen = _async_litellm_chunks("Hello", " world", "!")
-
-        with (
-            patch("services.inference.app.backends.api.settings", mock_settings),
-            patch("litellm.acompletion", new=AsyncMock(return_value=async_gen)),
-        ):
-            from services.inference.app.backends.api import APIBackend
-            backend = APIBackend()
-            tokens = [t async for t in backend.generate_stream(_make_request())]
-
-        assert tokens == ["Hello", " world", "!"]
-
-    async def test_skips_none_delta_content(self):
-        """Chunks with None delta.content are not yielded."""
-        mock_settings = _make_litellm_settings()
-
-        async_gen = _async_litellm_chunks(None, "real", None, " token")
-
-        with (
-            patch("services.inference.app.backends.api.settings", mock_settings),
-            patch("litellm.acompletion", new=AsyncMock(return_value=async_gen)),
-        ):
-            from services.inference.app.backends.api import APIBackend
-            backend = APIBackend()
-            tokens = [t async for t in backend.generate_stream(_make_request())]
-
-        assert tokens == ["real", " token"]
-
-    async def test_skips_empty_string_delta(self):
-        """Chunks with empty string delta.content are not yielded."""
-        mock_settings = _make_litellm_settings()
-
-        async_gen = _async_litellm_chunks("", "content", "")
-
-        with (
-            patch("services.inference.app.backends.api.settings", mock_settings),
-            patch("litellm.acompletion", new=AsyncMock(return_value=async_gen)),
-        ):
-            from services.inference.app.backends.api import APIBackend
-            backend = APIBackend()
-            tokens = [t async for t in backend.generate_stream(_make_request())]
-
-        assert tokens == ["content"]
-
-    async def test_stream_true_passed_to_litellm(self):
-        """stream=True must be included in the litellm call."""
-        mock_settings = _make_litellm_settings()
-
-        async_gen = _async_litellm_chunks("x")
-        mock_acomp = AsyncMock(return_value=async_gen)
-
-        with (
-            patch("services.inference.app.backends.api.settings", mock_settings),
-            patch("litellm.acompletion", new=mock_acomp),
-        ):
-            from services.inference.app.backends.api import APIBackend
-            backend = APIBackend()
-            _ = [t async for t in backend.generate_stream(_make_request())]
-
-        assert mock_acomp.call_args[1]["stream"] is True
-
-    async def test_role_override_applied_in_stream(self):
-        """Per-role model override is also used for streaming calls."""
-        mock_settings = _make_litellm_settings()
-        mock_settings.role_model_overrides = {"coder": "ft:gpt-4o:org:coder:v1"}
-
-        async_gen = _async_litellm_chunks("code")
-        mock_acomp = AsyncMock(return_value=async_gen)
-
-        with (
-            patch("services.inference.app.backends.api.settings", mock_settings),
-            patch("litellm.acompletion", new=mock_acomp),
-        ):
-            from services.inference.app.backends.api import APIBackend
-            backend = APIBackend()
-            _ = [t async for t in backend.generate_stream(_make_request(role="coder"))]
-
-        assert mock_acomp.call_args[1]["model"] == "ft:gpt-4o:org:coder:v1"
-
-
-# ────────────────────────────────────────────────────────────────────────────
 # Base backend fallback
 # ────────────────────────────────────────────────────────────────────────────
 

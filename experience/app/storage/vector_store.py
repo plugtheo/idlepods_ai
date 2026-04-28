@@ -48,29 +48,16 @@ def _get_collection_sync():
 
     import chromadb
 
-    if settings.chroma_api_key:
-        # ChromaDB Cloud — api.trychroma.com
-        _chroma_client = chromadb.CloudClient(
-            tenant=settings.chroma_tenant,
-            database=settings.chroma_database,
-            api_key=settings.chroma_api_key,
-        )
-        logger.info(
-            "ChromaDB CloudClient: tenant=%s  database=%s",
-            settings.chroma_tenant,
-            settings.chroma_database,
-        )
-    else:
-        # Self-hosted ChromaDB HTTP server
-        _chroma_client = chromadb.HttpClient(
-            host=settings.chroma_host,
-            port=settings.chroma_port,
-        )
-        logger.info(
-            "ChromaDB HttpClient connecting to %s:%d",
-            settings.chroma_host,
-            settings.chroma_port,
-        )
+    # Self-hosted ChromaDB HTTP server
+    _chroma_client = chromadb.HttpClient(
+        host=settings.chroma_host,
+        port=settings.chroma_port,
+    )
+    logger.info(
+        "ChromaDB HttpClient connecting to %s:%d",
+        settings.chroma_host,
+        settings.chroma_port,
+    )
 
     _collection = _chroma_client.get_or_create_collection(
         name=settings.chroma_collection,
