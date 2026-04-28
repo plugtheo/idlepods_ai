@@ -114,6 +114,20 @@ All DeepSeek adapters trained before April 2026 (`debugging_lora`, `review_lora`
 
 ## Limitations
 
+**Local inference requires a GPU (min 3090 or better for standard to optimal performance). No CPU fallback path.
+
 **Limited to domain specific tasks (using LoRA mainly for Coding, Critic, Debugger, Researcher). Need to consider alternatives like rsLoRA in the future for better stability.
 
 **Limited to local inference for full self training pipeline but scalable for self hosted vllm servers to serve baseline models.
+
+**Currently one-shot query engine
+
+## Roadmap
+
+**Possibly merge current adapter to baseline and use rsLoRA.
+
+**Implement mult-turn conversation with persistence layer with Redis or local vector db.
+
+**Pre-seed experience dataset with synthetic data for useful few-shot context from day one.
+
+---
