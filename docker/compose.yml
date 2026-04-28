@@ -138,7 +138,7 @@ services:
     ports:
       - "8020:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      test: ["CMD", "curl", "-f", "http://localhost:8020/health"]
       interval: 10s
       timeout: 5s
       retries: 5

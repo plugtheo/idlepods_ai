@@ -1,6 +1,8 @@
 # IdlePods AI
 
-Self-improving multi-agent AI system. A user prompt enters through a single HTTP endpoint; a team of specialized agents collaborates to produce a response; every successful run feeds into training data that fine-tunes the models over time.
+A poor man's local (soon to be fully portable) coding/research assistant designed to be scalable and grow over time.
+
+More formally, this is a self-improving multi-agent LLM tool where a team of specialized agents collaborates to produce a solid response; every successful run feeds into training data that fine-tunes the models over time.
 
 ---
 
@@ -33,6 +35,7 @@ vLLM hot-reloads adapters
     ↓
 Next request uses improved model
 ```
+
 ---
 
 ## Services
@@ -78,6 +81,14 @@ python scripts/generate_protos.py
 
 ---
 
+## Demo
+
+![alt text](image-1.png)
+
+![alt text](image.png)
+
+---
+
 ## Adapter training notes
 
 **DeepSeek tokenizer:** `tokenizer.json` declares `Metaspace` but the BPE vocab uses GPT-2 byte-level (`Ġ`). Without the fix below, adapters learn to generate spaceless output. Apply immediately after Unsloth loads the tokenizer:
@@ -100,3 +111,9 @@ All DeepSeek adapters trained before April 2026 (`debugging_lora`, `review_lora`
 **gRPC for Orchestration → Inference, HTTP elsewhere** — the orchestration-to-inference call is the hot path (one call per agent node per iteration). Everything else is low-frequency enough that HTTP simplicity wins.
 
 **Fire-and-forget for experience recording and training notification** — decouples the user-facing response time from downstream storage and training evaluation latency.
+
+## Limitations
+
+**Limited to domain specific tasks (using LoRA mainly for Coding, Critic, Debugger, Researcher). Need to consider alternatives like rsLoRA in the future for better stability.
+
+**Limited to local inference for full self training pipeline but scalable for self hosted vllm servers to serve baseline models.

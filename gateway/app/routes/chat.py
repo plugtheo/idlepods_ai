@@ -108,12 +108,13 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
     events until it receives ``data: {"type": "done", ...}``.
 
     Event shapes (see orchestration /v1/run/stream for full schema):
-      {"type": "start",              "session_id": "...", "agent_chain": [...]}
-      {"type": "token",              "role": "coder", "iteration": 1, "token": "def"}
-      {"type": "agent_step",         "role": "coder", "iteration": 1, "output": "..."}
-      {"type": "iteration_complete", "iteration": 1, "score": 0.72}
-      {"type": "done",               "output": "...", "confidence": 0.87, ...}
-      {"type": "error",              "message": "..."}
+      {"type": "start",          "session_id": "...", "agent_chain": [...]}
+      {"type": "agent_start",    "role": "planner",  "message": "Working on a plan..."}
+      {"type": "chunk",          "content": "def "}
+      {"type": "agent_complete", "role": "planner",  "label": "Here's the plan:", "content": "...", "iteration": 1}
+      {"type": "progress",       "message": "Refining the answer (pass 1 complete)...", "score": 0.72, "iteration": 1}
+      {"type": "done",           "output": "...", "confidence": 0.87, ...}
+      {"type": "error",          "message": "..."}
     """
     session_id = request.session_id or str(uuid.uuid4())
     route = _query_router.route(request.prompt)

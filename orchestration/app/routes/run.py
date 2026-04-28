@@ -38,6 +38,7 @@ from ..clients.context import fetch_context
 from ..clients.experience import fire_publish_experience
 from ..config.settings import settings
 from ..graph import nodes as _nodes_module
+from ..graph.nodes import AGENT_FRIENDLY
 from ..graph.state import AgentState
 from ..utils.scoring import score_per_entry
 
@@ -257,16 +258,17 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
     The gateway proxies these directly to end users.
 
     Event types emitted on the ``data:`` field (JSON):
-      start              — pipeline started; carries session_id and agent_chain
-      token              — one token fragment from the active agent (real-time)
-      agent_step         — an agent node finished; carries role, iteration, output
-      iteration_complete — a full agent-chain iteration finished; carries score
-      done               — pipeline finished; carries final output + metadata
-      error              — unrecoverable pipeline error
+      start          — pipeline started; carries session_id and agent_chain
+      agent_start    — an agent is beginning; carries role and a friendly message
+      chunk          — one token fragment from the active agent (real-time text)
+      agent_complete — an agent finished; carries role, label, and full content
+      progress       — an iteration finished; carries a friendly message and score
+      done           — pipeline finished; carries final output + metadata
+      error          — unrecoverable pipeline error
 
-    ``token`` events arrive *before* the corresponding ``agent_step`` event —
-    clients can render streamed output character-by-character, then replace it
-    with the normalised ``agent_step.output`` when the agent completes.
+    ``chunk`` events arrive between ``agent_start`` and ``agent_complete`` —
+    clients render output character-by-character, then have the full content
+    available in ``agent_complete`` once the agent finishes.
     """
     session_id, context_intent, context_complexity, agent_chain, initial_state, rec_limit = (
         await _prepare_pipeline_run(request)
@@ -313,11 +315,15 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                                 if history_added
                                 else accumulated.get("current_iteration", 1)
                             )
+                            _, label = AGENT_FRIENDLY.get(
+                                node_name, ("...", node_name.capitalize())
+                            )
                             await q.put({
-                                "type": "agent_step",
+                                "type": "agent_complete",
                                 "role": node_name,
+                                "label": label,
+                                "content": delta.get("last_output", ""),
                                 "iteration": iteration,
-                                "output": delta.get("last_output", ""),
                             })
 
                         elif node_name == "update_loop":
@@ -325,9 +331,10 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                             score = (accumulated.get("iteration_scores") or [0.0])[-1]
                             last_iteration_seen = iteration
                             await q.put({
-                                "type": "iteration_complete",
-                                "iteration": iteration - 1,
+                                "type": "progress",
+                                "message": f"Refining the answer (pass {iteration - 1} complete)...",
                                 "score": round(score, 4),
+                                "iteration": iteration - 1,
                             })
 
             except asyncio.CancelledError:

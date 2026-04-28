@@ -69,6 +69,18 @@ logger = logging.getLogger(__name__)
 
 _token_queues: Dict[str, asyncio.Queue] = {}
 
+# Per-role friendly messages: (thinking_message, output_label)
+AGENT_FRIENDLY: Dict[str, tuple] = {
+    "planner":      ("Working on a plan...",                "Here's the plan:"),
+    "researcher":   ("Researching this topic...",           "Here's what I found:"),
+    "coder":        ("Writing the implementation...",       "Here's the code:"),
+    "debugger":     ("Debugging the code...",               "Here's what I found and fixed:"),
+    "reviewer":     ("Reviewing the solution...",           "My review:"),
+    "critic":       ("Critically analyzing the approach...", "My critique:"),
+    "review_critic":("Reviewing and critiquing...",         "Review & critique:"),
+    "consensus":    ("Synthesizing the final answer...",    "Here's the answer:"),
+}
+
 
 def register_token_queue(session_id: str, q: asyncio.Queue) -> None:
     """Register a queue to receive token events for *session_id*."""
@@ -276,19 +288,16 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
         q = get_token_queue(session_id)
 
         if q is not None and hasattr(client, "generate_stream"):
-            # Streaming path: push each token to the queue so the SSE
-            # generator can relay it in real-time to the end user.
-            # Accumulate tokens locally to build the full response for history.
+            # Streaming path: announce the agent once, then push each token as
+            # a bare chunk so the client renders output as it arrives without
+            # per-token metadata noise.  Local accumulation is unchanged.
+            thinking_msg, _ = AGENT_FRIENDLY.get(role, (f"{role.capitalize()} is working...", role))
+            await q.put({"type": "agent_start", "role": role, "message": thinking_msg})
             tokens: List[str] = []
             try:
                 async for token in client.generate_stream(request):
                     tokens.append(token)
-                    await q.put({
-                        "type": "token",
-                        "role": role,
-                        "iteration": current_iteration,
-                        "token": token,
-                    })
+                    await q.put({"type": "chunk", "content": token})
                 output = "".join(tokens)
                 logger.info(
                     "[%s] iter=%d  role=%s  tokens=%d (streamed)",
