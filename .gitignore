@@ -35,14 +35,14 @@ docker-compose.*.yml
 *.sqlite3
 *.db
 
+# Data
 data/
 
 # Claude
 plans/
 plans/archive
 
+# Scripts
 scripts/eval_reports/
 
 archive_current_task.py
-
-architecture_overview.md

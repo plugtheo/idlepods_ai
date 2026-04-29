@@ -120,8 +120,6 @@ Limited to domain specific tasks (using LoRA mainly for Coding, Critic, Debugger
 
 Limited to local inference for full self training pipeline but scalable for self hosted vllm servers to serve baseline models.
 
-Currently one-shot query engine
-
 ## Roadmap
 
 Possibly merge current adapter to baseline and use rsLoRA.
@@ -129,7 +127,5 @@ Possibly merge current adapter to baseline and use rsLoRA.
 Implement multi-turn conversation with persistence layer with Redis or local vector db.
 
 Pre-seed experience dataset with synthetic data for useful few-shot context from day one.
-
-Implement context persistence layer fallback.
 
 ---
