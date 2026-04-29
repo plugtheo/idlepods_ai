@@ -89,6 +89,14 @@ class InferenceSettings(BaseSettings):
         default=120.0,
         description="HTTP timeout for calls to vLLM servers.",
     )
+    http_max_connections: int = Field(
+        default=10,
+        description="Max total connections in the httpx connection pool for vLLM backends.",
+    )
+    http_max_keepalive_connections: int = Field(
+        default=5,
+        description="Max idle keep-alive connections in the httpx connection pool for vLLM backends.",
+    )
 
     # ── gRPC server-side sampling defaults ────────────────────────────────
     # Applied when a proto request omits optional sampling fields.
@@ -132,6 +140,10 @@ class InferenceSettings(BaseSettings):
     # ── Service ports ─────────────────────────────────────────────────────
     port: int = Field(default=8010, description="HTTP port this service listens on.")
     grpc_port: int = Field(default=50051, description="gRPC port (runs alongside HTTP).")
+    grpc_shutdown_grace_seconds: float = Field(
+        default=5.0,
+        description="Seconds to wait for in-flight gRPC RPCs to finish on shutdown.",
+    )
 
 
 settings = InferenceSettings()

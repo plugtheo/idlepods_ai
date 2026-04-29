@@ -54,6 +54,9 @@ _ROLE_TO_ENUM: dict[str, int] = {
 
 # Server-side defaults for optional sampling fields.
 # We skip sending a field when the value equals its default: absent on wire.
+# IMPORTANT: these must mirror inference/app/config/settings.py grpc_default_* byte-for-byte.
+# Cross-process drift (e.g. env override applied to one side only) silently corrupts the
+# wire-elision optimisation: the server applies a different default than the client assumed.
 _DEFAULT_MAX_TOKENS  = 1024
 _DEFAULT_TEMPERATURE = 0.2
 _DEFAULT_TOP_P       = 0.95

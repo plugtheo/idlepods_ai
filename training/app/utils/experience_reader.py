@@ -17,6 +17,8 @@ from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+PROMPT_FINGERPRINT_MAX_CHARS = 120  # normalised prompt characters kept for deduplication fingerprint
+
 
 def load_experiences() -> List[dict]:
     """Return all experience records from the JSONL file."""
@@ -72,7 +74,7 @@ def check_diversity(records: List[dict]) -> Tuple[bool, str]:
 def _fingerprint(prompt: str) -> str:
     """Compact, case-insensitive prompt fingerprint for deduplication."""
     normalised = "".join(prompt.lower().split())
-    return normalised[:120]
+    return normalised[:PROMPT_FINGERPRINT_MAX_CHARS]
 
 
 def to_training_records(records: List[dict]) -> List[dict]:

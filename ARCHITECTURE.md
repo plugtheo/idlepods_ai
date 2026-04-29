@@ -64,22 +64,12 @@ graph TD
 - **Agent Loop**: Iterates through agent_chain until convergence or max_iterations
 - **Convergence**: Extracts SCORE from reviewer/critic output, compares against threshold (default 0.85)
 
-### Context Service (8011)
-- **ChromaDB Few-Shot Retrieval**: Finds past examples similar to current prompt
-- **Repo Snippet Scanning**: Enriches context with relevant code from the repository
-- **Graceful Degradation**: 2s timeout — if unavailable, pipeline continues with empty context
-
 ### Inference Service (8010 / 50051)
 - **Dual vLLM Backends**:
   - DeepSeek-Coder-6.7B (fp8) for: coder, debugger, reviewer
   - Mistral-7B (fp8) for: planner, researcher, critic
 - **LoRA Adapters**: Per-capability fine-tuned models loaded at runtime
 - **gRPC Interface**: High-frequency hot path (one call per agent per iteration)
-
-### Experience Service (8012)
-- **Records**: ExperienceEvent to `/data/experiences.jsonl` + ChromaDB
-- **Metadata**: session_id, prompt, final_output, agent_chain, per-agent scores, iterations, convergence status
-- **Fire-and-Forget**: Decoupled from user-facing response; Training notified asynchronously
 
 ### Training Service (8013)
 - **Thresholds** (default):
@@ -179,9 +169,3 @@ tokenizer.backend_tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
 ```
 
 After training, save tokenizer directly from backend (not via Unsloth) to preserve the fix.
-
-### BPE Artifact Correction
-Raw adapter output contains GPT-2 byte-level tokens (`Ġ` = space, `Ċ` = newline). These **must** be fixed at inference time via `_fix_bpe_artifacts()` in `inference/app/backends/local_vllm.py` — do not remove.
-
-### All DeepSeek Adapters Pre-April 2026
-`debugging_lora` and `review_lora` were trained with the broken tokenizer and produce spaceless output. Both require retraining with the ByteLevel fix applied.

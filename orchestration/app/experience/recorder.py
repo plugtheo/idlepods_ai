@@ -20,8 +20,7 @@ from __future__ import annotations
 import logging
 
 from shared.contracts.experience import ExperienceEvent
-from . import jsonl_store, training_notifier, vector_store
-from ..config.settings import settings
+from . import jsonl_store, vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +61,3 @@ async def record(event: ExperienceEvent, total_count: int) -> None:
 
     # ChromaDB upsert — non-fatal, JSONL already written
     await vector_store.upsert(event)
-
-    # Training notification — only when count crosses the threshold
-    if total_count + 1 >= settings.min_batch_size:
-        capability = _infer_capability(event.agent_chain)
-        await training_notifier.notify(capability, event.session_id)

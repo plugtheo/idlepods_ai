@@ -26,6 +26,9 @@ _CODE_INTENTS = {"coding", "debugging", "analysis"}
 _EXTENSIONS = {".py", ".ts", ".js", ".md"}
 _MAX_FILES = 200
 
+HASH_PREFIX_LEN = 16        # hex chars kept from sha256 for file fingerprinting
+CONTENT_PREVIEW_BYTES = 300 # bytes read for relevance scoring and snippet display
+
 _EXISTING_CODE_SIGNALS = re.compile(
     r"\b(fix|debug|update|modify|change|refactor|review|improve|optimize|"
     r"existing|current|where|which\s+file|"
@@ -49,7 +52,7 @@ def _should_scan_repo(prompt: str) -> bool:
 
 def _file_fingerprint(path: Path) -> str:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:HASH_PREFIX_LEN]
     except OSError:
         return ""
 
@@ -82,7 +85,7 @@ def _scan_files_sync(
         file_count += 1
 
         try:
-            content_preview = path.read_bytes()[:300].decode("utf-8", errors="ignore")
+            content_preview = path.read_bytes()[:CONTENT_PREVIEW_BYTES].decode("utf-8", errors="ignore")
         except OSError:
             content_preview = ""
         fp_tokens = _tokenise(path.stem + " " + content_preview)
@@ -97,7 +100,7 @@ def _scan_files_sync(
     for relevance, path in candidates[:max_snippets]:
         try:
             raw = path.read_text(encoding="utf-8", errors="ignore")
-            snippet = raw[:300].replace("\n", " ").strip()
+            snippet = raw[:CONTENT_PREVIEW_BYTES].replace("\n", " ").strip()
             rel_path = path.relative_to(repo_root).as_posix()
             snippets.append(
                 RepoSnippet(file=rel_path, snippet=snippet, relevance=round(relevance, 3))

@@ -44,7 +44,10 @@ class InferenceClient:
         self._base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(
             timeout=timeout,
-            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            limits=httpx.Limits(
+                max_connections=settings.http_max_connections,
+                max_keepalive_connections=settings.http_max_keepalive_connections,
+            ),
         )
 
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
@@ -85,6 +88,21 @@ class InferenceClient:
                 token: str = payload.get("token", "")
                 if token:
                     yield token
+
+    async def get_model_info(self) -> dict:
+        """GET /v1/model-info → {"deepseek": <max_model_len>, "mistral": <max_model_len>}."""
+        resp = await self._client.get(f"{self._base_url}/v1/model-info")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def tokenize(self, model_family: str, text: str) -> int:
+        """POST /v1/tokenize → token count for text using the specified model family."""
+        resp = await self._client.post(
+            f"{self._base_url}/v1/tokenize",
+            json={"model_family": model_family, "text": text},
+        )
+        resp.raise_for_status()
+        return int(resp.json()["token_count"])
 
     async def health(self) -> bool:
         """Returns True if the Inference Service is reachable."""

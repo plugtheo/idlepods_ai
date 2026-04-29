@@ -1,15 +1,17 @@
 """
-Training Service — configuration
+Training configuration
 """
 
 from __future__ import annotations
+
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class TrainingSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="TRAINING__", env_nested_delimiter="__")
+    model_config = SettingsConfigDict(env_prefix="TRAINING__", env_nested_delimiter="__", env_file=".env")
 
     # Shared data paths (same volumes as Experience Service)
     jsonl_path: str = Field(
@@ -38,72 +40,65 @@ class TrainingSettings(BaseSettings):
     )
     min_score_spread: float = Field(
         0.15,
-        description="max_score - min_score must be >= this value (ensures varied quality labels)",
+        description="max_score - min_score must be >= this value",
     )
     min_diversity_ratio: float = Field(
         0.60,
-        description="Fraction of records with unique prompt fingerprints (deduplication guard)",
+        description="Fraction of records with unique prompt fingerprints",
     )
     min_quality_score: float = Field(
         0.65,
         description="Minimum quality score for an experience to be included in training data",
     )
 
-    # HuggingFace auth (optional; required for gated models)
+    # HuggingFace auth
     hf_token: str = Field("", description="HuggingFace Hub token for downloading gated models")
 
     # ── LoRA training hyperparameters ─────────────────────────────────────
-    max_seq_length: int = Field(
-        default=2048,
-        description=(
-            "Maximum token sequence length for LoRA fine-tuning. "
-            "Controls Unsloth FastLanguageModel.from_pretrained max_seq_length "
-            "and SFTTrainer max_seq_length. Must match or be smaller than the "
-            "base model's native context window. "
-            "Override with TRAINING__MAX_SEQ_LENGTH."
-        ),
-    )
-    response_max_chars: int = Field(
-        default=6000,
-        description=(
-            "Maximum character count for a training response before it is skipped "
-            "as a 'wall-of-text' sample that likely exceeds the training context window. "
-            "Rule of thumb: max_seq_length * chars_per_token ≈ 2048 * 3 = 6144. "
-            "Override with TRAINING__RESPONSE_MAX_CHARS."
-        ),
-    )
-    lora_num_epochs: int = Field(
-        default=3,
-        description=(
-            "Number of SFT training epochs for LoRA adapter training. "
-            "Applies to both the one-time bootstrap script (train_gpu_simple.py) "
-            "and the online self-training path (trainer_entry.py). "
-            "Override with TRAINING__LORA_NUM_EPOCHS."
-        ),
-    )
-    lora_learning_rate: float = Field(
-        default=2e-4,
-        description=(
-            "AdamW learning rate for LoRA fine-tuning. "
-            "Override with TRAINING__LORA_LEARNING_RATE."
-        ),
-    )
-    lora_rank: int = Field(
-        default=16,
-        description=(
-            "LoRA rank (r). Higher values increase capacity but also VRAM usage. "
-            "Override with TRAINING__LORA_RANK."
-        ),
-    )
-    lora_alpha: int = Field(
-        default=32,
-        description=(
-            "LoRA alpha scaling factor. Effective learning rate scales as alpha/rank. "
-            "Override with TRAINING__LORA_ALPHA."
-        ),
-    )
+    max_seq_length: int = Field(default=2048)
+    response_max_chars: int = Field(default=6000)
+    lora_num_epochs: int = Field(default=3)
+    lora_learning_rate: float = Field(default=2e-4)
+    lora_rank: int = Field(default=16)
+    lora_alpha: int = Field(default=32)
 
-    port: int = Field(8013, description="Listening port")
+    # ── Scheduler / wrapper ──────────────────────────────────────────────
+    training_target: Literal["local", "remote"] = Field(
+        default="local",
+        description="Where training runs: 'local' = in-process trainer_entry; 'remote' = HTTP POST to training_trigger_url.",
+    )
+    training_trigger_url: str = Field(
+        default="",
+        description="Remote training endpoint (used only when training_target='remote').",
+    )
+    training_exclusive_mode: Literal["BLOCK", "ALLOW"] = Field(
+        default="BLOCK",
+        description="BLOCK = stop vLLM during training (free GPU); ALLOW = run concurrently.",
+    )
+    scheduler_interval_hours: int = Field(
+        default=4,
+        description="Cron interval (hours) between scheduler ticks.",
+    )
+    scheduler_poll_interval_seconds: int = Field(
+        default=60,
+        description="Seconds between schedule.run_pending() calls in the scheduler main loop.",
+    )
+    remote_trigger_timeout_seconds: float = Field(
+        default=60.0,
+        description="HTTP timeout for the remote training trigger POST request.",
+    )
+    lock_path: str = Field(
+        default="/data/training.lock",
+        description="Filesystem lock to prevent concurrent training jobs (scheduler-side only).",
+    )
+    vllm_services: list[str] = Field(
+        default_factory=lambda: ["vllm-deepseek", "vllm-mistral"],
+        description="Compose service names of local vLLM instances to stop/start in BLOCK mode.",
+    )
+    compose_file: str = Field(
+        default="/compose/compose.yml",
+        description="Path to compose.yml inside the wrapper/scheduler container (for docker compose stop/start).",
+    )
 
 
 settings = TrainingSettings()

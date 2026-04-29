@@ -74,6 +74,21 @@ def extract_score_from_text(text: str) -> float | None:
     return None
 
 
+# Heuristic baseline scores — module constants so the values are searchable
+# and self-documenting.  Not promoted to settings because they are tied to the
+# specific output patterns the regexes below detect, not to deployment policy.
+_SCORE_SHORT_TEXT = 0.30          # near-empty output
+_SCORE_METADATA_LEAK = 0.10       # adapter outputting pipeline JSON instead of code
+_SCORE_EVALUATOR_HEURISTIC = 0.55 # reviewer/critic present but no explicit SCORE field
+_SCORE_CODER_NO_CODE = 0.60       # coder/debugger output with no code markers
+_SCORE_CODER_BASE = 0.65          # coder/debugger base score when code is present
+_SCORE_CODER_MAX = 0.75           # cap for length-boosted coder score
+_CODER_LENGTH_SCALE = 12000       # characters-per-unit for the length bonus
+_SCORE_GENERIC_HEURISTIC = 0.62   # planner, researcher, consensus baseline
+_BLOCKER_SCORE_PENALTY = 0.12     # subtracted per matched blocker pattern
+_POSITIVE_SCORE_BONUS = 0.06      # added per matched positive pattern
+
+
 def heuristic_score(text: str, role: str) -> float:
     """
     Estimate quality of *text* using lightweight pattern matching.
@@ -90,7 +105,7 @@ def heuristic_score(text: str, role: str) -> float:
       planner / others  — 0.62: modest baseline for prose-only roles.
     """
     if not text or len(text.strip()) < 30:
-        return 0.30  # Near-empty output is always low quality
+        return _SCORE_SHORT_TEXT  # Near-empty output is always low quality
 
     # Explicit score annotations take priority
     explicit = extract_score_from_text(text)
@@ -100,30 +115,30 @@ def heuristic_score(text: str, role: str) -> float:
     # Detect adapter metadata leakage (adapter trained on orchestration JSON).
     # Output containing pipeline metric keys is garbage — penalise hard.
     if _METADATA_LEAKAGE_RE.search(text):
-        return 0.10
+        return _SCORE_METADATA_LEAK
 
     # Role-specific baseline when no explicit SCORE annotation
     if role in ("reviewer", "critic"):
         # These roles SHOULD produce SCORE: — absence means incomplete output
-        score = 0.55
+        score = _SCORE_EVALUATOR_HEURISTIC
     elif role in ("coder", "debugger"):
         has_code = bool(_CODE_PRESENT_RE.search(text))
         length = len(text.strip())
         # Reward code presence + output substance
-        score = 0.60 if not has_code else min(0.75, 0.65 + length / 12000)
+        score = _SCORE_CODER_NO_CODE if not has_code else min(_SCORE_CODER_MAX, _SCORE_CODER_BASE + length / _CODER_LENGTH_SCALE)
     else:
         # planner, researcher, consensus
-        score = 0.62
+        score = _SCORE_GENERIC_HEURISTIC
 
     # Apply negative signals
     for pattern in _BLOCKER_PATTERNS:
         if pattern.search(text):
-            score -= 0.12
+            score -= _BLOCKER_SCORE_PENALTY
 
     # Apply positive signals
     for pattern in _POSITIVE_PATTERNS:
         if pattern.search(text):
-            score += 0.06
+            score += _POSITIVE_SCORE_BONUS
 
     return max(0.0, min(1.0, score))
 

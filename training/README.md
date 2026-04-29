@@ -26,8 +26,6 @@ Fine-tuning in this system means LoRA adaptation: adding a small layer of specia
 ```
 Orchestration Service (each completed pipeline run)
   ↓
-Experience Event (role, prompt, output, score, intent, complexity)
-  ↓
 Training Service Trigger
   ├─ Append to experience log (JSONL file)
   ├─ Evaluate batch readiness:
@@ -124,4 +122,3 @@ Training data for LoRA adapters must match the exact format used at inference:
 ```
 
 This format is enforced during both training and inference; any mismatch causes poor output.
-

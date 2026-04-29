@@ -26,10 +26,16 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse
 from ..backends.factory import get_backend
 from ..config.settings import settings
+
+
+class _TokenizeBody(BaseModel):
+    model_family: str
+    text: str
 
 logger = logging.getLogger(__name__)
 
@@ -122,3 +128,34 @@ async def health() -> dict:
         else "degraded"
     )
     return {"status": overall, "backends": backends_status}
+
+
+@router.get("/v1/model-info", summary="Return max_model_len for each vLLM backend")
+async def model_info() -> dict:
+    """Query each vLLM backend for the served model's max_model_len."""
+    result: dict = {}
+    for family in ("deepseek", "mistral"):
+        try:
+            backend = get_backend(family)
+            result[family] = await backend.max_model_len()
+        except Exception as exc:
+            logger.error("model_info failed for %s: %s", family, exc)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to get model info for {family}: {exc}",
+            ) from exc
+    return result
+
+
+@router.post("/v1/tokenize", summary="Return token count for a text string via a vLLM backend")
+async def tokenize_text(body: _TokenizeBody) -> dict:
+    """Proxy a tokenization request to the appropriate vLLM backend."""
+    if body.model_family not in ("deepseek", "mistral"):
+        raise HTTPException(status_code=400, detail="model_family must be 'deepseek' or 'mistral'")
+    try:
+        backend = get_backend(body.model_family)
+        count = await backend.tokenize(body.text)
+        return {"token_count": count}
+    except Exception as exc:
+        logger.error("tokenize failed for %s: %s", body.model_family, exc)
+        raise HTTPException(status_code=502, detail=f"Tokenize failed: {exc}") from exc

@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+OUTPUT_SUMMARY_MAX_CHARS = 300  # API-visible field; value must not change without a contract update
+
 # _PIPELINE is lazy-initialized on first request (or overridden in tests).
 # Keeping the build step out of module scope means importing this module does
 # not require langgraph to be installed — tests that mock _PIPELINE work even
@@ -75,6 +77,7 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
     (session_id, context_intent, context_complexity, agent_chain,
      initial_state, recursion_limit)
     """
+    
     session_id = request.session_id or str(uuid.uuid4())
     task_id = getattr(request, "task_id", None) or session_id
     if task_id == session_id:
@@ -113,6 +116,10 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
 
     max_iterations = request.max_iterations or settings.default_max_iterations
     convergence_threshold = request.convergence_threshold or settings.convergence_threshold
+    logger.info(
+        "[%s] convergence_threshold=%.2f (request_override=%s)",
+        session_id[:8], convergence_threshold, request.convergence_threshold,
+    )
 
     initial_state: AgentState = {
         "session_id": session_id,
@@ -232,7 +239,7 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
         AgentStep(
             role=h["role"],
             iteration=h.get("iteration", 1),
-            output_summary=str(h.get("output", ""))[:300],
+            output_summary=str(h.get("output", ""))[:OUTPUT_SUMMARY_MAX_CHARS],
             score=score_per_entry(h),
         )
         for h in history

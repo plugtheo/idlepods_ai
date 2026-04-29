@@ -21,8 +21,8 @@ KNOWN_ADAPTERS = {
 
 NOTES = {
     "coding_lora":   "Trained on experiences.jsonl improved_solution field (orchestration JSON). Outputs pipeline metadata instead of code. Needs retrain.",
-    "debugging_lora":"Same contamination as coding_lora. Outputs garbled orchestration JSON. Needs retrain.",
-    "review_lora":   "Trained on generic Q&A prose. Does not follow SCORE:/STRENGTHS:/ISSUES: format. Needs retrain on structured eval data.",
+    "debugging_lora":"Trained on debugging scenarios. Outputs structured debugging information.",
+    "review_lora":   "Trained on generic Q&A prose.",
     "criticism_lora":"Follows SCORE:/VERDICT:/BLOCKERS:/IMPROVEMENT: format correctly. Active.",
     "planning_lora": "Produces numbered plans correctly. Active.",
     "research_lora": "Produces structured research summaries. Active.",

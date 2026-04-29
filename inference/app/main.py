@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
 
     # Start gRPC server as a background task alongside uvicorn.
     from .grpc.server import serve as grpc_serve
-    _grpc_task = asyncio.create_task(grpc_serve(port=settings.grpc_port))
+    _grpc_task = asyncio.create_task(grpc_serve())
     _grpc_task.add_done_callback(_on_grpc_task_done)
 
     _log.info(
@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
     # stop(grace=5) allows in-flight RPCs up to 5 seconds to finish before
     # the server is forcibly terminated.
     from .grpc.server import shutdown as grpc_shutdown
-    await grpc_shutdown(grace=5.0)
+    await grpc_shutdown()
 
     if _grpc_task is not None and not _grpc_task.done():
         _grpc_task.cancel()

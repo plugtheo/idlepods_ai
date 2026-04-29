@@ -144,16 +144,17 @@ if _GRPC_AVAILABLE:
                 return
 
 
-async def serve(port: int = 50051) -> None:
+async def serve() -> None:
     """
     Start the gRPC server and block until it terminates.
 
     Designed to run as a background asyncio task alongside uvicorn::
 
-        task = asyncio.create_task(serve(port=settings.grpc_port))
+        task = asyncio.create_task(serve())
         task.add_done_callback(...)   # log unexpected exits
     """
     global _server
+    port = settings.grpc_port
 
     if not _GRPC_AVAILABLE:
         logger.warning(
@@ -190,7 +191,7 @@ async def serve(port: int = 50051) -> None:
     await _server.wait_for_termination()
 
 
-async def shutdown(grace: float = 5.0) -> None:
+async def shutdown() -> None:
     """
     Gracefully stop the gRPC server, waiting up to *grace* seconds for
     in-flight RPCs to complete before hard-killing them.
@@ -200,6 +201,7 @@ async def shutdown(grace: float = 5.0) -> None:
     when the container stops.
     """
     global _server
+    grace = settings.grpc_shutdown_grace_seconds
     if _server is not None:
         logger.info("Stopping gRPC server (grace=%.1fs)…", grace)
         await _server.stop(grace)

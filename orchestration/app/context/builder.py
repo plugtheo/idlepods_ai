@@ -18,7 +18,7 @@ from typing import Optional
 
 from shared.contracts.context import BuiltContext, RepoSnippet
 from . import few_shot, hints, repo
-from .repo import _file_fingerprint
+from .repo import CONTENT_PREVIEW_BYTES, _file_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def _compute_fingerprints(allowed_files: list[str], repo_root: Path) -> dict[str
 
 def _validate_snippet(s: dict, repo_root: Path) -> bool:
     try:
-        raw = (repo_root / s["file"]).read_bytes()[:300].decode("utf-8", errors="ignore")
+        raw = (repo_root / s["file"]).read_bytes()[:CONTENT_PREVIEW_BYTES].decode("utf-8", errors="ignore")
         return raw.replace("\n", " ").strip() == s.get("snippet", "")
     except OSError:
         return False

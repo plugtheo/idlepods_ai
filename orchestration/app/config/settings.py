@@ -45,6 +45,14 @@ class OrchestrationSettings(BaseSettings):
         default=180.0,
         description="General HTTP timeout for Inference Service calls.",
     )
+    http_max_connections: int = Field(
+        default=10,
+        description="Max total connections in the httpx pool for Inference Service calls.",
+    )
+    http_max_keepalive_connections: int = Field(
+        default=5,
+        description="Max idle keep-alive connections in the httpx pool for Inference Service calls.",
+    )
     default_max_iterations: int = Field(
         default=5,
         description="Maximum agent-chain iterations when not specified by the caller.",

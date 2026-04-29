@@ -198,17 +198,17 @@ def extract_score_from_text(text: str) -> float | None:
     match = _SCORE_RE.search(text)
     if match:
         value = float(match.group(1))
-        if 0.0 <= value <= 1.0:
+        if 0.0 <= value <= 1.0:  # TODO: Cannot use magic numbers
             return value
-        if 0 < value <= 10:
+        if 0 < value <= 10:  # TODO: Cannot use magic numbers
             return value / 10.0  # normalise 0-10 scale
     return None
 
 
 def heuristic_score(text: str, role: str) -> float:
     """Estimate output quality via lightweight pattern matching."""
-    if not text or len(text.strip()) < 30:
-        return 0.30
+    if not text or len(text.strip()) < 30:   # TODO: Cannot use magic numbers
+        return 0.30  # TODO: Cannot use magic numbers
 
     explicit = extract_score_from_text(text)
     if explicit is not None:
@@ -216,25 +216,25 @@ def heuristic_score(text: str, role: str) -> float:
 
     # Detect adapter metadata leakage (adapter trained on orchestration JSON).
     if _METADATA_LEAKAGE_RE.search(text):
-        return 0.10
+        return 0.10  # TODO: Cannot use magic numbers
 
     if role in ("reviewer", "critic"):
         score = 0.55  # absence of SCORE: is a red flag for these roles
     elif role in ("coder", "debugger"):
         has_code = bool(_CODE_RE.search(text))
         length = len(text.strip())
-        score = 0.60 if not has_code else min(0.75, 0.65 + length / 12000)
+        score = 0.60 if not has_code else min(0.75, 0.65 + length / 12000)  # TODO: Cannot use magic numbers
     else:
         score = 0.62  # planner, researcher, consensus
 
     for pattern in _BLOCKER_PATTERNS:
         if pattern.search(text):
-            score -= 0.12
+            score -= 0.12  # TODO: Cannot use magic numbers
     for pattern in _POSITIVE_PATTERNS:
         if pattern.search(text):
-            score += 0.06
+            score += 0.06  # TODO: Cannot use magic numbers 
 
-    return max(0.0, min(1.0, score))
+    return max(0.0, min(1.0, score))     # TODO: Cannot use magic numbers
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +262,7 @@ def load_samples(role: str, n: int, seed: int = 42) -> list[dict]:
                 continue
             if "instruction" in obj and "response" in obj:
                 # Skip instructions that are too long for a quick eval pass
-                if len(obj["instruction"]) <= 2000:
+                if len(obj["instruction"]) <= 2000:  # TODO: Cannot use magic numbers
                     records.append(obj)
 
     if not records:

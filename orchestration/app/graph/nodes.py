@@ -57,6 +57,9 @@ _optimizer = InferenceOptimizer(
 
 logger = logging.getLogger(__name__)
 
+ROLE_NAME_OVERHEAD_TOKENS = 20  # per-message role/name field cost not counted in content
+LABEL_PADDING_TOKENS = 5        # slack tokens reserved per history label string
+
 
 # ── Per-session token queues ──────────────────────────────────────────────
 #
@@ -158,7 +161,7 @@ def _build_messages(
     fixed_tokens = (
         _estimate_tokens(system_msg.content)
         + _estimate_tokens(user_msg.content)
-        + 20  # role/name overhead per message
+        + ROLE_NAME_OVERHEAD_TOKENS
     )
 
     remaining_budget = (
@@ -188,6 +191,7 @@ def _build_messages(
     if few_shots and fewshot_budget_cap > 0:
         lines = ["Here are relevant past solutions for reference:"]
         used  = _estimate_tokens("\n".join(lines))
+        # [:4] is a defensive guard; upstream retrieval already caps at settings.max_few_shots
         for i, ex in enumerate(few_shots[:4], 1):
             problem  = str(ex.get("problem",  ""))[:settings.fewshot_problem_max_chars]
             solution = str(ex.get("solution", ""))[:settings.fewshot_solution_max_chars]
@@ -210,6 +214,7 @@ def _build_messages(
     if repo_snippets and repo_budget_cap > 0 and role in ("coder", "debugger", "reviewer"):
         repo_lines = ["Relevant code from the repository:"]
         used       = _estimate_tokens("\n".join(repo_lines))
+        # [:5] is a defensive guard; upstream retrieval already caps at settings.max_repo_snippets
         for snip in repo_snippets[:5]:
             entry        = f"[{snip.get('file', '?')}]: {snip.get('snippet', '')[:settings.repo_snippet_max_chars]}"
             entry_tokens = _estimate_tokens(entry)
@@ -237,7 +242,7 @@ def _build_messages(
             h_role    = h.get("role", "agent")
             output    = str(h.get("output") or h.get("full_output", ""))
             label     = f"[prev turn — {h_role}]: "
-            available = conv_hist_budget - used - _estimate_tokens(label) - 5
+            available = conv_hist_budget - used - _estimate_tokens(label) - LABEL_PADDING_TOKENS
             if available <= 0:
                 break
             if _estimate_tokens(output) > available:
@@ -271,7 +276,7 @@ def _build_messages(
             output    = str(h.get("output", ""))
             iter_n    = h.get("iteration", "?")
             label     = f"[iter {iter_n} \u2014 {h_role}]: "
-            available = iter_hist_budget - used - _estimate_tokens(label) - 5
+            available = iter_hist_budget - used - _estimate_tokens(label) - LABEL_PADDING_TOKENS
             if available <= 0:
                 history_lines.append(f"{label}\u2026")
                 break

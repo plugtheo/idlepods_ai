@@ -107,6 +107,5 @@ To avoid re-scanning large repositories, the context builder caches file snippet
 
 After the pipeline completes, the full run (prompt, all agent outputs, scores, timing, agent roles) is saved as an "experience". These are used for two things:
 - Retrieval as few-shot examples to help future agents
-- Training data for the Training Service to fine-tune adapters
 
-
+- Training data for the Training job to fine-tune adapters

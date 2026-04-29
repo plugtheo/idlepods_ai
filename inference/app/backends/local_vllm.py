@@ -162,7 +162,18 @@ def _build_adapter_prompt(messages: list) -> str:
 _ADAPTER_STOP_TOKENS = ["[SYSTEM]", "[USER]", "[ASSISTANT]", "\n[RESPONSE]"]
 
 
+async def get_max_model_len(base_url: str, client: httpx.AsyncClient) -> int:
+    """Query /v1/models and return max_model_len for the primary served model."""
+    resp = await client.get(f"{base_url}/v1/models", timeout=10.0)
+    resp.raise_for_status()
+    data = resp.json().get("data", [])
+    if not data:
+        raise RuntimeError(f"No models returned by {base_url}/v1/models")
+    return int(data[0].get("max_model_len", 0))
+
+
 # How often to re-query /v1/models to discover newly trained adapters
+# NOTE: remote_vllm.py imports this symbol directly; promoting to settings requires updating both.
 ADAPTER_CACHE_TTL_SECONDS = 120
 
 
@@ -184,7 +195,10 @@ class _AdapterRegistry:
         self._timeout = settings.request_timeout_seconds
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
-            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            limits=httpx.Limits(
+                max_connections=settings.http_max_connections,
+                max_keepalive_connections=settings.http_max_keepalive_connections,
+            ),
         )
 
     async def adapter_available(self, adapter_name: str) -> bool:
@@ -269,7 +283,10 @@ class LocalVLLMBackend(InferenceBackend):
         # Persistent connection pool — eliminates per-call TCP setup overhead.
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
-            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            limits=httpx.Limits(
+                max_connections=settings.http_max_connections,
+                max_keepalive_connections=settings.http_max_keepalive_connections,
+            ),
         )
         self._registry = _AdapterRegistry(base_url, model_id)
 
@@ -414,6 +431,22 @@ class LocalVLLMBackend(InferenceBackend):
                     )
                 if token:
                     yield _fix_bpe_artifacts(token)
+
+    async def max_model_len(self) -> int:
+        """Return max_model_len as reported by the vLLM server."""
+        return await get_max_model_len(self._base_url, self._client)
+
+    async def tokenize(self, text: str) -> int:
+        """Return the token count for text as reported by the vLLM server."""
+        resp = await self._client.post(
+            f"{self._base_url}/tokenize",
+            json={"model": self._model_id, "prompt": text},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        tokens = result.get("tokens", [])
+        return len(tokens) if tokens else int(result.get("count", 0))
 
     async def list_adapters(self) -> list[str]:
         """Return names of currently loaded LoRA adapters for this backend."""

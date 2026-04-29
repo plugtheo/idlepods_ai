@@ -55,6 +55,11 @@ from ..utils.scoring import score_iteration
 
 logger = logging.getLogger(__name__)
 
+SHORT_CHAIN_MAX_AGENTS = 2   # chains at or below this length skip the consensus node
+MIN_PER_ITERATION_NODES = 5  # minimum node count assumed per iteration for recursion limit
+PIPELINE_HELPER_NODES = 4    # non-agent nodes per iteration (check_conv, finalize, update_loop, …)
+RECURSION_LIMIT_BUFFER = 15  # extra node budget above the worst-case estimate
+
 
 # ── State-updating node for "continue looping" branch ──────────────────────
 
@@ -102,6 +107,7 @@ async def _finalize_state(state: AgentState) -> dict:
     """
     current_iteration = state.get("current_iteration", 1)
     history = state.get("iteration_history", [])
+    # 0.85 fallback is dead in normal flow: routes/run.py always seeds state from settings.convergence_threshold
     threshold = state.get("convergence_threshold", 0.85)
     best_score = state.get("best_score", 0.0)
     best_output = state.get("best_output", "")
@@ -120,7 +126,7 @@ async def _finalize_state(state: AgentState) -> dict:
     #   2. Quality threshold was actually met — the output is already polished.
     # For longer chains (planner + coder + review_critic etc.) the consensus
     # node provides meaningful integration value and should always run.
-    skip_consensus = quality_converged and len(chain) <= 2
+    skip_consensus = quality_converged and len(chain) <= SHORT_CHAIN_MAX_AGENTS
 
     delta: dict = {
         "best_score": best_score,
@@ -243,5 +249,5 @@ def _recursion_limit(max_iterations: int, chain_length: int) -> int:
     LangGraph counts every node invocation.  With N agents and M iterations:
       worst case = M × (N agents + 1 convergence + 2 helpers) + buffer
     """
-    per_iteration = max(chain_length, 5) + 4
-    return (max_iterations + 1) * per_iteration + 15
+    per_iteration = max(chain_length, MIN_PER_ITERATION_NODES) + PIPELINE_HELPER_NODES
+    return (max_iterations + 1) * per_iteration + RECURSION_LIMIT_BUFFER

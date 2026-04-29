@@ -67,7 +67,10 @@ class RemoteVLLMBackend(InferenceBackend):
             timeout=self._timeout,
             verify=ssl_verify,
             headers=headers,
-            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            limits=httpx.Limits(
+                max_connections=settings.http_max_connections,
+                max_keepalive_connections=settings.http_max_keepalive_connections,
+            ),
         )
         self._registry = _AdapterRegistry(base_url, model_id)
 

@@ -36,8 +36,6 @@ RUN chmod +x /entrypoint.sh
 ENV PYTHONPATH=/app
 
 VOLUME ["/data"]
-EXPOSE 8013
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["uvicorn", "services.training.app.main:app", \
-     "--host", "0.0.0.0", "--port", "8013", "--workers", "1"]
+CMD ["python", "-m", "services.training.app.trainer_wrapper"]

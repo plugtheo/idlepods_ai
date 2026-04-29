@@ -91,6 +91,7 @@ def check_convergence(state: AgentState) -> str:
     """
     current_iteration = state.get("current_iteration", 1)
     max_iterations = state.get("max_iterations", 5)
+    # 0.85 fallback is dead in normal flow: routes/run.py always seeds state from settings.convergence_threshold
     threshold = state.get("convergence_threshold") or 0.85
     history = state.get("iteration_history", [])
     best_score = state.get("best_score", 0.0)

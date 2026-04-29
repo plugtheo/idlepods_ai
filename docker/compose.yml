@@ -21,6 +21,7 @@ volumes:
       type: none
       o: bind
       device: ../data/lora_checkpoints
+  redis_data:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Network
@@ -123,6 +124,7 @@ services:
     ports:
       - "8010:8010"
       - "50051:50051"   # gRPC — internal + host-accessible for direct client access
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')"]
       interval: 15s
@@ -163,7 +165,10 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: redis-server --save "" --appendonly no
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
     networks:
       - idledev
     ports:
@@ -174,37 +179,59 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Training Service ─────────────────────────────────────────────────────
+  # ── Training (one-shot job, cron-triggered by training-scheduler) ────────
+  #
+  # Profile-gated: only runs when invoked via `docker compose run --rm training`.
+  # The wrapper acquires a file-lock at /data/training.lock, optionally stops
+  # vLLM (BLOCK mode), runs trainer_entry per capability, then restarts vLLM.
 
   training:
+    profiles: ["training"]
     build:
       context: ..
       dockerfile: training/Dockerfile
     env_file: ../.env
-    runtime: nvidia          # GPU access for LoRA fine-tuning subprocess
+    runtime: nvidia
     volumes:
       - experiences:/data
       - lora_checkpoints:/data/lora_checkpoints
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./compose.yml:/compose/compose.yml:ro
     environment:
       - TRAINING__JSONL_PATH=/data/experiences.jsonl
       - TRAINING__OUTPUT_DIR=/data/lora_checkpoints
       - TRAINING__HF_TOKEN=${HF_TOKEN:-}
-      # Without these flags the Hugging Face client checks for model updates on
-      # every load, adding latency and failing hard in air-gapped environments.
-      # Models are already downloaded to the HF cache volume at first startup;
-      # disabling the update check prevents unnecessary network calls during training.
+      - TRAINING__TRAINING_TARGET=${TRAINING_TARGET:-local}
+      - TRAINING__TRAINING_TRIGGER_URL=${TRAINING_TRIGGER_URL:-}
+      - TRAINING__TRAINING_EXCLUSIVE_MODE=${TRAINING_EXCLUSIVE_MODE:-BLOCK}
+      - TRAINING__LOCK_PATH=/data/training.lock
+      - TRAINING__COMPOSE_FILE=/compose/compose.yml
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
     networks:
       - idledev
-    ports:
-      - "8013:8013"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8013/health')"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
+
+  # ── Training Scheduler (lightweight interval cron) ───────────────────────
+
+  training-scheduler:
+    build:
+      context: ..
+      dockerfile: training/scheduler/Dockerfile
+    env_file: ../.env
+    volumes:
+      - experiences:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./compose.yml:/compose/compose.yml:ro
+    environment:
+      - TRAINING__JSONL_PATH=/data/experiences.jsonl
+      - TRAINING__SCHEDULER_INTERVAL_HOURS=${SCHEDULER_INTERVAL_HOURS:-4}
+      - TRAINING__LOCK_PATH=/data/training.lock
+      - TRAINING__COMPOSE_FILE=/compose/compose.yml
+      - COMPOSE_FILE=/compose/compose.yml
+    networks:
+      - idledev
+    restart: unless-stopped
 
   # ── Orchestration Service ──────────────────────────────────────────────────
   #
@@ -226,7 +253,7 @@ services:
     environment:
       - ORCHESTRATION__INFERENCE_URL=http://inference:8010
       - ORCHESTRATION__DEFAULT_MAX_ITERATIONS=${ORCHESTRATION__DEFAULT_MAX_ITERATIONS:-2}
-      - ORCHESTRATION__CONVERGENCE_THRESHOLD=${ORCHESTRATION__CONVERGENCE_THRESHOLD:-0.65}
+      - ORCHESTRATION__CONVERGENCE_THRESHOLD=${ORCHESTRATION__CONVERGENCE_THRESHOLD:-0.85}
       - ORCHESTRATION__INFERENCE_USE_GRPC=true
       - ORCHESTRATION__INFERENCE_GRPC_HOST=inference
       - ORCHESTRATION__INFERENCE_GRPC_PORT=50051
@@ -245,6 +272,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 15s
@@ -268,6 +296,7 @@ services:
     depends_on:
       orchestration:
         condition: service_healthy
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 15s

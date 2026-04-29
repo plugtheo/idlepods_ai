@@ -97,12 +97,12 @@ _CAPABILITY_TO_ADAPTER: dict[str, str] = {
     "critic":     "criticism_lora",
 }
 
-MIN_QUALITY_SCORE  = 0.65
-# Refuse to train if fewer than this many SFT pairs exist — avoids catastrophic
-# fine-tuning on almost no data which can destroy the adapter weights.
-MIN_SFT_PAIRS      = 10
-# Maximum total SFT pairs to train on per run (keeps runtime reasonable)
-MAX_TRAINING_SAMPLES = 10_000
+# Safety floors — keep as module constants, do NOT promote to env.
+# These guard against catastrophic LoRA weight corruption; making them easily
+# configurable invites disabling the guard without understanding the risk.
+MIN_QUALITY_SCORE  = 0.65   # minimum score; records below this are excluded from SFT pairs
+MIN_SFT_PAIRS      = 10     # refuse training on fewer pairs; near-zero data destroys adapter weights
+MAX_TRAINING_SAMPLES = 10_000  # cap to keep training runtime bounded
 
 
 def _is_clean_output(text: str) -> bool:
