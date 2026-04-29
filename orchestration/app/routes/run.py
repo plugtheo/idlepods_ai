@@ -77,6 +77,11 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
     """
     session_id = request.session_id or str(uuid.uuid4())
     task_id = getattr(request, "task_id", None) or session_id
+    if task_id == session_id:
+        logger.debug(
+            "[%s] task_id not supplied — conversation history will not persist across separate sessions.",
+            session_id[:8],
+        )
     allowed_files = getattr(request, "allowed_files", None)
 
     # Use intent/complexity forwarded from the gateway if available — avoids
@@ -141,6 +146,20 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
     return session_id, context_intent, context_complexity, agent_chain, initial_state, rec_limit
 
 
+def _trim_conversation_history(history: list, max_tokens: int) -> list:
+    """Return the most recent entries from history that fit within max_tokens (char-based estimate)."""
+    chars_budget = max_tokens * settings.chars_per_token
+    result: list = []
+    used = 0
+    for entry in reversed(history):
+        chars = len(str(entry.get("output", "")) + str(entry.get("full_output", "")))
+        if used + chars > chars_budget and result:
+            break
+        result.append(entry)
+        used += chars
+    return list(reversed(result))
+
+
 def _build_contributions(history: list) -> List[AgentContribution]:
     """
     Build a list of AgentContribution objects from the pipeline history.
@@ -202,8 +221,11 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
     iterations_ran = final_state.get("current_iteration", 1)
 
     prior_history = initial_state.get("conversation_history", [])
+    combined = _trim_conversation_history(
+        prior_history + history, settings.max_conversation_history_tokens
+    )
     asyncio.create_task(session_store.save_session(
-        initial_state["task_id"], prior_history + history, settings.redis_session_ttl_s
+        initial_state["task_id"], combined, settings.redis_session_ttl_s
     ))
 
     agent_steps = [
@@ -386,8 +408,11 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                     # Persist session history to Redis
                     history = accumulated.get("iteration_history", [])
                     prior_history = initial_state.get("conversation_history", [])
+                    combined = _trim_conversation_history(
+                        prior_history + history, settings.max_conversation_history_tokens
+                    )
                     asyncio.create_task(session_store.save_session(
-                        initial_state["task_id"], prior_history + history, settings.redis_session_ttl_s
+                        initial_state["task_id"], combined, settings.redis_session_ttl_s
                     ))
 
                     # Fire-and-forget experience event

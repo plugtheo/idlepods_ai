@@ -137,11 +137,12 @@ def _build_messages(
     This prevents vLLM from silently truncating from the front of the
     context, which would lose the system prompt and user task.
     """
-    hints             = state.get("system_hints", "")
-    few_shots         = state.get("few_shots", [])
-    repo_snippets     = state.get("repo_snippets", [])
-    user_prompt       = state.get("user_prompt", "")
-    current_iteration = state.get("current_iteration", 1)
+    hints                = state.get("system_hints", "")
+    few_shots            = state.get("few_shots", [])
+    repo_snippets        = state.get("repo_snippets", [])
+    user_prompt          = state.get("user_prompt", "")
+    current_iteration    = state.get("current_iteration", 1)
+    conversation_history = state.get("conversation_history", [])
 
     # Filter history so each agent only sees relevant predecessors.
     raw_history = state.get("iteration_history", [])
@@ -176,14 +177,15 @@ def _build_messages(
         )
         return [system_msg, user_msg]
 
-    history_budget = int(remaining_budget * settings.context_budget_history_ratio)
-    repo_budget    = int(remaining_budget * settings.context_budget_repo_ratio)
-    fewshot_budget = remaining_budget - history_budget - repo_budget
+    repo_budget_cap    = int(remaining_budget * settings.context_budget_repo_ratio)
+    fewshot_budget_cap = int(remaining_budget * max(0.0, 1.0 - settings.context_budget_history_ratio - settings.context_budget_repo_ratio))
+    fewshot_used       = 0
+    repo_used          = 0
 
     messages: List[Message] = [system_msg]
 
     # ── Few-shot block ────────────────────────────────────────────────────
-    if few_shots and fewshot_budget > 0:
+    if few_shots and fewshot_budget_cap > 0:
         lines = ["Here are relevant past solutions for reference:"]
         used  = _estimate_tokens("\n".join(lines))
         for i, ex in enumerate(few_shots[:4], 1):
@@ -195,31 +197,61 @@ def _build_messages(
                 f"Task: {problem}\nSolution: {solution}"
             )
             entry_tokens = _estimate_tokens(entry)
-            if used + entry_tokens > fewshot_budget:
+            if used + entry_tokens > fewshot_budget_cap:
                 break
             lines.append(entry)
             used += entry_tokens
         if len(lines) > 1:
             messages.append(Message(role="user",      content="\n".join(lines)))
             messages.append(Message(role="assistant", content="Understood. I'll use these examples as reference."))
+            fewshot_used = used
 
     # ── Repo snippets block ───────────────────────────────────────────────
-    if repo_snippets and repo_budget > 0 and role in ("coder", "debugger", "reviewer"):
+    if repo_snippets and repo_budget_cap > 0 and role in ("coder", "debugger", "reviewer"):
         repo_lines = ["Relevant code from the repository:"]
         used       = _estimate_tokens("\n".join(repo_lines))
         for snip in repo_snippets[:5]:
             entry        = f"[{snip.get('file', '?')}]: {snip.get('snippet', '')[:settings.repo_snippet_max_chars]}"
             entry_tokens = _estimate_tokens(entry)
-            if used + entry_tokens > repo_budget:
+            if used + entry_tokens > repo_budget_cap:
                 break
             repo_lines.append(entry)
             used += entry_tokens
         if len(repo_lines) > 1:
             messages.append(Message(role="user",      content="\n".join(repo_lines)))
             messages.append(Message(role="assistant", content="I'll keep this repo context in mind."))
+            repo_used = used
+
+    # History gets base allocation plus any surplus freed by repo/fewshot blocks.
+    history_budget   = remaining_budget - fewshot_used - repo_used
+    conv_hist_budget = int(history_budget * settings.context_budget_conv_history_ratio)
+    iter_hist_budget = history_budget - conv_hist_budget
+
+    # ── Conversation history block (cross-turn turns loaded from Redis) ───
+    if conversation_history and conv_hist_budget > 0:
+        conv_lines  = ["Prior conversation context:"]
+        eligible: List[str] = []
+        used        = 0
+        recent_conv = conversation_history[-settings.max_conversation_turns:]
+        for h in reversed(recent_conv):
+            h_role    = h.get("role", "agent")
+            output    = str(h.get("output") or h.get("full_output", ""))
+            label     = f"[prev turn — {h_role}]: "
+            available = conv_hist_budget - used - _estimate_tokens(label) - 5
+            if available <= 0:
+                break
+            if _estimate_tokens(output) > available:
+                char_budget = available * settings.chars_per_token
+                output      = "…" + output[-char_budget:]
+            eligible.append(label + output)
+            used += _estimate_tokens(label + output)
+        if eligible:
+            conv_lines.extend(reversed(eligible))
+            messages.append(Message(role="user",      content="\n".join(conv_lines)))
+            messages.append(Message(role="assistant", content="I have the prior conversation context."))
 
     # ── History block (recency-biased, newest-first) ──────────────────────
-    if iteration_history and history_budget > 0:
+    if iteration_history and iter_hist_budget > 0:
         # history_lookback_iterations controls how many past iterations are
         # eligible (0 = all iterations; 1 = last iteration only; etc.).
         # Budget trimming below handles overflow for any window size.
@@ -239,7 +271,7 @@ def _build_messages(
             output    = str(h.get("output", ""))
             iter_n    = h.get("iteration", "?")
             label     = f"[iter {iter_n} \u2014 {h_role}]: "
-            available = history_budget - used - _estimate_tokens(label) - 5
+            available = iter_hist_budget - used - _estimate_tokens(label) - 5
             if available <= 0:
                 history_lines.append(f"{label}\u2026")
                 break

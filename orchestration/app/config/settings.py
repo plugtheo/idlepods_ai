@@ -152,6 +152,30 @@ class OrchestrationSettings(BaseSettings):
             "Override with ORCHESTRATION__HISTORY_LOOKBACK_ITERATIONS."
         ),
     )
+    context_budget_conv_history_ratio: float = Field(
+        default=0.40,
+        description=(
+            "Fraction of the history budget allocated to cross-turn conversation history "
+            "(loaded from Redis). Remaining fraction goes to within-run iteration history. "
+            "Override with ORCHESTRATION__CONTEXT_BUDGET_CONV_HISTORY_RATIO."
+        ),
+    )
+    max_conversation_turns: int = Field(
+        default=10,
+        description=(
+            "Maximum number of prior conversation turns to inject into agent prompts. "
+            "Most-recent turns are kept; oldest are dropped when this cap is exceeded. "
+            "Override with ORCHESTRATION__MAX_CONVERSATION_TURNS."
+        ),
+    )
+    max_conversation_history_tokens: int = Field(
+        default=2048,
+        description=(
+            "Token cap for the full conversation history persisted to Redis per task_id. "
+            "Oldest entries are trimmed before saving when this cap is exceeded. "
+            "Override with ORCHESTRATION__MAX_CONVERSATION_HISTORY_TOKENS."
+        ),
+    )
     fewshot_problem_max_chars: int = Field(
         default=300,
         description=(

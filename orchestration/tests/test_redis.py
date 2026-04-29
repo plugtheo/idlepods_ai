@@ -22,7 +22,7 @@ class TestGetSession:
         with _patch_client(client):
             result = await get_session("task-abc")
 
-        client.get.assert_called_once_with("session:task-abc")
+        client.get.assert_called_once_with("session:v2:task-abc")
         assert result == history
 
     @pytest.mark.asyncio
@@ -59,7 +59,7 @@ class TestSaveSession:
             await save_session("task-xyz", history, ttl=600)
 
         client.setex.assert_called_once_with(
-            "session:task-xyz", 600, json.dumps(history)
+            "session:v2:task-xyz", 600, json.dumps(history)
         )
 
     @pytest.mark.asyncio
