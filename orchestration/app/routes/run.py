@@ -27,15 +27,16 @@ from typing import List
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from shared.contracts.context import ContextRequest
+from shared.contracts.context import BuiltContext
 from shared.contracts.experience import AgentContribution, ExperienceEvent
 from shared.contracts.orchestration import (
     AgentStep,
     OrchestrationRequest,
     OrchestrationResponse,
 )
-from ..clients.context import fetch_context
-from ..clients.experience import fire_publish_experience
+from ..context import builder
+from ..db import redis as session_store
+from ..experience import jsonl_store, recorder
 from ..config.settings import settings
 from ..graph import nodes as _nodes_module
 from ..graph.nodes import AGENT_FRIENDLY
@@ -75,6 +76,8 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
      initial_state, recursion_limit)
     """
     session_id = request.session_id or str(uuid.uuid4())
+    task_id = getattr(request, "task_id", None) or session_id
+    allowed_files = getattr(request, "allowed_files", None)
 
     # Use intent/complexity forwarded from the gateway if available — avoids
     # double routing.  Fall back to a local QueryRouter pass only when the request
@@ -90,28 +93,37 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
         context_complexity = _route.complexity
         agent_chain = request.agent_chain or _route.agent_chain
 
-    context_req = ContextRequest(
-        prompt=request.prompt,
-        intent=context_intent,
-        complexity=context_complexity,
-        session_id=session_id,
-    )
-    built_context = await fetch_context(context_req)
+    try:
+        built_context = await builder.build(
+            request.prompt, context_intent, context_complexity,
+            task_id=task_id, allowed_files=allowed_files,
+        )
+    except Exception as exc:
+        logger.warning("Context build failed (%s) — proceeding with empty context.", exc)
+        built_context = BuiltContext()
+
+    conversation_history = await session_store.get_session(task_id)
+    if not session_store.is_healthy():
+        logger.warning("Redis unavailable — session history lost for %s", task_id)
 
     max_iterations = request.max_iterations or settings.default_max_iterations
     convergence_threshold = request.convergence_threshold or settings.convergence_threshold
 
     initial_state: AgentState = {
         "session_id": session_id,
+        "task_id": task_id,
         "user_prompt": request.prompt,
         "agent_chain": agent_chain,
         "agent_chain_index": 0,
+        "allowed_files": built_context.allowed_files,
+        "file_fingerprints": built_context.file_fingerprints,
         "few_shots": [ex.model_dump() for ex in built_context.few_shots],
         "repo_snippets": [s.model_dump() for s in built_context.repo_snippets],
         "system_hints": built_context.system_hints,
         "current_iteration": 1,
         "max_iterations": max_iterations,
         "convergence_threshold": convergence_threshold,
+        "conversation_history": conversation_history,
         "iteration_history": [],
         "last_output": "",
         "iteration_scores": [],
@@ -189,6 +201,11 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
     converged = final_state.get("quality_converged", False)
     iterations_ran = final_state.get("current_iteration", 1)
 
+    prior_history = initial_state.get("conversation_history", [])
+    asyncio.create_task(session_store.save_session(
+        initial_state["task_id"], prior_history + history, settings.redis_session_ttl_s
+    ))
+
     agent_steps = [
         AgentStep(
             role=h["role"],
@@ -231,14 +248,18 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
             complexity=context_complexity,
             timestamp=datetime.now(tz=timezone.utc),
         )
-        fire_publish_experience(event)
+        asyncio.create_task(recorder.record(event, jsonl_store.count()))
 
     return response
 
 
 @router.get("/health", summary="Health check")
 async def health() -> dict:
-    return {"status": "ok", "service": "orchestration"}
+    return {
+        "status": "ok",
+        "service": "orchestration",
+        "redis": "ok" if session_store.is_healthy() else "degraded",
+    }
 
 
 # ── Streamable node names (excludes helper/loop nodes) ────────────────────
@@ -362,8 +383,14 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                         "complexity": context_complexity,
                     })
 
-                    # Fire-and-forget experience event
+                    # Persist session history to Redis
                     history = accumulated.get("iteration_history", [])
+                    prior_history = initial_state.get("conversation_history", [])
+                    asyncio.create_task(session_store.save_session(
+                        initial_state["task_id"], prior_history + history, settings.redis_session_ttl_s
+                    ))
+
+                    # Fire-and-forget experience event
                     if final_output and history:
                         event = ExperienceEvent(
                             session_id=session_id,
@@ -379,7 +406,7 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                             complexity=context_complexity,
                             timestamp=datetime.now(tz=timezone.utc),
                         )
-                        fire_publish_experience(event)
+                        asyncio.create_task(recorder.record(event, jsonl_store.count()))
 
                 _nodes_module.unregister_token_queue(session_id)
                 await q.put(None)  # sentinel — tells the generator to stop

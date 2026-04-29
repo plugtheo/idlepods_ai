@@ -4,9 +4,9 @@ LocalVLLMBackend
 Calls a locally running vLLM server via its OpenAI-compatible
 `/v1/chat/completions` endpoint.
 
-One vLLM server process handles one model family (deepseek or mistral).
-The backend maps `model_family` → server URL, then POSTs the standard
-`messages` array.
+Each instance serves one model family (deepseek or mistral) and is
+constructed with the corresponding URL and model ID.  The factory
+(backends/factory.py) creates one singleton instance per family.
 
 Adapter handling
 ----------------
@@ -36,7 +36,7 @@ import httpx
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse
 from ..config.settings import settings
-from .base import InferenceBackend
+from .base import InferenceBackend, InferenceError
 
 # ---------------------------------------------------------------------------
 # GPT-2 / Byte-level BPE artifact correction
@@ -85,7 +85,7 @@ def _fix_bpe_artifacts(text: str) -> str:
     """
     # Fast path: skip the heavier processing when no BPE chars are present.
     # All BPE placeholders live in U+0100–U+0143; check for any char in that range.
-    if not any("\u0100" <= ch <= "\u0143" for ch in text):
+    if not any("Ā" <= ch <= "Ń" for ch in text):
         return text
     try:
         raw = bytes(
@@ -162,11 +162,6 @@ def _build_adapter_prompt(messages: list) -> str:
 _ADAPTER_STOP_TOKENS = ["[SYSTEM]", "[USER]", "[ASSISTANT]", "\n[RESPONSE]"]
 
 
-_FAMILY_MAP: dict[str, tuple[str, str]] = {
-    "deepseek": (settings.deepseek_url, settings.deepseek_model_id),
-    "mistral":  (settings.mistral_url,  settings.mistral_model_id),
-}
-
 # How often to re-query /v1/models to discover newly trained adapters
 ADAPTER_CACHE_TTL_SECONDS = 120
 
@@ -204,6 +199,11 @@ class _AdapterRegistry:
             m.endswith(f"/{adapter_name}") for m in self._known
         )
 
+    async def list_known(self) -> list[str]:
+        """Return the current set of known model/adapter IDs."""
+        await self._refresh_if_stale()
+        return list(self._known)
+
     async def _refresh_if_stale(self) -> None:
         if time.monotonic() - self._fetched_at < self._ttl:
             return
@@ -225,94 +225,118 @@ class _AdapterRegistry:
             )
 
 
-# One registry per vLLM server, created at module load
-_REGISTRIES: dict[str, _AdapterRegistry] = {
-    family: _AdapterRegistry(base_url, model_id)
-    for family, (base_url, model_id) in _FAMILY_MAP.items()
-}
+async def _resolve_model(
+    model_id: str,
+    adapter_name: Optional[str],
+    registry: _AdapterRegistry,
+    role: str,
+) -> str:
+    """
+    Return the model string to send to vLLM.
+
+    - No adapter requested  → base model ID
+    - Adapter requested + available in vLLM  → "{model_id}/{adapter_name}"
+    - Adapter requested but NOT yet registered  → base model ID (fallback, warning logged)
+    """
+    if not adapter_name:
+        return model_id
+
+    if await registry.adapter_available(adapter_name):
+        return adapter_name  # vLLM uses the bare adapter name as the model field
+
+    logger.warning(
+        "Adapter '%s' for role '%s' is not registered with vLLM — "
+        "falling back to base model '%s'. "
+        "The Training Service will produce it once enough experiences accumulate.",
+        adapter_name, role, model_id,
+    )
+    return model_id
 
 
 class LocalVLLMBackend(InferenceBackend):
-    """Routes generation requests to the appropriate local vLLM server."""
+    """
+    Routes generation requests to a locally running vLLM server.
 
-    def __init__(self) -> None:
+    Each instance serves one model family.  Constructed by the factory with
+    the appropriate URL and model ID for that family.
+    """
+
+    def __init__(self, model_family: str, base_url: str, model_id: str) -> None:
+        self._model_family = model_family
+        self._base_url = base_url
+        self._model_id = model_id
         self._timeout = settings.request_timeout_seconds
         # Persistent connection pool — eliminates per-call TCP setup overhead.
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
             limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
         )
+        self._registry = _AdapterRegistry(base_url, model_id)
 
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
-        family = request.model_family.lower()
-        if family not in _FAMILY_MAP:
-            raise ValueError(
-                f"Unknown model_family '{family}'. Supported: {list(_FAMILY_MAP)}"
-            )
-
-        base_url, model_id = _FAMILY_MAP[family]
-        registry = _REGISTRIES[family]
-
-        # Resolve effective model: prefer adapter if available, fall back to base
         effective_model = await _resolve_model(
-            model_id, request.adapter_name, registry, request.role
+            self._model_id, request.adapter_name, self._registry, request.role
         )
 
         messages = [m.model_dump() for m in request.messages]
-        using_adapter = effective_model != model_id
+        using_adapter = effective_model != self._model_id
 
         logger.debug(
             "LocalVLLM → %s  model=%s  role=%s  msgs=%d  adapter=%s",
-            base_url, effective_model, request.role, len(messages), using_adapter,
+            self._base_url, effective_model, request.role, len(messages), using_adapter,
         )
 
         # Adapter calls: build the canonical prompt string via string concatenation
         # and call /v1/completions.  This guarantees the prompt is byte-for-byte
         # identical to the training format ([SYSTEM]\n…\n\n[USER]\n…\n\n[RESPONSE]\n).
         # Base-model calls keep /v1/chat/completions with the model's native template.
-        if using_adapter:
-            payload = {
-                "model":       effective_model,
-                "prompt":      _build_adapter_prompt(messages),
-                "max_tokens":  request.max_tokens,
-                "temperature": request.temperature,
-                "top_p":       request.top_p,
-                "stop":        _ADAPTER_STOP_TOKENS,
-            }
-            resp = await self._client.post(
-                f"{base_url}/v1/completions",
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = _fix_bpe_artifacts(data["choices"][0]["text"])
-        else:
-            payload = {
-                "model":       effective_model,
-                "messages":    messages,
-                "max_tokens":  request.max_tokens,
-                "temperature": request.temperature,
-                "top_p":       request.top_p,
-            }
-            resp = await self._client.post(
-                f"{base_url}/v1/chat/completions",
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = _fix_bpe_artifacts(data["choices"][0]["message"]["content"])
+        try:
+            if using_adapter:
+                payload = {
+                    "model":       effective_model,
+                    "prompt":      _build_adapter_prompt(messages),
+                    "max_tokens":  request.max_tokens,
+                    "temperature": request.temperature,
+                    "top_p":       request.top_p,
+                    "stop":        _ADAPTER_STOP_TOKENS,
+                }
+                resp = await self._client.post(
+                    f"{self._base_url}/v1/completions",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = _fix_bpe_artifacts(data["choices"][0]["text"])
+            else:
+                payload = {
+                    "model":       effective_model,
+                    "messages":    messages,
+                    "max_tokens":  request.max_tokens,
+                    "temperature": request.temperature,
+                    "top_p":       request.top_p,
+                }
+                resp = await self._client.post(
+                    f"{self._base_url}/v1/chat/completions",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = _fix_bpe_artifacts(data["choices"][0]["message"]["content"])
+        except Exception as exc:
+            raise InferenceError(str(exc)) from exc
+
         tokens_out = data.get("usage", {}).get("completion_tokens", 0)
 
         logger.info(
             "LocalVLLM ← role=%s  family=%s  model=%s  tokens=%d",
-            request.role, family, effective_model, tokens_out,
+            request.role, self._model_family, effective_model, tokens_out,
         )
 
         return GenerateResponse(
             content=content,
-            model_family=family,
+            model_family=self._model_family,
             role=request.role,
             tokens_generated=tokens_out,
             session_id=request.session_id,
@@ -329,20 +353,12 @@ class LocalVLLMBackend(InferenceBackend):
             choices[0].delta.content  -- the new token fragment
         The stream ends with ``data: [DONE]``.
         """
-        family = request.model_family.lower()
-        if family not in _FAMILY_MAP:
-            raise ValueError(
-                f"Unknown model_family '{family}'. Supported: {list(_FAMILY_MAP)}"
-            )
-
-        base_url, model_id = _FAMILY_MAP[family]
-        registry = _REGISTRIES[family]
         effective_model = await _resolve_model(
-            model_id, request.adapter_name, registry, request.role
+            self._model_id, request.adapter_name, self._registry, request.role
         )
 
         messages = [m.model_dump() for m in request.messages]
-        using_adapter = effective_model != model_id
+        using_adapter = effective_model != self._model_id
 
         # Adapter calls use /v1/completions with the canonical prompt string so
         # the input matches the training format byte-for-byte.  Base-model fallback
@@ -359,7 +375,7 @@ class LocalVLLMBackend(InferenceBackend):
                 "stop":        _ADAPTER_STOP_TOKENS,
                 "stream":      True,
             }
-            stream_endpoint = f"{base_url}/v1/completions"
+            stream_endpoint = f"{self._base_url}/v1/completions"
         else:
             stream_payload = {
                 "model":       effective_model,
@@ -369,7 +385,7 @@ class LocalVLLMBackend(InferenceBackend):
                 "top_p":       request.top_p,
                 "stream":      True,
             }
-            stream_endpoint = f"{base_url}/v1/chat/completions"
+            stream_endpoint = f"{self._base_url}/v1/chat/completions"
 
         async with self._client.stream(
             "POST",
@@ -399,30 +415,21 @@ class LocalVLLMBackend(InferenceBackend):
                 if token:
                     yield _fix_bpe_artifacts(token)
 
+    async def list_adapters(self) -> list[str]:
+        """Return names of currently loaded LoRA adapters for this backend."""
+        return await self._registry.list_known()
 
-async def _resolve_model(
-    model_id: str,
-    adapter_name: Optional[str],
-    registry: _AdapterRegistry,
-    role: str,
-) -> str:
-    """
-    Return the model string to send to vLLM.
-
-    - No adapter requested  → base model ID
-    - Adapter requested + available in vLLM  → "{model_id}/{adapter_name}"
-    - Adapter requested but NOT yet registered  → base model ID (fallback, warning logged)
-    """
-    if not adapter_name:
-        return model_id
-
-    if await registry.adapter_available(adapter_name):
-        return adapter_name  # vLLM uses the bare adapter name as the model field
-
-    logger.warning(
-        "Adapter '%s' for role '%s' is not registered with vLLM — "
-        "falling back to base model '%s'. "
-        "The Training Service will produce it once enough experiences accumulate.",
-        adapter_name, role, model_id,
-    )
-    return model_id
+    async def health(self) -> dict:
+        """Check the vLLM server's health endpoint."""
+        try:
+            resp = await self._client.get(f"{self._base_url}/health", timeout=5.0)
+            resp.raise_for_status()
+            status = "ok"
+        except Exception as exc:
+            logger.warning("Health check failed for %s: %s", self._base_url, exc)
+            status = "unavailable"
+        return {
+            "status": status,
+            "backend": "local_vllm",
+            "url": self._base_url,
+        }

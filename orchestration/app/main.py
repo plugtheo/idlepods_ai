@@ -23,9 +23,7 @@ async def lifespan(app: FastAPI):
     _log.info("Orchestration Service started on port %d", settings.port)
     yield
     from .clients.inference import close_inference_client
-    from .clients.context import close as close_context_client
     await close_inference_client()
-    await close_context_client()
 
 
 app = FastAPI(

@@ -2,13 +2,16 @@
 Orchestration Service — settings
 ==================================
 ORCHESTRATION__INFERENCE_URL     — base URL of Inference Service
-ORCHESTRATION__CONTEXT_URL       — base URL of Context Service
-ORCHESTRATION__EXPERIENCE_URL    — base URL of Experience Service
-ORCHESTRATION__CONTEXT_TIMEOUT   — max seconds to wait for context enrichment
 ORCHESTRATION__REQUEST_TIMEOUT   — general HTTP timeout for internal calls
 ORCHESTRATION__PORT              — port this service listens on
 ORCHESTRATION__DEFAULT_MAX_ITER  — default max agent-chain iterations
 ORCHESTRATION__CONVERGENCE_THRESHOLD — default quality score to stop looping
+
+ORCHESTRATION__JSONL_PATH        — append-only experience file
+ORCHESTRATION__MIN_BATCH_SIZE    — minimum records before training trigger
+ORCHESTRATION__TRAINING_URL      — Training Service base URL
+ORCHESTRATION__EMBEDDING_MODEL   — sentence-transformers model for embeddings
+ORCHESTRATION__CHROMADB_HOST     — empty = local PersistentClient; set = HttpClient
 
 Agent constants (AGENT_PROMPTS, role_max_tokens, role_model_family, role_adapter)
 are also exported from this module so nodes.py has a single import point.
@@ -37,21 +40,6 @@ class OrchestrationSettings(BaseSettings):
     inference_url: str = Field(
         default="http://inference:8010",
         description="Base URL of the Inference Service.",
-    )
-    context_url: str = Field(
-        default="http://context:8011",
-        description="Base URL of the Context Service.",
-    )
-    experience_url: str = Field(
-        default="http://experience:8012",
-        description="Base URL of the Experience Service (fire-and-forget after convergence).",
-    )
-    context_timeout: float = Field(
-        default=2.0,
-        description=(
-            "Seconds to wait for Context Service before continuing with empty context. "
-            "Circuit breaker — never lets a slow context call fail the user request."
-        ),
     )
     request_timeout: float = Field(
         default=180.0,
@@ -240,6 +228,95 @@ class OrchestrationSettings(BaseSettings):
             "Maximum characters kept per extracted structured field value "
             "(SCORE, ISSUES, SUGGESTIONS, etc.) when structured_extraction is enabled. "
             "Override with ORCHESTRATION__STRUCTURED_FIELD_VALUE_MAX_CHARS."
+        ),
+    )
+
+    # ── Experience recording (formerly the Experience Service) ────────────
+    jsonl_path: str = Field(
+        default="/data/experiences.jsonl",
+        description="Append-only JSONL file for experience records.",
+    )
+    min_batch_size: int = Field(
+        default=50,
+        description=(
+            "Minimum stored experiences before a training trigger is attempted. "
+            "Single source of truth — replaces the duplicated value previously in "
+            "both experience/ and training/ settings."
+        ),
+    )
+    training_url: str = Field(
+        default="http://training:8013",
+        description="Training Service base URL for LoRA trigger notifications.",
+    )
+
+    # ── Context enrichment (formerly the Context Service) ─────────────────
+    embedding_model: str = Field(
+        default="sentence-transformers/all-MiniLM-L6-v2",
+        description="Sentence-transformers model for embedding prompts.",
+    )
+    max_few_shots: int = Field(
+        default=4,
+        description="Maximum number of past examples to include in context.",
+    )
+    similarity_threshold: float = Field(
+        default=0.68,
+        ge=0.0,
+        le=1.0,
+        description="Minimum cosine similarity for a past example to be included.",
+    )
+    repo_path: str = Field(
+        default=".",
+        description="Root of the repo to scan for relevant code snippets.",
+    )
+    max_repo_snippets: int = Field(
+        default=3,
+        description="Maximum number of repo snippets to return.",
+    )
+
+    # ── ChromaDB client (Task 3) ──────────────────────────────────────────
+    # CHROMADB_HOST empty (default) → local PersistentClient at CHROMADB_PATH.
+    # CHROMADB_HOST set             → HttpClient connecting to a ChromaDB server.
+    chromadb_host: str = Field(
+        default="",
+        description=(
+            "ChromaDB server hostname. Empty = use local PersistentClient. "
+            "Set to 'chromadb' (and uncomment the chromadb service in compose.yml) "
+            "to switch to a standalone ChromaDB server."
+        ),
+    )
+    chromadb_port: int = Field(
+        default=8000,
+        description="ChromaDB HTTP server port (only used when chromadb_host is set).",
+    )
+    chromadb_ssl: bool = Field(
+        default=False,
+        description="Use SSL when connecting to the ChromaDB HTTP server.",
+    )
+    chromadb_path: str = Field(
+        default="/data/vector_store",
+        description=(
+            "Local file path for ChromaDB PersistentClient storage. "
+            "Only used when chromadb_host is empty."
+        ),
+    )
+    chromadb_collection: str = Field(
+        default="experiences",
+        description="ChromaDB collection name for experience vectors.",
+    )
+
+    # ── Redis session store ───────────────────────────────────────────────────
+    redis_url: str = Field(
+        default="redis://redis:6379",
+        description=(
+            "Redis connection URL for the session history store. "
+            "Override with ORCHESTRATION__REDIS_URL."
+        ),
+    )
+    redis_session_ttl_s: int = Field(
+        default=3600,
+        description=(
+            "TTL in seconds for session history keys in Redis. "
+            "Override with ORCHESTRATION__REDIS_SESSION_TTL_S."
         ),
     )
 

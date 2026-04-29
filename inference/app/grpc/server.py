@@ -3,7 +3,7 @@ Inference Service — gRPC server
 ================================
 Runs an async gRPC server alongside the FastAPI/uvicorn HTTP server.
 Both transports share the same backend logic via
-``services.inference.app.backends.factory.get_backend()``.
+``services.inference.app.backends.factory.get_backend(model_family)``.
 
 Port: configurable via ``INFERENCE__GRPC_PORT`` (default 50051).
 
@@ -100,7 +100,7 @@ if _GRPC_AVAILABLE:
         ) -> "inference_pb2.GenerateResponse":
             try:
                 pydantic_req = _build_pydantic_request(request)
-                backend = get_backend()
+                backend = get_backend(pydantic_req.model_family)
                 response = await backend.generate(pydantic_req)
                 return inference_pb2.GenerateResponse(
                     content=response.content,
@@ -123,7 +123,7 @@ if _GRPC_AVAILABLE:
             """
             try:
                 pydantic_req = _build_pydantic_request(request)
-                backend = get_backend()
+                backend = get_backend(pydantic_req.model_family)
                 token_count = 0
                 async for token in backend.generate_stream(pydantic_req):
                     token_count += 1

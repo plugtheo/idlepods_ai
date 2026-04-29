@@ -20,12 +20,45 @@ class InferenceSettings(BaseSettings):
         extra="ignore",
     )
 
-    # ── Local vLLM URLs ───────────────────────────────────────────────────
+    # ── DeepSeek backend config ───────────────────────────────────────────
+    deepseek_backend: str = Field(
+        default="local_vllm",
+        description=(
+            "Backend type for DeepSeek family: 'local_vllm' (default) or 'remote_vllm'. "
+            "Set to 'remote_vllm' and point INFERENCE__DEEPSEEK_URL at any "
+            "OpenAI-compatible endpoint to route DeepSeek agent calls there."
+        ),
+    )
     deepseek_url: str = Field(
         default="http://vllm-deepseek:8000",
         description=(
             "Base URL of the DeepSeek vLLM OpenAI-compatible server. "
             "Override to http://localhost:8000 for bare-metal local runs."
+        ),
+    )
+    deepseek_model_id: str = Field(
+        default="deepseek-ai/deepseek-coder-6.7b-instruct",
+        description="HuggingFace model ID served by the DeepSeek vLLM server.",
+    )
+    deepseek_auth_token: str = Field(
+        default="",
+        description=(
+            "Optional Bearer token for secured remote DeepSeek endpoints. "
+            "Only used when deepseek_backend=remote_vllm."
+        ),
+    )
+    deepseek_ssl_verify: bool = Field(
+        default=True,
+        description="Verify SSL certificates for remote DeepSeek connections.",
+    )
+
+    # ── Mistral backend config ────────────────────────────────────────────
+    mistral_backend: str = Field(
+        default="local_vllm",
+        description=(
+            "Backend type for Mistral family: 'local_vllm' (default) or 'remote_vllm'. "
+            "Set to 'remote_vllm' and point INFERENCE__MISTRAL_URL at any "
+            "OpenAI-compatible endpoint to route Mistral agent calls there."
         ),
     )
     mistral_url: str = Field(
@@ -35,15 +68,20 @@ class InferenceSettings(BaseSettings):
             "Override to http://localhost:8001 for bare-metal local runs."
         ),
     )
-
-    # ── Local model identifiers (used in vLLM /v1/chat/completions 'model' field) ─
-    deepseek_model_id: str = Field(
-        default="deepseek-ai/deepseek-coder-6.7b-instruct",
-        description="HuggingFace model ID served by the DeepSeek vLLM server.",
-    )
     mistral_model_id: str = Field(
         default="mistralai/Mistral-7B-Instruct-v0.1",
         description="HuggingFace model ID served by the Mistral vLLM server.",
+    )
+    mistral_auth_token: str = Field(
+        default="",
+        description=(
+            "Optional Bearer token for secured remote Mistral endpoints. "
+            "Only used when mistral_backend=remote_vllm."
+        ),
+    )
+    mistral_ssl_verify: bool = Field(
+        default=True,
+        description="Verify SSL certificates for remote Mistral connections.",
     )
 
     # ── HTTP client settings ──────────────────────────────────────────────

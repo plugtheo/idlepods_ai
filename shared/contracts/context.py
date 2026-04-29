@@ -10,7 +10,7 @@ The Context Service performs two jobs per request:
 Both results are bundled into `BuiltContext` and returned to the caller.
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -27,6 +27,12 @@ class ContextRequest(BaseModel):
     )
     session_id: Optional[str] = Field(
         default=None, description="Opaque string for log correlation."
+    )
+    task_id: Optional[str] = Field(
+        default=None, description="Stable identifier scoping multi-turn context state."
+    )
+    allowed_files: Optional[List[str]] = Field(
+        default=None, description="Repo-relative POSIX paths the builder is allowed to scan."
     )
 
 
@@ -63,4 +69,16 @@ class BuiltContext(BaseModel):
     system_hints: str = Field(
         default="",
         description="Any guidance string to inject into every agent system prompt this request.",
+    )
+    task_id: str = Field(
+        default="",
+        description="Stable identifier scoping multi-turn context state.",
+    )
+    allowed_files: List[str] = Field(
+        default_factory=list,
+        description="Repo-relative POSIX paths the builder was allowed to scan.",
+    )
+    file_fingerprints: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-file fingerprints captured during this build (path → first-line hash).",
     )

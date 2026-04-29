@@ -35,7 +35,14 @@ docker-compose.*.yml
 *.sqlite3
 *.db
 
-data/experiences.jsonl
-data/cli_sessions/
-data/lora_checkpoints/
-data/vector_store/
+data/
+
+# Claude
+plans/
+plans/archive
+
+scripts/eval_reports/
+
+archive_current_task.py
+
+architecture_overview.md

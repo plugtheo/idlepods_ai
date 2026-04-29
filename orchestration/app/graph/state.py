@@ -23,6 +23,9 @@ class AgentState(TypedDict, total=False):
     session_id: str
     """Unique identifier for this pipeline run (set by Orchestration at start)."""
 
+    task_id: str
+    """Stable multi-turn identifier; falls back to session_id when not supplied by the caller."""
+
     user_prompt: str
     """Original raw prompt from the user."""
 
@@ -32,6 +35,13 @@ class AgentState(TypedDict, total=False):
 
     agent_chain_index: int
     """Current position within agent_chain (0-based). Incremented by each agent node."""
+
+    # ── File gate & diff state ────────────────────────────────────────────
+    allowed_files: List[str]
+    """Repo-relative POSIX paths the context builder is permitted to scan."""
+
+    file_fingerprints: Dict[str, Any]
+    """Per-file fingerprints from the last context build (path → first-line string)."""
 
     # ── Context enrichment (set once before the loop starts) ─────────────
     few_shots: List[Dict[str, Any]]
@@ -54,6 +64,9 @@ class AgentState(TypedDict, total=False):
     """Quality score threshold to consider the output converged."""
 
     # ── Agent outputs ─────────────────────────────────────────────────────
+    conversation_history: List[Dict[str, Any]]
+    """Prior multi-turn exchanges loaded from Redis at request start."""
+
     iteration_history: List[Dict[str, Any]]
     """
     Every agent step across all iterations, in order.

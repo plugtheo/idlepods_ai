@@ -14,9 +14,9 @@ POST /v1/generate/stream
         {"token": "",           "is_final": true }   — final sentinel
 
 Health check — GET /health
-    Returns {"status": "ok", "mode": "<active mode>"} to allow Docker /
-    Compose healthchecks and Orchestration's circuit breaker to verify
-    the service is reachable.
+    Returns per-model-family backend status including loaded adapter list.
+    If a backend is unreachable, reports "status": "unavailable" for that
+    family without failing the overall health check.
 """
 
 from __future__ import annotations
@@ -42,14 +42,9 @@ router = APIRouter()
     summary="Generate a model response",
 )
 async def generate(request: GenerateRequest) -> GenerateResponse:
-    """
-    Run one LLM inference call.
-
-    - In **local** mode hits the vLLM server matching `model_family`.
-    - Calls the local vLLM servers for all requests.
-    """
+    """Run one LLM inference call via the backend for request.model_family."""
     try:
-        backend = get_backend()
+        backend = get_backend(request.model_family)
         return await backend.generate(request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -71,7 +66,7 @@ async def generate_stream(request: GenerateRequest) -> StreamingResponse:
     Errors are reported as ``{"error": "<message>"}`` before the connection
     closes.
     """
-    backend = get_backend()
+    backend = get_backend(request.model_family)
 
     async def _token_stream():
         try:
@@ -95,5 +90,35 @@ async def generate_stream(request: GenerateRequest) -> StreamingResponse:
 
 @router.get("/health", summary="Health check")
 async def health() -> dict:
-    """Returns the service status and active inference mode."""
-    return {"status": "ok", "mode": settings.mode}
+    """
+    Returns per-family backend status including currently loaded adapter list.
+
+    A single unreachable backend reports "unavailable" for its family but
+    does not cause the whole health check to fail.
+    """
+    backends_status: dict = {}
+
+    for family in ("deepseek", "mistral"):
+        try:
+            backend = get_backend(family)
+            backend_health = await backend.health()
+            adapters = await backend.list_adapters()
+            backends_status[family] = {
+                "type": backend_health.get("backend", "unknown"),
+                "url": backend_health.get("url", ""),
+                "status": backend_health.get("status", "unknown"),
+                "adapters_loaded": adapters,
+            }
+        except Exception as exc:
+            logger.warning("Health check error for %s: %s", family, exc)
+            backends_status[family] = {
+                "status": "unavailable",
+                "error": str(exc),
+            }
+
+    overall = (
+        "ok"
+        if all(b.get("status") == "ok" for b in backends_status.values())
+        else "degraded"
+    )
+    return {"status": overall, "backends": backends_status}

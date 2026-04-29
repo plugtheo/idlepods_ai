@@ -1,160 +1,94 @@
 # Inference Service
 
-## What it does
+## Purpose
 
-The Inference Service is the **only part of the system that talks to AI language models**. No other service calls a model directly — they all go through here.
+The Inference Service is the only part of the system that calls language models. It's a switchboard operator: it receives a conversation from the Orchestration Service, routes it to the right model (based on agent role and task type), applies a fine-tuned adapter if needed, and returns the generated text.
 
-Think of it as a switchboard operator: it receives a conversation (a list of messages) from the Orchestration Service, figures out which model to send it to, calls that model, and returns the response. Callers do not need to know anything about *which* model is running underneath or *where* it lives.
+The value of this service compounds when you have multiple model backends, remote vLLM instances, or need to A/B different backends per role thin setups don't benefit much.
 
-Here is what happens every time the Inference Service receives a request:
+## Core Components
 
-### Step 1 — Receive the request
+- **InferenceBackend** (abstract base): Defines the interface every backend must implement. Callers don't need to know which concrete backend is active.
 
-The Orchestration Service sends a request that includes:
-- The full conversation so far (a sequence of messages between the "system", the "user", and the AI assistant)
-- Which **model family** to use (`deepseek` for code-focused work, `mistral` for planning and analysis)
-- Which **agent role** is making the call (e.g. `coder`, `planner`, `critic`)
-- An optional **adapter name** — a fine-tuned specialisation to apply on top of the base model
-- Generation settings: how many tokens to produce, how creative to be (`temperature`), etc.
+- **LocalVLLMBackend**: The main implementation. Calls vLLM (a fast inference server) over HTTP. Routes requests to either DeepSeek (better for code) or Mistral (better for language/reasoning) based on the agent role.
 
-### Step 2 — Dispatch to the right backend
+- **Adapter Registry** (`_AdapterRegistry`): Maintains a cache of available LoRA adapters. Periodically checks the vLLM server to discover newly trained adapters. Allows on-the-fly application of specialized fine-tuned weights.
 
-The service is configured to use local vLLM servers for all inference requests.
+- **Generate Route**: HTTP endpoint that accepts requests, forwards them to the backend, and returns the generated text.
 
-The service calls one of two **vLLM** servers running locally on GPUs:
+- **gRPC Server**: A parallel high-performance server (binary protocol instead of JSON) for when Orchestration calls this service at high frequency.
 
-| Model family | vLLM server | Default port |
-|---|---|---|
-| `deepseek` | `vllm-deepseek` | 8000 |
-| `mistral` | `vllm-mistral` | 8001 |
+## Key Interactions
 
-vLLM is a high-performance engine for running open-source language models. It exposes an API that looks like OpenAI's, so the Inference Service just sends an HTTP request to it.
+### With Orchestration Service
+- **Incoming**: GenerateRequest with:
+  - Messages (conversation history)
+  - Agent role (determines which model)
+  - Adapter name (optional, for fine-tuned specialist behavior)
+  - Generation parameters (max tokens, temperature, top_p)
 
-**LoRA adapters:** If an adapter name is provided (e.g. `coding_lora`), the service first checks whether that adapter is currently loaded on the vLLM server (vLLM caches a list of loaded adapters with a 2-minute refresh). If it is loaded, the request is sent with the model identifier set to `base_model/adapter_name`, which tells vLLM to apply the specialised fine-tuning. If the adapter is not loaded, the request falls back to the base model with a warning in the logs.
+- **Outgoing**: GenerateResponse with:
+  - Generated text
+  - Token count
 
-### Step 3 — Return the response
+### With vLLM Servers
+- Calls vLLM's HTTP API endpoints to request text generation
+- Queries `/v1/models` to check which adapters are loaded
+- vLLM handles the actual model execution on GPU
 
-The model's reply is returned to the Orchestration Service as a `GenerateResponse` containing the generated text and token count.
+## Important Concepts
 
----
+### LoRA Adapters
 
-## gRPC interface
+Fine-tuned neural network weights layered on top of a frozen base model. Adapters are small (a few MB) and fast to train, yet teach the model new behaviors for specific tasks. Each agent role has an associated adapter:
+- `coding_lora` — trained on coding examples
+- `debugging_lora` — trained on debugging examples
+- `planning_lora` — trained on planning examples
 
-In addition to the standard HTTP API, the Inference Service also runs a **gRPC server** on port 50051. gRPC is a high-performance alternative to HTTP that uses a binary message format instead of JSON, which reduces overhead for high-frequency calls.
+When the Training Service completes training, it writes an adapter file to disk. vLLM auto-discovers it, and this service can immediately apply it.
 
-The Docker Compose configuration enables this by default — the Orchestration Service is configured to use gRPC to talk to Inference, not HTTP. The HTTP endpoint still exists and can be used for testing or when gRPC is not needed.
+### Model Families
 
----
+Two base models:
+- **DeepSeek** (code-focused): Better at writing, understanding, and fixing code
+- **Mistral** (language-focused): Better at reasoning, planning, analysis
 
-## API
+The service routes each request to the appropriate model based on the agent role.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/v1/generate` | Generate a response from the configured language model |
-| `GET`  | `/health` | Liveness probe — also reports current backend status |
+### Prompt Format for Adapters
 
-### Request — `POST /v1/generate`
+Adapters were trained with a specific message format. If the prompt at inference doesn't match the training format exactly, the model produces poor output. The format is:
+```
+[SYSTEM]
+<system message>
 
-```json
-{
-  "model_family": "deepseek",
-  "role": "coder",
-  "messages": [
-    {"role": "system", "content": "You are an expert Python developer."},
-    {"role": "user", "content": "Write a thread-safe singleton."}
-  ],
-  "adapter_name": "coding_lora",
-  "max_tokens": 2048,
-  "temperature": 0.2,
-  "top_p": 0.95,
-  "session_id": "optional-uuid"
-}
+[USER]
+<user message>
+
+[RESPONSE]
+<model output>
 ```
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `model_family` | Yes | `deepseek` or `mistral` |
-| `role` | Yes | Agent role name, used for model selection and routing |
-| `messages` | Yes | The conversation history as a list of `{role, content}` objects |
-| `adapter_name` | No | Name of a LoRA adapter to apply (local mode only). Omit to use the base model |
-| `max_tokens` | No | Maximum number of tokens to generate (default 1024) |
-| `temperature` | No | Randomness (0 = deterministic, 1 = very creative; default 0.2) |
-| `top_p` | No | Nucleus sampling threshold (default 0.95) |
-| `session_id` | No | Optional ID for log tracing |
+This must be byte-for-byte identical at training and inference time.
 
-### Response
+### Dual Interface (HTTP and gRPC)
 
-```json
-{
-  "content": "Here is a thread-safe singleton implementation...",
-  "model_family": "deepseek",
-  "role": "coder",
-  "tokens_generated": 412,
-  "session_id": "optional-uuid"
-}
-```
+The service listens on both HTTP and gRPC. HTTP is easier for testing and calling from other languages. gRPC is faster for high-frequency calls between services (smaller payload, binary protocol). Orchestration can use either based on configuration.
 
----
+### Stop Tokens
 
-## Configuration
+When using adapters, the service sets stop tokens to prevent the model from generating spurious delimiters like `[SYSTEM]` or `[RESPONSE]` mid-answer. These are training artifacts that should never appear in the actual output.
 
-All configuration is supplied via environment variables with the `INFERENCE__` prefix.
+### Temperature and Sampling
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `INFERENCE__DEEPSEEK_URL` | `http://vllm-deepseek:8000` | URL of the DeepSeek vLLM server |
-| `INFERENCE__MISTRAL_URL` | `http://vllm-mistral:8001` | URL of the Mistral vLLM server |
-| `INFERENCE__DEEPSEEK_MODEL_ID` | `deepseek-ai/deepseek-coder-6.7b-instruct` | The model ID loaded on the DeepSeek vLLM server |
-| `INFERENCE__MISTRAL_MODEL_ID` | `mistralai/Mistral-7B-Instruct-v0.1` | The model ID loaded on the Mistral vLLM server |
-| `INFERENCE__REQUEST_TIMEOUT_SECONDS` | `120.0` | Seconds to wait for a model response before giving up |
-| `INFERENCE__PORT` | `8010` | Port this HTTP service listens on |
-| `INFERENCE__GRPC_PORT` | `50051` | Port the gRPC server listens on |
+Generation parameters control randomness:
+- **temperature**: Higher = more creative (0.2 is precise, 1.0 is very creative)
+- **top_p**: Nucleus sampling; only consider the most likely tokens
 
-Per-role model overrides can also be set via `INFERENCE__ROLE_MODEL_OVERRIDES` as a JSON object to send specific agent roles to different model endpoints.
+### Benefits of the inference intermediary
 
----
+  - **Protocol abstraction** — orchestration can switch between HTTP and gRPC (ORCHESTRATION__INFERENCE_USE_GRPC=true) without knowing which vLLM instance it's talking to. That toggle lives in one place.
+  - **Adapter management** — the AdapterRegistry tracks which LoRA adapters are loaded on which vLLM server and refreshes them on a schedule. Without it, orchestration would need to know adapter-to-model mappings itself.
+  - **Backend swappability** — factory.py dispatches to local_vllm, remote_vllm, etc. via the INFERENCE__*_BACKEND env vars. You can point a model family at a remote server without touching orchestration at all.
+  - **Single healthcheck surface** — orchestration only needs to depend on inference being healthy, not on both vllm services individually
 
-## What it talks to
-
-| Downstream | How | Why |
-|---|---|---|
-| vLLM servers (`vllm-deepseek`, `vllm-mistral`) | HTTP (OpenAI-compatible API) | Run open-source models in local mode |
-
-The Inference Service has no database and stores no data.
-
----
-
-## Running locally
-
-```bash
-docker compose -f docker/compose.yml up inference vllm-deepseek vllm-mistral
-```
-
----
-
-## Structure
-
-```
-app/
-  config/settings.py      — all environment variable config
-  backends/
-    base.py               — shared interface that every backend implements
-    local_vllm.py         — calls vLLM via HTTP; manages adapter availability cache
-    factory.py            — returns the local vLLM backend singleton
-  grpc/
-    server.py             — gRPC server (runs alongside the HTTP server)
-  routes/generate.py      — POST /v1/generate and GET /health
-  main.py                 — FastAPI application entry point
-```
-
-## Local model setup
-
-Models must be downloaded to your HuggingFace cache before running locally:
-
-```bash
-huggingface-cli download deepseek-ai/deepseek-coder-6.7b-instruct
-huggingface-cli download mistralai/Mistral-7B-Instruct-v0.1
-```
-
-The vLLM containers mount `HF_CACHE_DIR` (default `~/.cache/huggingface`) so
-no manual copying is needed.

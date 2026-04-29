@@ -46,6 +46,14 @@ class OrchestrationRequest(BaseModel):
         default=None,
         description="Opaque string for log correlation. Auto-generated if not supplied.",
     )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable identifier scoping multi-turn context state. Falls back to session_id when absent.",
+    )
+    allowed_files: Optional[List[str]] = Field(
+        default=None,
+        description="Repo-relative POSIX paths the context builder is permitted to scan. None means unrestricted.",
+    )
 
 
 class AgentStep(BaseModel):

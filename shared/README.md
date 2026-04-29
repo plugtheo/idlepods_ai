@@ -1,97 +1,68 @@
-# Shared Package
+# Shared Module
 
-## What this is
+## Purpose
 
-The `shared/` package contains three things:
-1. **Data contracts** — the Pydantic models that define exactly what data is sent between each pair of services
-2. **Routing logic** — the `QueryRouter` classifier, shared between Gateway and Orchestration so routing behaviour is always identical
-3. **gRPC stubs** — auto-generated Python code for the binary communication protocol used between Orchestration and Inference
+The Shared module is the contract layer — the single source of truth for how all services communicate. It defines the data models (Pydantic classes) that pass between services. By keeping definitions in one place, all services speak the same language and avoid reimplementing the same structures with drift.
 
-This is the only place where inter-service message formats are defined. If a field needs to change, it changes here and every service that uses it picks up the change automatically.
+## Core Components
 
----
+- **Contracts** (`contracts/`): Pydantic models that define request and response shapes for each service-to-service interaction. Examples:
+  - `orchestration.py` — OrchestrationRequest (what Gateway sends), OrchestrationResponse (what Orchestration returns)
+  - `inference.py` — GenerateRequest (what Orchestration sends), GenerateResponse (what Inference returns)
+  - `context.py` — BuiltContext (enriched prompt context)
+  - `experience.py` — ExperienceEvent (completed pipeline run)
 
-## Why a shared package?
+- **QueryRouter** (`routing/query_router.py`): A shared prompt classifier. Both Gateway and Orchestration import it, ensuring consistent routing behavior everywhere.
 
-Each microservice runs in its own container, but they all need to agree on the shape of the data they exchange. Without a shared package, each service would have its own copy of these definitions — and they would inevitably drift out of sync as the system evolves. Centralising the contracts here means:
-- A type error (wrong field name, wrong type) is caught at import time, not at runtime
-- You can see in one place exactly what every service sends and expects to receive
+- **gRPC Stubs** (`grpc_stubs/`): Auto-generated Python bindings for the binary protocol between Orchestration and Inference. Generated from `.proto` files; not hand-edited.
 
----
+## Why It Exists
 
-## Data contracts
+Each service runs in its own container, but they must agree on data formats. Without a shared package, each would maintain its own copy of these models — and they would drift as the system evolves:
 
-All contracts are in `shared/contracts/`. Each file is a set of **Pydantic models** — Python classes that enforce field types and required vs. optional fields automatically.
+- Wrong field names go undetected until runtime
+- Type mismatches (string vs. int) cause silent failures
+- Adding a field requires coordinating changes across multiple services
 
-| File | Models defined | Which services use it |
-|------|---------------|----------------------|
-| `inference.py` | `Message`, `GenerateRequest`, `GenerateResponse` | Orchestration sends requests; Inference receives and responds |
-| `context.py` | `ContextRequest`, `BuiltContext`, `FewShotExample`, `RepoSnippet` | Orchestration sends requests; Context receives and responds |
-| `orchestration.py` | `OrchestrationRequest`, `OrchestrationResponse`, `AgentStep` | Gateway sends requests; Orchestration receives and responds; response flows back to the user |
-| `experience.py` | `ExperienceEvent`, `AgentContribution` | Orchestration publishes; Experience receives |
-| `training.py` | `TrainingTriggerRequest`, `TrainingTriggerResponse` | Experience publishes; Training receives |
+Centralizing here means:
+- Type errors are caught at import time
+- Single source of truth for every contract
+- Changes ripple automatically to all callers
 
-### What is Pydantic?
+## Important Concepts
 
-Pydantic is a Python library for data validation. When you create a Pydantic model instance with a dictionary of data (e.g. from an HTTP request body), Pydantic automatically:
-- Checks that all required fields are present
-- Converts field values to the expected types (e.g. string `"true"` → bool `True`)
-- Raises a clear, structured error if any field is wrong
+### Pydantic Models
 
-This means every service boundary in the system has automatic input validation at no extra cost.
+Pydantic enforces data validation automatically. When a service receives JSON and creates a Pydantic model from it:
+- Required fields must be present
+- Field types are validated (string "123" becomes int 123 if the field expects int)
+- Invalid data raises a clear error
 
----
+This means every service boundary has automatic input validation at no extra cost.
 
-## Routing
+### Contract Rules
 
-`shared/routing/query_router.py` contains the `QueryRouter` — the stateless prompt classifier that determines intent and complexity and maps them to an agent chain.
+- **No service imports**: This module doesn't import from gateway, inference, orchestration, etc. It's purely data definitions.
+- **No I/O**: No HTTP calls, database access, or file reads. Pure data models.
+- **Breaking changes require coordination**: Renaming or removing a field means updating every service that uses it in the same change. Adding optional fields (with defaults) is safe.
 
-Both the Gateway Service and the Orchestration Service import `QueryRouter` from here.  Keeping one canonical copy prevents the two services from silently diverging in their routing decisions.
+### Communication Patterns
 
-```python
-from shared.routing.query_router import QueryRouter, RouteDecision
-```
+Services import and use these models for both HTTP and gRPC:
+- **HTTP**: Pydantic automatically serializes to/from JSON
+- **gRPC**: Protocol Buffers serialize to compact binary format
 
----
+Example: `from shared.contracts.inference import GenerateRequest, GenerateResponse`
 
-## gRPC stubs
+### gRPC Protocol
 
-The `shared/grpc_stubs/` directory contains auto-generated Python bindings for the gRPC protocol used between the Orchestration Service and the Inference Service.
+gRPC is a high-performance alternative to HTTP that uses binary serialization (Protocol Buffers). It's faster for frequent inter-service calls. The protocol definitions live in `.proto` files; Python bindings are auto-generated.
 
-**What is gRPC?** It is a high-performance communication protocol that uses a compact binary format (Protocol Buffers) instead of JSON. It is faster and more efficient than HTTP/JSON for high-frequency calls between internal services.
+### Routing Centralization
 
-The protocol definition lives in `shared/proto/inference.proto`, which defines:
-- The `InferenceService` with a single `Generate` RPC call
-- The `GenerateRequest` and `GenerateResponse` message formats
-- The `MessageRole` enum (`SYSTEM`, `USER`, `ASSISTANT`)
+QueryRouter is shared so Gateway and Orchestration always classify prompts the same way. If one service had its own classifier, they could silently diverge and produce inconsistent routing decisions.
 
-The Python binding files (`inference_pb2.py` and `inference_pb2_grpc.py`) are **not committed to version control** — they are generated from the `.proto` file at build time.
+### Experience Recording
 
-**In Docker** — generation runs automatically as part of the Orchestration and Inference image builds (see the `RUN python -m grpc_tools.protoc …` step in `orchestration/Dockerfile`).
+The ExperienceEvent model captures everything learned from a completed pipeline run: the original prompt, final output, all agent outputs, scores, and metadata. This data is used both for few-shot learning (in future requests) and as training data for the Training Service.
 
-**Locally (before running tests or using gRPC outside Docker)** — run once:
-
-```bash
-python scripts/generate_protos.py
-```
-
-If you see `ModuleNotFoundError: No module named 'shared.grpc_stubs.inference_pb2'`, the stubs have not been generated yet. Run the script above and retry.
-
----
-
-## Rules for this package
-
-- **No service imports** — this package must not import anything from any service directory (gateway, inference, orchestration, etc.)
-- **No I/O** — these are pure data definitions. No database calls, no HTTP calls, no file reads.
-- **Breaking changes** — if you rename or remove a field, you must update every service that uses it in the same change. Adding optional fields (with a default value) is backwards-compatible.
-
----
-
-## How services import from here
-
-Each service's Docker image copies the `shared/` directory and sets `PYTHONPATH=/app`, so all services can import using:
-
-```python
-from shared.contracts.inference import GenerateRequest, GenerateResponse
-from shared.contracts.orchestration import OrchestrationRequest
-```

@@ -126,8 +126,10 @@ Currently one-shot query engine
 
 Possibly merge current adapter to baseline and use rsLoRA.
 
-Implement mult-turn conversation with persistence layer with Redis or local vector db.
+Implement multi-turn conversation with persistence layer with Redis or local vector db.
 
 Pre-seed experience dataset with synthetic data for useful few-shot context from day one.
+
+Implement context persistence layer fallback.
 
 ---

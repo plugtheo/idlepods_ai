@@ -1,14 +1,20 @@
 """
 InferenceBackend — abstract base contract
 ==========================================
-All concrete backends implement this interface. The route layer calls
-`.generate()` without knowing which backend is active.
+All concrete backends implement this interface. The route layer and gRPC
+server call the backend without knowing which concrete implementation is
+active.
 """
 
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse
+
+
+class InferenceError(Exception):
+    """Raised by backends on generation failure instead of leaking
+    implementation-specific exceptions to callers."""
 
 
 class InferenceBackend(ABC):
@@ -19,17 +25,16 @@ class InferenceBackend(ABC):
         """
         Run one inference call and return the model's response.
 
-        Parameters
-        ----------
-        request:
-            Full generation request including messages, model family,
-            adapter name, and sampling parameters.
-
-        Returns
-        -------
-        GenerateResponse
-            The generated text and metadata.
+        Raises InferenceError on failure.
         """
+
+    @abstractmethod
+    async def list_adapters(self) -> list[str]:
+        """Return names of currently loaded LoRA adapters."""
+
+    @abstractmethod
+    async def health(self) -> dict:
+        """Return a dict with at minimum: {"status": "ok"|"degraded"|"unavailable", "backend": str}"""
 
     async def generate_stream(
         self, request: GenerateRequest
@@ -37,10 +42,10 @@ class InferenceBackend(ABC):
         """
         Yield text fragments (tokens/chunks) as the model produces them.
 
-        Default implementation buffers via ``generate()`` and yields the
-        full content as a single chunk — guarantees every backend is
-        streamable even before a true streaming path is implemented.
-        Backends that support native streaming should override this.
+        Default implementation buffers via generate() and yields the full
+        content as a single chunk — every backend is streamable even before a
+        native streaming path is implemented.  Backends that support native
+        streaming should override this.
         """
         response = await self.generate(request)
         yield response.content

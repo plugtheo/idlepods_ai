@@ -113,6 +113,11 @@ services:
       - INFERENCE__DEEPSEEK_URL=http://vllm-deepseek:8000
       - INFERENCE__MISTRAL_URL=http://vllm-mistral:8001
       - INFERENCE__GRPC_PORT=50051
+      # Backend selection (default: local_vllm for both families).
+      # To route a family to a remote vLLM server, set e.g.:
+      #   INFERENCE__MISTRAL_BACKEND=remote_vllm
+      #   INFERENCE__MISTRAL_URL=https://my-server.example.com:8000
+      #   INFERENCE__MISTRAL_AUTH_TOKEN=<optional bearer token>
     networks:
       - idledev
     ports:
@@ -124,72 +129,48 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── ChromaDB vector store (self-hosted) ──────────────────────────────────
+  # ── Optional: standalone ChromaDB server ─────────────────────────────────
+  #
+  # By default Orchestration uses a local PersistentClient writing to
+  # /data/vector_store (inside the experiences volume) — no separate service
+  # required.
+  #
+  # To switch to a standalone ChromaDB server:
+  #   1. Uncomment the chromadb service below.
+  #   2. Add  ORCHESTRATION__CHROMADB_HOST=chromadb  to the orchestration
+  #      environment section (also uncomment that line there).
+  #   3. Remove the vector_store volume mount from orchestration (optional —
+  #      it is unused in server mode but harmless if left).
+  #
+  # chromadb:
+  #   image: chromadb/chroma:latest
+  #   volumes:
+  #     - vector_store:/chroma/chroma
+  #   environment:
+  #     - IS_PERSISTENT=TRUE
+  #     - ANONYMIZED_TELEMETRY=FALSE
+  #   networks:
+  #     - idledev
+  #   ports:
+  #     - "8020:8000"
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
 
-  chromadb:
-    image: chromadb/chroma:latest
-    volumes:
-      - vector_store:/chroma/chroma
-    environment:
-      - IS_PERSISTENT=TRUE
-      - ANONYMIZED_TELEMETRY=FALSE
+  # ── Redis (session history store) ─────────────────────────────────────────
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly no
     networks:
       - idledev
     ports:
-      - "8020:8000"
+      - "6379:6379"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8020/health"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ── Context Service ────────────────────────────────────────────────────────
-
-  context:
-    build:
-      context: ..
-      dockerfile: context/Dockerfile
-    env_file: ../.env
-    environment:
-      - CONTEXT__CHROMA_HOST=chromadb
-      - CONTEXT__CHROMA_PORT=8000
-    depends_on:
-      chromadb:
-        condition: service_healthy
-    networks:
-      - idledev
-    ports:
-      - "8011:8011"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8011/health')"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
-  # ── Experience Service ─────────────────────────────────────────────────────
-
-  experience:
-    build:
-      context: ..
-      dockerfile: experience/Dockerfile
-    env_file: ../.env
-    volumes:
-      - experiences:/data
-    environment:
-      - EXPERIENCE__JSONL_PATH=/data/experiences.jsonl
-      - EXPERIENCE__CHROMA_HOST=chromadb
-      - EXPERIENCE__CHROMA_PORT=8000
-      - EXPERIENCE__TRAINING_URL=http://training:8013
-    depends_on:
-      chromadb:
-        condition: service_healthy
-    networks:
-      - idledev
-    ports:
-      - "8012:8012"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8012/health')"]
-      interval: 15s
       timeout: 5s
       retries: 5
 
@@ -226,21 +207,35 @@ services:
       retries: 5
 
   # ── Orchestration Service ──────────────────────────────────────────────────
+  #
+  # Context enrichment (few-shot RAG + repo scan) and experience recording
+  # now run as in-process async tasks — no separate context or experience
+  # containers are required.
+  #
+  # ChromaDB: by default uses local PersistentClient at /data/vector_store
+  # (within the experiences volume).  Uncomment CHROMADB_HOST to switch to
+  # the standalone chromadb service defined above.
 
   orchestration:
     build:
       context: ..
       dockerfile: orchestration/Dockerfile
     env_file: ../.env
+    volumes:
+      - experiences:/data        # JSONL at /data/experiences.jsonl + vector_store at /data/vector_store
     environment:
       - ORCHESTRATION__INFERENCE_URL=http://inference:8010
-      - ORCHESTRATION__CONTEXT_URL=http://context:8011
-      - ORCHESTRATION__EXPERIENCE_URL=http://experience:8012
       - ORCHESTRATION__DEFAULT_MAX_ITERATIONS=${ORCHESTRATION__DEFAULT_MAX_ITERATIONS:-2}
       - ORCHESTRATION__CONVERGENCE_THRESHOLD=${ORCHESTRATION__CONVERGENCE_THRESHOLD:-0.65}
       - ORCHESTRATION__INFERENCE_USE_GRPC=true
       - ORCHESTRATION__INFERENCE_GRPC_HOST=inference
       - ORCHESTRATION__INFERENCE_GRPC_PORT=50051
+      - ORCHESTRATION__JSONL_PATH=/data/experiences.jsonl
+      - ORCHESTRATION__CHROMADB_PATH=/data/vector_store
+      - ORCHESTRATION__TRAINING_URL=http://training:8013
+      # Uncomment to switch ChromaDB to server mode (also uncomment chromadb service above):
+      # - ORCHESTRATION__CHROMADB_HOST=chromadb
+      # - ORCHESTRATION__CHROMADB_PORT=8000
     networks:
       - idledev
     ports:
@@ -248,9 +243,7 @@ services:
     depends_on:
       inference:
         condition: service_healthy
-      context:
-        condition: service_healthy
-      experience:
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
@@ -280,4 +273,3 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-

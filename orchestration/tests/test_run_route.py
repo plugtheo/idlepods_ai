@@ -1,7 +1,7 @@
 """
 Tests for the Orchestration Service /v1/run route.
 
-Context client, pipeline, and experience client are all mocked.
+Context builder, pipeline, and experience recorder are all mocked.
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -42,7 +42,7 @@ class TestRunRoute:
     def mock_all_clients(self):
         with (
             patch(
-                "services.orchestration.app.routes.run.fetch_context",
+                "services.orchestration.app.routes.run.builder.build",
                 new_callable=AsyncMock,
                 return_value=_fake_built_context(),
             ),
@@ -50,12 +50,25 @@ class TestRunRoute:
                 "services.orchestration.app.routes.run._PIPELINE"
             ) as mock_pipeline,
             patch(
-                "services.orchestration.app.routes.run.fire_publish_experience",
+                "services.orchestration.app.routes.run.recorder.record",
                 new_callable=AsyncMock,
             ),
+            patch(
+                "services.orchestration.app.routes.run.jsonl_store.count",
+                return_value=0,
+            ),
+            patch(
+                "services.orchestration.app.routes.run.session_store.get_session",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_get_session,
+            patch(
+                "services.orchestration.app.routes.run.session_store.save_session",
+                new_callable=AsyncMock,
+            ) as mock_save_session,
         ):
             mock_pipeline.ainvoke = AsyncMock(return_value=_fake_final_state())
-            yield
+            yield mock_get_session, mock_save_session
 
     def test_health(self, orchestration_client):
         resp = orchestration_client.get("/health")
@@ -97,14 +110,35 @@ class TestRunRoute:
         assert resp.status_code == 422
 
     def test_context_failure_still_runs(self, orchestration_client):
-        """If context service is unavailable, pipeline should still proceed."""
+        """If context build fails, pipeline should still proceed with empty context."""
         with patch(
-            "services.orchestration.app.routes.run.fetch_context",
+            "services.orchestration.app.routes.run.builder.build",
             new_callable=AsyncMock,
-            return_value=_fake_built_context(),  # degraded but non-empty
+            side_effect=Exception("chromadb unavailable"),
         ):
             resp = orchestration_client.post(
                 "/v1/run",
                 json={"prompt": "do something"},
             )
         assert resp.status_code == 200
+
+    def test_run_loads_session_history(self, orchestration_client, mock_all_clients):
+        mock_get_session, _ = mock_all_clients
+        orchestration_client.post(
+            "/v1/run",
+            json={"prompt": "write a sort function", "task_id": "task-multi-1"},
+        )
+        mock_get_session.assert_called_once_with("task-multi-1")
+
+    def test_run_saves_session_history(self, orchestration_client, mock_all_clients):
+        _, mock_save_session = mock_all_clients
+        orchestration_client.post(
+            "/v1/run",
+            json={"prompt": "write a sort function", "task_id": "task-multi-2"},
+        )
+        mock_save_session.assert_called_once()
+        call_args = mock_save_session.call_args
+        saved_task_id, saved_history, saved_ttl = call_args.args
+        assert saved_task_id == "task-multi-2"
+        assert len(saved_history) == 1
+        assert saved_history[0]["role"] == "coder"

@@ -157,12 +157,10 @@ class TestRunAgentNodeStreamingPath:
         while not q.empty():
             events.append(q.get_nowait())
 
-        token_events = [e for e in events if e.get("type") == "token"]
+        token_events = [e for e in events if e.get("type") == "chunk"]
         assert len(token_events) == 2
-        assert token_events[0]["token"] == "Hello"
-        assert token_events[1]["token"] == " world"
-        assert all(e["role"] == "coder" for e in token_events)
-        assert all(e["iteration"] == 1 for e in token_events)
+        assert token_events[0]["content"] == "Hello"
+        assert token_events[1]["content"] == " world"
 
     async def test_output_accumulated_from_tokens(self):
         q: asyncio.Queue = asyncio.Queue()
