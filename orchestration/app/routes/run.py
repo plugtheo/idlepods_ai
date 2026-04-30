@@ -36,7 +36,7 @@ from shared.contracts.orchestration import (
 )
 from ..context import builder
 from ..db import redis as session_store
-from ..experience import jsonl_store, recorder
+from ..experience import inflight, recorder
 from ..config.settings import settings
 from ..graph import nodes as _nodes_module
 from ..graph.nodes import AGENT_FRIENDLY
@@ -280,7 +280,7 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
             timestamp=datetime.now(tz=timezone.utc),
             scorer_rule_version=SCORER_RULE_VERSION,
         )
-        asyncio.create_task(recorder.record(event, jsonl_store.count()))
+        inflight.register(asyncio.create_task(recorder.record(event)), event)
 
     return response
 
@@ -443,7 +443,7 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                             timestamp=datetime.now(tz=timezone.utc),
                             scorer_rule_version=SCORER_RULE_VERSION,
                         )
-                        asyncio.create_task(recorder.record(event, jsonl_store.count()))
+                        inflight.register(asyncio.create_task(recorder.record(event)), event)
 
                 _nodes_module.unregister_token_queue(session_id)
                 await q.put(None)  # sentinel — tells the generator to stop

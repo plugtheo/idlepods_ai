@@ -102,8 +102,26 @@ async def _startup_checks() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _startup_checks()
+
+    from pathlib import Path
+    from .experience import inflight
+    spool_path = Path(settings.spool_path)
+    jsonl_path = Path(settings.jsonl_path)
+    try:
+        await inflight.replay_spool(spool_path, jsonl_path)
+    except Exception as exc:
+        _log.error("Spool replay failed at startup: %s", exc)
+
     _log.info("Orchestration Service started on port %d", settings.port)
     yield
+
+    try:
+        remaining = await inflight.drain(settings.shutdown_drain_timeout_s)
+        if remaining:
+            inflight.spool_pending(remaining, spool_path)
+    except Exception as exc:
+        _log.error("Shutdown drain/spool failed: %s", exc)
+
     from .clients.inference import close_inference_client
     await close_inference_client()
 

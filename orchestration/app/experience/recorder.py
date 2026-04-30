@@ -1,7 +1,7 @@
 """
 Experience recorder
 ====================
-Wires together JSONL storage, ChromaDB upsert, and training notification.
+Wires together JSONL storage and ChromaDB upsert.
 
 Called as an asyncio background task (never awaited on the critical path).
 The entire function is non-fatal from the caller's perspective — all
@@ -10,9 +10,8 @@ user response.
 
 Invariants:
 - JSONL append failure is logged as an error and stops further processing
-  (ChromaDB and training are not attempted — JSONL is the authoritative record).
+  (ChromaDB upsert is not attempted — JSONL is the authoritative record).
 - ChromaDB upsert failure is logged as a warning; JSONL write still completed.
-- Training notification is sent only when total record count >= MIN_BATCH_SIZE.
 """
 
 from __future__ import annotations
@@ -41,18 +40,8 @@ def _infer_capability(agent_chain: list[str]) -> str:
     return "general"
 
 
-async def record(event: ExperienceEvent, total_count: int) -> None:
-    """
-    Persist the experience event and optionally trigger training.
-
-    Parameters
-    ----------
-    event:
-        The completed pipeline's experience event.
-    total_count:
-        Snapshot of the JSONL line count taken *before* this append.
-        Used to decide whether the training threshold has been crossed.
-    """
+async def record(event: ExperienceEvent) -> None:
+    """Persist the experience event to JSONL and ChromaDB."""
     try:
         await jsonl_store.append(event)
     except Exception as exc:
