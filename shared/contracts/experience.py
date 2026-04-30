@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_serializer
 
+SCORER_RULE_VERSION: str = "1"
+
 
 class AgentContribution(BaseModel):
     """One agent's contribution within a completed run."""
@@ -65,6 +67,10 @@ class ExperienceEvent(BaseModel):
         description="Query complexity classification (e.g. 'simple', 'complex').",
     )
     timestamp: Optional[datetime] = Field(default=None)
+    scorer_rule_version: Optional[str] = Field(
+        default=None,
+        description="Scorer rule version active when this record was scored. Used for cohort filtering during training.",
+    )
 
     @field_serializer("timestamp")
     def _serialize_timestamp(self, v: Optional[datetime]) -> Optional[str]:  # noqa: PLR6301

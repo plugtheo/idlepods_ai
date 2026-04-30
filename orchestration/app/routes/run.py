@@ -28,7 +28,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from shared.contracts.context import BuiltContext
-from shared.contracts.experience import AgentContribution, ExperienceEvent
+from shared.contracts.experience import AgentContribution, ExperienceEvent, SCORER_RULE_VERSION
 from shared.contracts.orchestration import (
     AgentStep,
     OrchestrationRequest,
@@ -278,6 +278,7 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
             intent=context_intent,
             complexity=context_complexity,
             timestamp=datetime.now(tz=timezone.utc),
+            scorer_rule_version=SCORER_RULE_VERSION,
         )
         asyncio.create_task(recorder.record(event, jsonl_store.count()))
 
@@ -440,6 +441,7 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                             intent=context_intent,
                             complexity=context_complexity,
                             timestamp=datetime.now(tz=timezone.utc),
+                            scorer_rule_version=SCORER_RULE_VERSION,
                         )
                         asyncio.create_task(recorder.record(event, jsonl_store.count()))
 

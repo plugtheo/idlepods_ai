@@ -31,7 +31,11 @@ _CODE_PRESENT_RE = re.compile(r"```|def |class |import |\bfunction\b|\breturn\b"
 # outputs score/metrics JSON instead of code.  Detect and heavily penalise.
 _METADATA_LEAKAGE_RE = re.compile(
     r"'agent_name'\s*:|\"agent_name\"\s*:|'iteration_number'\s*:|\"iteration_number\"\s*:"
-    r"|'quality_score'\s*:|\"quality_score\"\s*:|'execution_time_ms'\s*:|\"execution_time_ms\"\s*:",
+    r"|'quality_score'\s*:|\"quality_score\"\s*:|'execution_time_ms'\s*:|\"execution_time_ms\"\s*:"
+    r"|'session_id'\s*:|\"session_id\"\s*:|'final_output'\s*:|\"final_output\"\s*:"
+    r"|'agent_chain'\s*:|\"agent_chain\"\s*:|'contributions'\s*:|\"contributions\"\s*:"
+    r"|'iteration_scores'\s*:|\"iteration_scores\"\s*:|'final_score'\s*:|\"final_score\"\s*:"
+    r"|'converged'\s*:|\"converged\"\s*:",
     re.I,
 )
 
@@ -56,6 +60,18 @@ _POSITIVE_PATTERNS = [
         r"\bBLOCKERS?\s*[:=]\s*(?:None|none|N\/A)\b",
     ]
 ]
+
+
+_EVALUATOR_REQUIRED_FIELDS: Dict[str, List[str]] = {
+    "reviewer": ["ISSUES", "SUGGESTIONS"],
+    "critic":   ["BLOCKERS", "IMPROVEMENT"],
+}
+
+
+def _required_fields_present(text: str, role: str) -> bool:
+    """Return True if all non-SCORE structured fields for *role* appear in *text*."""
+    fields = _EVALUATOR_REQUIRED_FIELDS.get(role, [])
+    return all(re.search(rf"(?m)^{field}:", text) for field in fields)
 
 
 def extract_score_from_text(text: str) -> float | None:
@@ -107,15 +123,16 @@ def heuristic_score(text: str, role: str) -> float:
     if not text or len(text.strip()) < 30:
         return _SCORE_SHORT_TEXT  # Near-empty output is always low quality
 
-    # Explicit score annotations take priority
-    explicit = extract_score_from_text(text)
-    if explicit is not None:
-        return explicit
-
-    # Detect adapter metadata leakage (adapter trained on orchestration JSON).
-    # Output containing pipeline metric keys is garbage — penalise hard.
+    # Detect adapter metadata leakage before honoring any explicit annotation.
     if _METADATA_LEAKAGE_RE.search(text):
         return _SCORE_METADATA_LEAK
+
+    # Explicit score annotations — only honored when required structured fields
+    # are present for evaluator roles (prevents a bare SCORE: bypassing the gate).
+    if role not in ("reviewer", "critic") or _required_fields_present(text, role):
+        explicit = extract_score_from_text(text)
+        if explicit is not None:
+            return explicit
 
     # Role-specific baseline when no explicit SCORE annotation
     if role in ("reviewer", "critic"):
@@ -183,11 +200,12 @@ def score_iteration(iteration_history: List[Dict[str, Any]], current_iteration: 
             continue
         # Prefer full_output (if stored) so SCORE: annotations aren't trimmed.
         text = e.get("full_output") or e.get("output", "")
-        explicit = extract_score_from_text(text)
+        role_e = e["role"]
+        explicit = extract_score_from_text(text) if _required_fields_present(text, role_e) else None
         if explicit is not None:
             explicit_eval_scores.append(explicit)
         else:
-            heuristic_eval_scores.append(heuristic_score(text, e["role"]))
+            heuristic_eval_scores.append(heuristic_score(text, role_e))
 
     # 1. Explicit evaluator scores — highest confidence signal.
     if explicit_eval_scores:
@@ -236,9 +254,27 @@ def score_per_entry(history_entry: dict) -> float:
     role = history_entry.get("role", "")
     text = history_entry.get("full_output") or history_entry.get("output", "")
 
-    if role in ("reviewer", "critic"):
+    if role in ("reviewer", "critic") and _required_fields_present(text, role):
         explicit = extract_score_from_text(text)
         if explicit is not None:
             return explicit
 
     return heuristic_score(text, role)
+
+
+def validate_output(text: str, role: str) -> tuple[bool, list[str]]:
+    """
+    Run all post-generation validation rules against *text*.
+
+    Returns (is_valid, reasons).  When not valid, the caller should replace
+    the output with a sentinel so downstream agents are not polluted; the
+    original full_output should be retained for accurate scoring.
+    """
+    reasons: list[str] = []
+    if not text or len(text.strip()) < 30:
+        reasons.append("short_text")
+    if _METADATA_LEAKAGE_RE.search(text):
+        reasons.append("metadata_leakage")
+    if role in _EVALUATOR_REQUIRED_FIELDS and not _required_fields_present(text, role):
+        reasons.append("missing_required_fields")
+    return len(reasons) == 0, reasons

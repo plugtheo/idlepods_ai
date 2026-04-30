@@ -46,6 +46,7 @@ from shared.contracts.inference import GenerateRequest, Message
 from ..clients.inference import get_inference_client
 from ..config.settings import AGENT_PROMPTS, settings
 from ..utils.inference_optimizer import InferenceOptimizer
+from ..utils.scoring import validate_output
 from .state import AgentState
 
 # Module-level singleton — shared across all node invocations in this process.
@@ -360,16 +361,29 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
         logger.error("[%s] Inference failed for role=%s: %s", session_id[:8], role, exc)
         output = f"[{role} agent unavailable: {exc}]"
 
+    # Post-generation validator: prevent downstream agents seeing garbage output.
+    # full_output retains the original so the convergence scorer still operates
+    # on the real text (leakage detection, SCORE: extraction, etc.).
+    _valid, _reasons = validate_output(output, role)
+    if not _valid:
+        logger.warning(
+            "[%s] iter=%d  role=%s  validation_failed reasons=%s",
+            session_id[:8], current_iteration, role, _reasons,
+        )
+        display_output = f"[VALIDATOR_FAIL:{';'.join(_reasons)}]"
+    else:
+        display_output = output
+
     # Structured extraction: store compact key fields in history so downstream
     # agents' input token cost is lower.  Full output kept as last_output so
     # the convergence scorer can still read SCORE: annotations.
-    stored_output = _optimizer.extract_for_history(role, output)
+    stored_output = _optimizer.extract_for_history(role, display_output)
 
     history_entry = {
         "role": role,
         "iteration": current_iteration,
-        "output": stored_output,       # compact version used by downstream agents
-        "full_output": output,         # complete LLM response — preserved for training data
+        "output": stored_output,       # compact/sentinel version seen by downstream agents
+        "full_output": output,         # original LLM response — scorer and training use this
         "messages": [m.model_dump() for m in messages],  # full prompt sent to LLM — SFT training pair
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
     }
