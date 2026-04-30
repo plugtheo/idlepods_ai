@@ -124,6 +124,11 @@ services:
     ports:
       - "8010:8010"
       - "50051:50051"   # gRPC — internal + host-accessible for direct client access
+    depends_on:                          # ADD THIS BLOCK
+      vllm-deepseek:
+        condition: service_healthy
+      vllm-mistral:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')"]
@@ -259,7 +264,6 @@ services:
       - ORCHESTRATION__INFERENCE_GRPC_PORT=50051
       - ORCHESTRATION__JSONL_PATH=/data/experiences.jsonl
       - ORCHESTRATION__CHROMADB_PATH=/data/vector_store
-      - ORCHESTRATION__TRAINING_URL=http://training:8013
       # Uncomment to switch ChromaDB to server mode (also uncomment chromadb service above):
       # - ORCHESTRATION__CHROMADB_HOST=chromadb
       # - ORCHESTRATION__CHROMADB_PORT=8000

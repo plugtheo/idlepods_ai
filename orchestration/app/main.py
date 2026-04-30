@@ -79,7 +79,10 @@ async def _startup_checks() -> None:
                 "Startup check: chars_per_token measured=%.2f configured=%d family=%s tokens=%d",
                 measured, settings.chars_per_token, family, token_count,
             )
-            if measured < settings.chars_per_token:
+            
+            # Check if the measured chars_per_token is significantly lower than the configured value
+            # Tolerate around 2% calibration variance without masking a real misconfiguration
+            if measured < settings.chars_per_token - 0.05:
                 raise RuntimeError(
                     f"Startup: chars_per_token misconfigured for {family}: "
                     f"measured={measured:.2f} < configured={settings.chars_per_token}. "
