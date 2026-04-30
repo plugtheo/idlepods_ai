@@ -44,6 +44,11 @@ except ImportError as _import_err:
     _import_err_msg = str(_import_err)
 
 
+try:
+    from shared.grpc_stubs._version import PROTO_SCHEMA_HASH as _PROTO_SCHEMA_HASH
+except ImportError:
+    _PROTO_SCHEMA_HASH = None
+
 # Map the three legal role strings to the MessageRole enum values.
 # Avoids a per-call getattr lookup into the generated module.
 _ROLE_TO_ENUM: dict[str, int] = {
@@ -83,6 +88,7 @@ class GrpcInferenceClient:
         ]
         self._channel = grpc_aio.insecure_channel(f"{host}:{port}", options=options)
         self._stub = inference_pb2_grpc.InferenceServiceStub(self._channel)
+        self._version_checked = False
         logger.info("gRPC inference client connected to %s:%d (gzip)", host, port)
 
     def _build_proto_request(
@@ -115,6 +121,25 @@ class GrpcInferenceClient:
 
         return proto_req
 
+    async def _verify_proto_version(self) -> None:
+        """Assert the server's proto schema hash matches the compiled stubs."""
+        if _PROTO_SCHEMA_HASH is None:
+            logger.warning("Proto _version.py not found — skipping schema compatibility check.")
+            return
+        try:
+            resp = await self._stub.GetProtoVersion(inference_pb2.ProtoVersionRequest())
+            if resp.schema_hash != _PROTO_SCHEMA_HASH:
+                raise RuntimeError(
+                    f"Proto schema mismatch: server={resp.schema_hash!r} "
+                    f"client={_PROTO_SCHEMA_HASH!r}. "
+                    "Regenerate stubs with `python scripts/generate_protos.py` and redeploy."
+                )
+            logger.info("Proto schema verified: %s…", _PROTO_SCHEMA_HASH[:12])
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.warning("Proto version check failed: %s — continuing without verification.", exc)
+
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
         """
         Send a GenerateRequest over gRPC and return a GenerateResponse.
@@ -123,6 +148,9 @@ class GrpcInferenceClient:
         optional fields are zero bytes.  The server applies its own defaults
         when a field is absent.
         """
+        if not self._version_checked:
+            await self._verify_proto_version()
+            self._version_checked = True
         proto_req = self._build_proto_request(request)
         proto_resp = await self._stub.Generate(proto_req)
         return GenerateResponse(

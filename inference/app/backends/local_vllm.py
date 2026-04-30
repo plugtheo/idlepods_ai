@@ -98,6 +98,13 @@ def _fix_bpe_artifacts(text: str) -> str:
 
 logger = logging.getLogger(__name__)
 
+_adapter_fallback_counts: dict[str, int] = {}
+
+
+def get_fallback_counts() -> dict[str, int]:
+    return dict(_adapter_fallback_counts)
+
+
 # ---------------------------------------------------------------------------
 # Training-format chat template
 # ---------------------------------------------------------------------------
@@ -258,11 +265,10 @@ async def _resolve_model(
     if await registry.adapter_available(adapter_name):
         return adapter_name  # vLLM uses the bare adapter name as the model field
 
+    _adapter_fallback_counts[role] = _adapter_fallback_counts.get(role, 0) + 1
     logger.warning(
-        "Adapter '%s' for role '%s' is not registered with vLLM — "
-        "falling back to base model '%s'. "
-        "The Training Service will produce it once enough experiences accumulate.",
-        adapter_name, role, model_id,
+        "adapter_fallback adapter=%s role=%s reason=not_registered base_model=%s count=%d",
+        adapter_name, role, model_id, _adapter_fallback_counts[role],
     )
     return model_id
 

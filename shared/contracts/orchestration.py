@@ -87,3 +87,7 @@ class OrchestrationResponse(BaseModel):
         default_factory=dict,
         description="Extras (route decision, timing, etc.) for observability.",
     )
+    history_volatile: bool = Field(
+        default=False,
+        description="True when Redis was unavailable at request time; conversation history for this turn may be incomplete.",
+    )

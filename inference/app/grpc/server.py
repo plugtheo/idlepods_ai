@@ -39,6 +39,11 @@ try:
 except ImportError:
     _HEALTH_AVAILABLE = False
 
+try:
+    from shared.grpc_stubs._version import PROTO_SCHEMA_HASH as _PROTO_SCHEMA_HASH
+except ImportError:
+    _PROTO_SCHEMA_HASH = "unknown"
+
 
 # Map MessageRole enum integers to the role strings the pydantic layer expects.
 _ENUM_TO_ROLE: dict[int, str] = {
@@ -142,6 +147,13 @@ if _GRPC_AVAILABLE:
                 logger.error("gRPC GenerateStream error: %s", exc, exc_info=True)
                 await context.abort(grpc.StatusCode.INTERNAL, str(exc))
                 return
+
+        async def GetProtoVersion(
+            self,
+            request: "inference_pb2.ProtoVersionRequest",
+            context: "grpc_aio.ServicerContext",
+        ) -> "inference_pb2.ProtoVersionResponse":
+            return inference_pb2.ProtoVersionResponse(schema_hash=_PROTO_SCHEMA_HASH)
 
 
 async def serve() -> None:

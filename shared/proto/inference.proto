@@ -20,6 +20,10 @@ service InferenceService {
   // The final chunk has is_final=true and tokens_generated set; its token
   // field is empty (pure metadata marker).
   rpc GenerateStream (GenerateRequest) returns (stream GenerateStreamChunk);
+
+  // Return the sha256 hash of the proto source used to generate the stubs.
+  // Called once by the orchestration client on startup to verify compatibility.
+  rpc GetProtoVersion (ProtoVersionRequest) returns (ProtoVersionResponse);
 }
 
 // Encode the three legal role values as an enum (1 byte varint) instead of a
@@ -66,4 +70,10 @@ message GenerateStreamChunk {
   string token            = 1;  // text fragment; empty string on the is_final sentinel
   bool   is_final         = 2;  // true on the last chunk only
   int32  tokens_generated = 3;  // total tokens; only meaningful when is_final=true
+}
+
+message ProtoVersionRequest {}
+
+message ProtoVersionResponse {
+  string schema_hash = 1;  // sha256 hex digest of inference.proto source
 }

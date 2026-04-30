@@ -111,7 +111,8 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
         built_context = BuiltContext()
 
     conversation_history = await session_store.get_session(task_id)
-    if not session_store.is_healthy():
+    redis_healthy = session_store.is_healthy()
+    if not redis_healthy:
         logger.warning("Redis unavailable — session history lost for %s", task_id)
 
     max_iterations = request.max_iterations or settings.default_max_iterations
@@ -150,7 +151,7 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
     from ..graph.pipeline import _recursion_limit
     rec_limit = _recursion_limit(max_iterations, len(agent_chain))
 
-    return session_id, context_intent, context_complexity, agent_chain, initial_state, rec_limit
+    return session_id, context_intent, context_complexity, agent_chain, initial_state, rec_limit, redis_healthy
 
 
 def _trim_conversation_history(history: list, max_tokens: int) -> list:
@@ -208,7 +209,7 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
     4. Fires-and-forgets the experience event to the Experience Service.
     5. Returns the final result to the Gateway.
     """
-    session_id, context_intent, context_complexity, agent_chain, initial_state, rec_limit = (
+    session_id, context_intent, context_complexity, agent_chain, initial_state, rec_limit, redis_healthy = (
         await _prepare_pipeline_run(request)
     )
 
@@ -254,6 +255,7 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
         best_score=best_score,
         agent_steps=agent_steps,
         converged=converged,
+        history_volatile=not redis_healthy,
         metadata={
             "intent": context_intent,
             "complexity": context_complexity,
@@ -320,7 +322,7 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
     clients render output character-by-character, then have the full content
     available in ``agent_complete`` once the agent finishes.
     """
-    session_id, context_intent, context_complexity, agent_chain, initial_state, rec_limit = (
+    session_id, context_intent, context_complexity, agent_chain, initial_state, rec_limit, redis_healthy = (
         await _prepare_pipeline_run(request)
     )
 
@@ -410,6 +412,7 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                         "converged": converged,
                         "intent": context_intent,
                         "complexity": context_complexity,
+                        "history_volatile": not redis_healthy,
                     })
 
                     # Persist session history to Redis

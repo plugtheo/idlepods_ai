@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse
 from ..backends.factory import get_backend
+from ..backends.local_vllm import get_fallback_counts
 from ..config.settings import settings
 
 
@@ -127,7 +128,7 @@ async def health() -> dict:
         if all(b.get("status") == "ok" for b in backends_status.values())
         else "degraded"
     )
-    return {"status": overall, "backends": backends_status}
+    return {"status": overall, "backends": backends_status, "adapter_fallbacks": get_fallback_counts()}
 
 
 @router.get("/v1/model-info", summary="Return max_model_len for each vLLM backend")
