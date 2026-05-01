@@ -19,6 +19,7 @@ Or via Docker (see Dockerfile in this directory).
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -26,6 +27,7 @@ from fastapi import FastAPI
 
 from .config.settings import settings
 from .routes.generate import router as generate_router
+from .routes.adapters import router as adapters_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,9 +56,16 @@ async def lifespan(app: FastAPI):
     global _grpc_task
 
     # Eagerly initialise both backends so the first real request is not slow.
-    from .backends.factory import get_backend
+    from .backends.factory import get_backend, bootstrap_adapters
     get_backend("deepseek")
     get_backend("mistral")
+
+    # Bootstrap: load active (and previous-warm) adapters from manifest.
+    # Replaces static --lora-modules in docker/compose.yml.
+    manifest_path = os.environ.get(
+        "INFERENCE__MANIFEST_PATH", "/data/lora_checkpoints/manifest.json"
+    )
+    await bootstrap_adapters(manifest_path)
 
     # Start gRPC server as a background task alongside uvicorn.
     from .grpc.server import serve as grpc_serve
@@ -98,3 +107,4 @@ app = FastAPI(
 )
 
 app.include_router(generate_router)
+app.include_router(adapters_router)

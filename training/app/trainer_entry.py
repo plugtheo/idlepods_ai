@@ -46,9 +46,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 # Add project root to sys.path so we can import from training/
 # In Docker: file lives at /app/services/training/app/trainer_entry.py
@@ -60,7 +63,15 @@ _ROOT = Path(__file__).resolve().parents[3]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from training.lora_trainer import LoRATrainer, _pre_train_backup, _post_train_version
+from training.lora_trainer import (
+    LoRATrainer,
+    _pre_train_backup,
+    _post_train_version,
+    _post_train_stage,
+    _promote_to_active,
+    _mark_failed,
+)
+from training.smoke_gate import run_smoke
 
 # System prompts — imported from the single source of truth so that training and
 # inference always use byte-identical strings.  Do NOT redefine these here.
@@ -434,15 +445,11 @@ def main() -> None:
         except OSError:
             pass
 
-    # Post-training: version bump, weight-file validation, manifest update.
-    # _post_train_version raises RuntimeError if no weight file was written, so
-    # a silent save failure becomes a loud subprocess failure that the Training
-    # Service will record as an error instead of silently promoting an empty adapter.
-    # Skip versioning in mock mode (no GPU) because no adapter was written.
+    # Post-training: stage → smoke gate → swap+promote (or mark failed).
+    # Skip entirely in mock mode (no GPU, no weights written).
     if result.get("method") != "mock":
-        new_version = _post_train_version(
+        new_meta = _post_train_stage(
             save_path=adapter_dir,
-            checkpoint_dir=Path(args.output_dir),
             capability=cap_label,
             old_version=old_version,
             base_model_id=args.base_model,
@@ -454,10 +461,77 @@ def main() -> None:
             final_loss=result.get("final_loss", 0.0),
             note="self-training",
         )
-        print(
-            f"[trainer-entry] Adapter v{new_version} saved to: {adapter_output_dir}",
-            flush=True,
-        )
+        new_version  = new_meta["version"]
+        staging_name = f"{adapter_name}__staging"
+        inference_url = os.environ.get("TRAINING__INFERENCE_URL", "http://inference:8010")
+
+        # Load staged adapter onto vLLM for smoke test
+        try:
+            load_resp = httpx.post(
+                f"{inference_url}/adapters/load",
+                json={"capability": cap_label, "lora_name": staging_name, "lora_path": adapter_output_dir},
+                timeout=60.0,
+            )
+            load_resp.raise_for_status()
+        except Exception as exc:
+            print(f"[trainer-entry] Could not load staging adapter: {exc} — failing", flush=True)
+            _mark_failed(
+                Path(args.output_dir), cap_label, new_version,
+                smoke_results={"pass": False, "reason": f"staging_load_failed: {exc}"},
+            )
+            sys.exit(2)
+
+        smoke = run_smoke(inference_url, role_name, staging_name)
+        print(f"[trainer-entry] Smoke gate result: {smoke}", flush=True)
+
+        if smoke["pass"]:
+            # Swap: unload old canonical, load new canonical, unload staging
+            try:
+                swap_resp = httpx.post(
+                    f"{inference_url}/adapters/swap",
+                    json={
+                        "capability":     cap_label,
+                        "canonical_name": adapter_name,
+                        "new_path":       adapter_output_dir,
+                    },
+                    timeout=60.0,
+                )
+                swap_resp.raise_for_status()
+            except Exception as exc:
+                print(f"[trainer-entry] Swap failed: {exc} — adapter may be degraded", flush=True)
+                _mark_failed(
+                    Path(args.output_dir), cap_label, new_version,
+                    smoke_results={"pass": False, "reason": f"swap_failed: {exc}"},
+                )
+                sys.exit(2)
+
+            _promote_to_active(
+                checkpoint_dir=Path(args.output_dir),
+                capability=cap_label,
+                new_meta=new_meta,
+                previous_backup_path=backup_path,
+                smoke_results=smoke,
+            )
+            print(
+                f"[trainer-entry] Adapter v{new_version} active: {adapter_output_dir}",
+                flush=True,
+            )
+        else:
+            # Unload staging, leave old adapter in place, mark failed
+            try:
+                httpx.post(
+                    f"{inference_url}/adapters/unload",
+                    json={"capability": cap_label, "lora_name": staging_name},
+                    timeout=30.0,
+                )
+            except Exception:
+                pass
+            _mark_failed(Path(args.output_dir), cap_label, new_version, smoke_results=smoke)
+            print(
+                f"[trainer-entry] Smoke gate failed — v{new_version} not promoted",
+                flush=True,
+            )
+            sys.exit(2)
     else:
         print(
             f"[trainer-entry] Mock training — no adapter written, skipping versioning.",

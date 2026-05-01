@@ -13,6 +13,7 @@ Pipeline:
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -36,6 +37,29 @@ _ADAPTER_TARGET_MODULES = [
     "q_proj", "k_proj", "v_proj", "o_proj",   # attention
     "gate_proj", "up_proj", "down_proj",        # FFN / MLP
 ]
+
+
+@contextlib.contextmanager
+def _manifest_file_lock(manifest_path: Path):
+    """Advisory exclusive lock around manifest RMW (POSIX only; no-op on Windows)."""
+    lock_path = manifest_path.with_suffix(".lock")
+    lock_fh = None
+    try:
+        lock_fh = open(lock_path, "w")
+        try:
+            import fcntl
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            pass
+        yield
+    finally:
+        if lock_fh is not None:
+            try:
+                import fcntl
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            except ImportError:
+                pass
+            lock_fh.close()
 
 
 def _pre_train_backup(save_path: Path, capability: str) -> tuple:
@@ -75,9 +99,8 @@ def _pre_train_backup(save_path: Path, capability: str) -> tuple:
     return old_version, backup_path
 
 
-def _post_train_version(
+def _post_train_stage(
     save_path: Path,
-    checkpoint_dir: Path,
     capability: str,
     old_version: str,
     base_model_id: str,
@@ -88,21 +111,14 @@ def _post_train_version(
     lora_alpha: int,
     final_loss: float,
     note: str = "bootstrap",
-) -> str:
+) -> Dict[str, Any]:
     """
-    Validate the adapter weight file, bump the version, write metadata.json,
-    and update the root manifest.json.
+    Validate adapter weights and write metadata.json with status='staging'.
+    Does NOT touch the root manifest — call _promote_to_active after smoke passes.
 
-    Must be called AFTER LoRATrainer.train() completes successfully and ONLY
-    when real GPU training was performed (not mock mode).
-
-    Raises RuntimeError if no adapter weight file is found at save_path —
-    this converts a silent save failure into a loud exception so the caller
-    can mark the training run as FAILED rather than promoting a bad adapter.
-
-    Returns the new version string (e.g. "1.2.0").
+    Raises RuntimeError if no adapter weight file is found.
+    Returns the new metadata dict (includes bumped version).
     """
-    # --- Validate weights were actually written ---
     weight_file = save_path / "adapter_model.safetensors"
     if not weight_file.exists():
         weight_file = save_path / "adapter_model.bin"
@@ -115,9 +131,6 @@ def _post_train_version(
 
     size_mb = round(weight_file.stat().st_size / 1e6, 2)
 
-    # --- Re-read preserved history from metadata.json -----------------------
-    # HuggingFace save_pretrained() does NOT write metadata.json, so the old
-    # metadata is still present and we can read the full version history from it.
     old_history: List[Any] = []
     old_created_at: str = ""
     meta_path = save_path / "metadata.json"
@@ -129,18 +142,18 @@ def _post_train_version(
         except (json.JSONDecodeError, OSError):
             pass
 
-    # --- Version bump: minor+1, patch reset to 0 ----------------------------
     try:
         major, minor, patch = [int(x) for x in old_version.split(".")]
     except (ValueError, AttributeError):
         major, minor, patch = 1, 0, 0
     new_version = f"{major}.{minor + 1}.0"
 
-    now_iso     = datetime.now(timezone.utc).isoformat()
-    created_at  = old_created_at or now_iso
+    now_iso    = datetime.now(timezone.utc).isoformat()
+    created_at = old_created_at or now_iso
 
     new_history_entry: Dict[str, Any] = {
         "version":       new_version,
+        "status":        "staging",
         "created_at":    now_iso,
         "n_samples":     n_samples,
         "epochs":        num_epochs,
@@ -158,7 +171,7 @@ def _post_train_version(
         "capability":     capability,
         "model_family":   "deepseek" if "deepseek" in base_model_id.lower() else "mistral",
         "base_model":     base_model_id,
-        "status":         "active",
+        "status":         "staging",
         "created_at":     created_at,
         "updated_at":     now_iso,
         "lora_r":         lora_r,
@@ -169,23 +182,192 @@ def _post_train_version(
     }
     meta_path.write_text(json.dumps(new_meta, indent=2))
 
-    # --- Update root manifest so vLLM adapter registry picks up new version --
-    manifest_path = checkpoint_dir / "manifest.json"
-    manifest: Dict[str, Any] = {}
-    if manifest_path.exists():
+    print(
+        f"  [STAGE] {capability}_lora  {old_version} → {new_version}"
+        f"  ({size_mb:.1f} MB)  status=staging"
+    )
+    return new_meta
+
+
+def _promote_to_active(
+    checkpoint_dir: Path,
+    capability: str,
+    new_meta: Dict[str, Any],
+    previous_backup_path: Optional[Path] = None,
+    smoke_results: Optional[Dict[str, Any]] = None,
+    eval_results: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Under manifest file-lock: flip active/previous pointers and record smoke+eval.
+    Also updates metadata.json status from 'staging' to 'active'.
+    """
+    adapter_name = f"{capability}_lora"
+    new_version  = new_meta["version"]
+    now_iso      = datetime.now(timezone.utc).isoformat()
+
+    # Flip metadata.json status → active
+    meta_path = checkpoint_dir / adapter_name / "metadata.json"
+    if meta_path.exists():
         try:
-            manifest = json.loads(manifest_path.read_text())
+            meta = json.loads(meta_path.read_text())
+            meta["status"] = "active"
+            meta["updated_at"] = now_iso
+            for entry in meta.get("history", []):
+                if entry.get("version") == new_version:
+                    entry["status"] = "active"
+                    if smoke_results:
+                        entry["smoke"] = smoke_results
+                    if eval_results:
+                        entry["eval"] = eval_results
+                    break
+            meta_path.write_text(json.dumps(meta, indent=2))
         except (json.JSONDecodeError, OSError):
             pass
-    manifest.setdefault("adapters", {})[f"{capability}_lora"] = new_meta
-    manifest["updated_at"] = now_iso
-    manifest_path.write_text(json.dumps(manifest, indent=2))
 
-    print(
-        f"  [VERSION] {capability}_lora  {old_version} → {new_version}"
-        f"  ({size_mb:.1f} MB)  note={note}"
+    manifest_path = checkpoint_dir / "manifest.json"
+    with _manifest_file_lock(manifest_path):
+        manifest: Dict[str, Any] = {}
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        existing = manifest.setdefault("adapters", {}).get(adapter_name, {})
+        old_active_version = existing.get("active_version", "")
+        old_active_path    = existing.get("active_path", str(checkpoint_dir / adapter_name))
+
+        # Mark previous active entries in history as retired
+        history = existing.get("history", [])
+        for entry in history:
+            if entry.get("status") == "active":
+                entry["status"] = "retired"
+
+        # Add new history entry with smoke/eval results
+        new_history_entry: Dict[str, Any] = {
+            "version":    new_version,
+            "status":     "active",
+            "trained_at": new_meta.get("updated_at", now_iso),
+        }
+        if new_meta.get("history"):
+            last = new_meta["history"][-1]
+            new_history_entry["n_samples"]  = last.get("n_samples", 0)
+            new_history_entry["final_loss"] = last.get("final_loss", 0.0)
+            new_history_entry["size_mb"]    = last.get("size_mb", 0.0)
+        if smoke_results:
+            new_history_entry["smoke"] = smoke_results
+        if eval_results:
+            new_history_entry["eval"] = eval_results
+        history.append(new_history_entry)
+
+        previous_path = (
+            str(previous_backup_path)
+            if previous_backup_path and Path(previous_backup_path).exists()
+            else old_active_path
+        )
+
+        manifest["adapters"][adapter_name] = {
+            "capability":       capability,
+            "model_family":     new_meta.get("model_family", ""),
+            "active_version":   new_version,
+            "active_path":      str(checkpoint_dir / adapter_name),
+            "previous_version": old_active_version,
+            "previous_path":    previous_path,
+            "updated_at":       now_iso,
+            "history":          history,
+        }
+        manifest["updated_at"] = now_iso
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    print(f"  [VERSION] {adapter_name}  {old_active_version} → {new_version}  status=active")
+
+
+def _mark_failed(
+    checkpoint_dir: Path,
+    capability: str,
+    version: str,
+    smoke_results: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Under manifest file-lock: mark the staged version as failed."""
+    adapter_name = f"{capability}_lora"
+    now_iso      = datetime.now(timezone.utc).isoformat()
+
+    meta_path = checkpoint_dir / adapter_name / "metadata.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            meta["status"] = "failed"
+            meta["updated_at"] = now_iso
+            for entry in meta.get("history", []):
+                if entry.get("version") == version:
+                    entry["status"] = "failed"
+                    if smoke_results:
+                        entry["smoke"] = smoke_results
+                    break
+            meta_path.write_text(json.dumps(meta, indent=2))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    manifest_path = checkpoint_dir / "manifest.json"
+    with _manifest_file_lock(manifest_path):
+        manifest: Dict[str, Any] = {}
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        adapter_entry = manifest.setdefault("adapters", {}).get(adapter_name)
+        if adapter_entry:
+            for entry in adapter_entry.get("history", []):
+                if entry.get("version") == version:
+                    entry["status"] = "failed"
+                    if smoke_results:
+                        entry["smoke"] = smoke_results
+                    break
+            manifest["updated_at"] = now_iso
+            manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    print(f"  [FAILED] {adapter_name}  v{version}  smoke_pass=False")
+
+
+def _post_train_version(
+    save_path: Path,
+    checkpoint_dir: Path,
+    capability: str,
+    old_version: str,
+    base_model_id: str,
+    n_samples: int,
+    num_epochs: int,
+    learning_rate: float,
+    lora_r: int,
+    lora_alpha: int,
+    final_loss: float,
+    note: str = "bootstrap",
+) -> str:
+    """
+    Legacy wrapper used by train_gpu_simple.py (no smoke gate).
+    Calls _post_train_stage then _promote_to_active immediately.
+    Returns the new version string.
+    """
+    new_meta = _post_train_stage(
+        save_path=save_path,
+        capability=capability,
+        old_version=old_version,
+        base_model_id=base_model_id,
+        n_samples=n_samples,
+        num_epochs=num_epochs,
+        learning_rate=learning_rate,
+        lora_r=lora_r,
+        lora_alpha=lora_alpha,
+        final_loss=final_loss,
+        note=note,
     )
-    return new_version
+    # Try to find the pre-existing backup so previous_path is populated.
+    old_slug = old_version.replace(".", "_")
+    guessed_backup = checkpoint_dir / f"{capability}_lora_v{old_slug}"
+    previous_backup = guessed_backup if guessed_backup.exists() else None
+    _promote_to_active(checkpoint_dir, capability, new_meta, previous_backup_path=previous_backup)
+    return new_meta["version"]
 
 
 class AgentOutputDataset:

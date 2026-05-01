@@ -200,6 +200,14 @@ class RemoteVLLMBackend(InferenceBackend):
                 if token:
                     yield _fix_bpe_artifacts(token)
 
+    async def load_adapter(self, adapter_name: str, lora_path: str) -> bool:
+        """Load a LoRA adapter at runtime via vLLM's load_lora_adapter API."""
+        return await self._registry.load(adapter_name, lora_path)
+
+    async def unload_adapter(self, adapter_name: str) -> bool:
+        """Unload a LoRA adapter at runtime via vLLM's unload_lora_adapter API."""
+        return await self._registry.unload(adapter_name)
+
     async def list_adapters(self) -> list[str]:
         """Return names of currently loaded LoRA adapters for this backend."""
         return await self._registry.list_known()

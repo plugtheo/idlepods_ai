@@ -27,6 +27,7 @@ picked up automatically without a restart.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -199,6 +200,7 @@ class _AdapterRegistry:
         self._ttl = ttl
         self._known: set[str] = set()
         self._fetched_at: float = 0.0
+        self._lock = asyncio.Lock()
         self._timeout = settings.request_timeout_seconds
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
@@ -224,6 +226,48 @@ class _AdapterRegistry:
         """Return the current set of known model/adapter IDs."""
         await self._refresh_if_stale()
         return list(self._known)
+
+    async def load(self, adapter_name: str, lora_path: str) -> bool:
+        """POST /v1/load_lora_adapter; immediately updates _known so the new name is visible."""
+        try:
+            resp = await self._client.post(
+                f"{self._base_url}/v1/load_lora_adapter",
+                json={"lora_name": adapter_name, "lora_path": lora_path},
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+            async with self._lock:
+                self._known.add(adapter_name)
+                self._fetched_at = time.monotonic()
+            logger.info("AdapterRegistry.load %s ok (%s)", adapter_name, self._base_url)
+            return True
+        except Exception as exc:
+            logger.error("AdapterRegistry.load %s failed: %s", adapter_name, exc)
+            return False
+
+    async def unload(self, adapter_name: str) -> bool:
+        """POST /v1/unload_lora_adapter; immediately removes name from _known."""
+        try:
+            resp = await self._client.post(
+                f"{self._base_url}/v1/unload_lora_adapter",
+                json={"lora_name": adapter_name},
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+            async with self._lock:
+                self._known.discard(adapter_name)
+                self._known = {m for m in self._known if not m.endswith(f"/{adapter_name}")}
+                self._fetched_at = time.monotonic()
+            logger.info("AdapterRegistry.unload %s ok (%s)", adapter_name, self._base_url)
+            return True
+        except Exception as exc:
+            logger.error("AdapterRegistry.unload %s failed: %s", adapter_name, exc)
+            return False
+
+    async def invalidate(self) -> None:
+        """Force next adapter_available/list_known call to re-query /v1/models."""
+        async with self._lock:
+            self._fetched_at = 0.0
 
     async def _refresh_if_stale(self) -> None:
         if time.monotonic() - self._fetched_at < self._ttl:
@@ -453,6 +497,14 @@ class LocalVLLMBackend(InferenceBackend):
         result = resp.json()
         tokens = result.get("tokens", [])
         return len(tokens) if tokens else int(result.get("count", 0))
+
+    async def load_adapter(self, adapter_name: str, lora_path: str) -> bool:
+        """Load a LoRA adapter at runtime via vLLM's load_lora_adapter API."""
+        return await self._registry.load(adapter_name, lora_path)
+
+    async def unload_adapter(self, adapter_name: str) -> bool:
+        """Unload a LoRA adapter at runtime via vLLM's unload_lora_adapter API."""
+        return await self._registry.unload(adapter_name)
 
     async def list_adapters(self) -> list[str]:
         """Return names of currently loaded LoRA adapters for this backend."""

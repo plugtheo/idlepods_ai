@@ -42,22 +42,23 @@ services:
     runtime: nvidia
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
     command: >
       --model deepseek-ai/deepseek-coder-6.7b-instruct
       --enable-lora
       --max-lora-rank 64
+      --max-loras 8
       --port 8000
       --host 0.0.0.0
       --quantization fp8
       --max-model-len 4096
       --gpu-memory-utilization 0.45
       --tokenizer-mode slow
-      --lora-modules coding_lora=/lora_checkpoints/coding_lora debugging_lora=/lora_checkpoints/debugging_lora review_lora=/lora_checkpoints/review_lora
     volumes:
       # Base model weights — pre-downloaded on host at HF_CACHE_DIR
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
-      # LoRA adapters — written by Training Service, mounted read-only here
-      - ../data/lora_checkpoints:/lora_checkpoints:ro
+      # LoRA adapters — written by Training Service; read by vLLM at runtime load
+      - ../data/lora_checkpoints:/lora_checkpoints
     ports:
       - "8000:8000"
     networks:
@@ -77,21 +78,22 @@ services:
         condition: service_healthy
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
     command: >
       --model mistralai/Mistral-7B-Instruct-v0.1
       --enable-lora
       --max-lora-rank 64
+      --max-loras 8
       --port 8001
       --host 0.0.0.0
       --quantization fp8
       --max-model-len 4096
       --gpu-memory-utilization 0.40
-      --lora-modules planning_lora=/lora_checkpoints/planning_lora research_lora=/lora_checkpoints/research_lora criticism_lora=/lora_checkpoints/criticism_lora
     volumes:
       # Base model weights — pre-downloaded on host at HF_CACHE_DIR
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
-      # LoRA adapters — written by Training Service, mounted read-only here
-      - ../data/lora_checkpoints:/lora_checkpoints:ro
+      # LoRA adapters — written by Training Service; read by vLLM at runtime load
+      - ../data/lora_checkpoints:/lora_checkpoints
     ports:
       - "8001:8001"
     networks:
@@ -212,6 +214,7 @@ services:
       - TRAINING__TRAINING_EXCLUSIVE_MODE=${TRAINING_EXCLUSIVE_MODE:-BLOCK}
       - TRAINING__LOCK_PATH=/data/training.lock
       - TRAINING__COMPOSE_FILE=/compose/compose.yml
+      - TRAINING__INFERENCE_URL=http://inference:8010
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
     networks:

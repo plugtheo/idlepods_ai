@@ -75,12 +75,25 @@ for d in sorted(base.iterdir()):
     manifest_entries[name] = meta
     print(f"[WROTE] {name}/metadata.json  v1.0.0  status={info['status']}")
 
-# Write root manifest
+# Write root manifest — new schema with active_version/active_path/previous_version/history
+manifest_adapters = {}
+for name, meta in manifest_entries.items():
+    manifest_adapters[name] = {
+        "capability":       meta.get("capability", ""),
+        "model_family":     meta.get("model_family", "unknown"),
+        "active_version":   meta.get("version", "1.0.0"),
+        "active_path":      str(base / name),
+        "previous_version": "",
+        "previous_path":    "",
+        "updated_at":       meta.get("created_at", datetime.now(timezone.utc).isoformat()),
+        "history":          meta.get("history", []),
+    }
+
 manifest = {
     "generated_at": datetime.now(timezone.utc).isoformat(),
-    "adapters": manifest_entries,
+    "adapters": manifest_adapters,
 }
 manifest_path = base / "manifest.json"
 manifest_path.write_text(json.dumps(manifest, indent=2))
 print(f"\n[WROTE] {manifest_path}")
-print(f"        {len(manifest_entries)} adapters indexed")
+print(f"        {len(manifest_adapters)} adapters indexed")
