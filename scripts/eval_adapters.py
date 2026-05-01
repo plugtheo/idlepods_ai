@@ -34,8 +34,7 @@ Usage
       --roles coder reviewer \\
       --n-samples 10 \\
       --prev-adapter coding_lora_v1 \\
-      --deepseek-url http://localhost:8000 \\
-      --mistral-url http://localhost:8001 \\
+      --vllm-url http://localhost:8000 \\
       --timeout 60 \\
       --output both \\
       --seed 42
@@ -92,15 +91,16 @@ REPORTS_DIR = Path(__file__).parent / "eval_reports"
 sys.path.insert(0, str(PROJECT_ROOT))
 from shared.contracts.agent_prompts import AGENT_PROMPTS  # noqa: E402
 
-ROLE_MODEL_FAMILY: dict[str, str] = {
-    "planner":    "mistral",
-    "researcher": "mistral",
-    "coder":      "deepseek",
-    "debugger":   "deepseek",
-    "reviewer":   "deepseek",
-    "critic":     "mistral",
-    "consensus":  "mistral",
-}
+def _default_backend_name() -> str:
+    try:
+        from shared.contracts.models import load_registry
+        return load_registry().default_backend
+    except Exception:
+        return "primary"
+
+ROLE_BACKEND: dict[str, str] = {role: _default_backend_name() for role in (
+    "planner", "researcher", "coder", "debugger", "reviewer", "critic", "consensus"
+)}
 
 # Current adapter name per role (None = use base model in production).
 # Mirrors orchestration/app/agents/prompts.py ROLE_ADAPTER.
@@ -144,10 +144,13 @@ ROLE_MAX_TOKENS: dict[str, int] = {
 }
 
 # Fallback base-model names when vLLM /v1/models cannot be reached
-BASE_MODEL_FALLBACKS: dict[str, str] = {
-    "deepseek": "deepseek-ai/deepseek-coder-6.7b-instruct",
-    "mistral":  "mistralai/Mistral-7B-Instruct-v0.1",
-}
+def _get_base_model_id() -> str:
+    try:
+        from shared.contracts.models import load_registry
+        registry = load_registry()
+        return registry.backends[registry.default_backend].model_id
+    except Exception:
+        return "Qwen/Qwen3-14B"
 
 # Required structural output fields for evaluator roles
 EVALUATOR_REQUIRED_FIELDS: dict[str, list[str]] = {
@@ -1125,12 +1128,8 @@ examples:
         help="Name of a previous adapter already loaded in vLLM to compare against",
     )
     parser.add_argument(
-        "--deepseek-url", default="http://localhost:8000", metavar="URL",
-        help="vLLM DeepSeek endpoint (default: http://localhost:8000)",
-    )
-    parser.add_argument(
-        "--mistral-url", default="http://localhost:8001", metavar="URL",
-        help="vLLM Mistral endpoint (default: http://localhost:8001)",
+        "--vllm-url", default="http://localhost:8000", metavar="URL",
+        help="vLLM endpoint for the primary backend (default: http://localhost:8000)",
     )
     parser.add_argument(
         "--timeout", type=int, default=30, metavar="SECS",
@@ -1168,10 +1167,7 @@ def main() -> None:
             sys.exit(1)
         roles = args.roles
 
-    vllm_urls = {
-        "deepseek": args.deepseek_url,
-        "mistral":  args.mistral_url,
-    }
+    vllm_urls = {_default_backend_name(): args.vllm_url}
 
     print()
     print("Adapter Evaluation Tool")
@@ -1187,10 +1183,10 @@ def main() -> None:
     # ── Discover base model names ────────────────────────────────────────────
     print("Discovering base model names from vLLM servers…")
     base_models: dict[str, str] = {}
-    for family, url in vllm_urls.items():
-        name = discover_base_model_name(url, family, timeout=10)
-        base_models[family] = name
-        print(f"  {family:8s}: {name}")
+    for backend_key, url in vllm_urls.items():
+        name = discover_base_model_name(url, backend_key, timeout=10)
+        base_models[backend_key] = name
+        print(f"  {backend_key:8s}: {name}")
     print()
 
     # ── Evaluate each role ───────────────────────────────────────────────────
@@ -1198,14 +1194,14 @@ def main() -> None:
     all_results: list[list[dict]] = []
 
     for role in roles:
-        family      = ROLE_MODEL_FAMILY[role]
-        url         = vllm_urls[family]
-        adapter     = ROLE_ADAPTER[role]
-        base_model  = base_models[family]
+        backend_name = ROLE_BACKEND[role]
+        url          = vllm_urls[backend_name]
+        adapter      = ROLE_ADAPTER[role]
+        base_model   = base_models[backend_name]
 
         print(
             f"Evaluating  : {role}  "
-            f"[model={family}, adapter={adapter or 'none'}]"
+            f"[backend={backend_name}, adapter={adapter or 'none'}]"
         )
 
         try:

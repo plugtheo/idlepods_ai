@@ -37,14 +37,14 @@ services:
 
   # ── Local vLLM servers ───────────────────────────────────────────────────
 
-  vllm-qwen:
+  vllm-primary:
     image: vllm/vllm-openai:v0.7.3
     runtime: nvidia
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
     command: >
-      --model Qwen/Qwen3-14B
+      --model ${VLLM_MODEL_ID:-Qwen/Qwen3-14B}
       --enable-lora
       --max-lora-rank 64
       --max-loras 8
@@ -53,7 +53,7 @@ services:
       --enable-auto-tool-choice
       --tool-call-parser hermes
       --gpu-memory-utilization 0.90
-      --max-model-len 4096
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-4096}
       --gpu-memory-utilization 0.45
       --tokenizer-mode slow
     volumes:
@@ -79,17 +79,19 @@ services:
       dockerfile: inference/Dockerfile
     env_file: ../.env
     environment:
-      - INFERENCE__QWEN_URL=http://vllm-qwen:8000
       - INFERENCE__GRPC_PORT=50051
+      - MODELS_YAML_PATH=/config/models.yaml
     networks:
       - idledev
     ports:
       - "8010:8010"
       - "50051:50051"   # gRPC — internal + host-accessible for direct client access
     depends_on:
-      vllm-qwen:
+      vllm-primary:
         condition: service_healthy
     restart: unless-stopped
+    volumes:
+      - ../models.yaml:/config/models.yaml:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')"]
       interval: 15s
@@ -163,6 +165,7 @@ services:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
       - /var/run/docker.sock:/var/run/docker.sock
       - ./compose.yml:/compose/compose.yml:ro
+      - ../models.yaml:/config/models.yaml:ro
     environment:
       - TRAINING__JSONL_PATH=/data/experiences.jsonl
       - TRAINING__OUTPUT_DIR=/data/lora_checkpoints
@@ -173,6 +176,7 @@ services:
       - TRAINING__LOCK_PATH=/data/training.lock
       - TRAINING__COMPOSE_FILE=/compose/compose.yml
       - TRAINING__INFERENCE_URL=http://inference:8010
+      - MODELS_YAML_PATH=/config/models.yaml
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
     networks:
@@ -216,6 +220,7 @@ services:
     env_file: ../.env
     volumes:
       - experiences:/data        # JSONL at /data/experiences.jsonl + vector_store at /data/vector_store
+      - ../models.yaml:/config/models.yaml:ro
     environment:
       - ORCHESTRATION__INFERENCE_URL=http://inference:8010
       - ORCHESTRATION__DEFAULT_MAX_ITERATIONS=${ORCHESTRATION__DEFAULT_MAX_ITERATIONS:-2}
@@ -225,6 +230,7 @@ services:
       - ORCHESTRATION__INFERENCE_GRPC_PORT=50051
       - ORCHESTRATION__JSONL_PATH=/data/experiences.jsonl
       - ORCHESTRATION__CHROMADB_PATH=/data/vector_store
+      - MODELS_YAML_PATH=/config/models.yaml
       # Uncomment to switch ChromaDB to server mode (also uncomment chromadb service above):
       # - ORCHESTRATION__CHROMADB_HOST=chromadb
       # - ORCHESTRATION__CHROMADB_PORT=8000

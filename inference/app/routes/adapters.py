@@ -11,7 +11,8 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..backends.factory import get_backend_for_capability, get_backend
+from shared.contracts.models import load_registry
+from ..backends.factory import get_backend
 
 router = APIRouter(prefix="/adapters", tags=["adapters"])
 logger = logging.getLogger(__name__)
@@ -24,29 +25,39 @@ _MANIFEST_PATH = _os.environ.get(
 
 
 class AdapterLoadRequest(BaseModel):
-    capability: str
+    backend: str
     lora_name: str
     lora_path: str
 
 
 class AdapterUnloadRequest(BaseModel):
-    capability: str
+    backend: str
     lora_name: str
 
 
 class AdapterSwapRequest(BaseModel):
-    capability: str
+    backend: str
     canonical_name: str
     new_path: str
 
 
 class AdapterRollbackRequest(BaseModel):
-    capability: str
+    backend: str
+
+
+def _get_backend_or_404(backend_name: str):
+    registry = load_registry()
+    if backend_name not in registry.backends:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown backend '{backend_name}'. Known: {list(registry.backends)}",
+        )
+    return get_backend(backend_name)
 
 
 @router.post("/load")
 async def load_adapter(req: AdapterLoadRequest) -> Dict[str, Any]:
-    backend = get_backend_for_capability(req.capability)
+    backend = _get_backend_or_404(req.backend)
     ok = await backend.load_adapter(req.lora_name, req.lora_path)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Failed to load {req.lora_name}")
@@ -55,7 +66,7 @@ async def load_adapter(req: AdapterLoadRequest) -> Dict[str, Any]:
 
 @router.post("/unload")
 async def unload_adapter(req: AdapterUnloadRequest) -> Dict[str, Any]:
-    backend = get_backend_for_capability(req.capability)
+    backend = _get_backend_or_404(req.backend)
     ok = await backend.unload_adapter(req.lora_name)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Failed to unload {req.lora_name}")
@@ -69,10 +80,9 @@ async def swap_adapter(req: AdapterSwapRequest) -> Dict[str, Any]:
     → unload __staging.  Staging adapter must already be loaded by the caller.
     Brief fallback to base model is expected during the unload/load gap.
     """
-    backend = get_backend_for_capability(req.capability)
+    backend = _get_backend_or_404(req.backend)
     staging_name = f"{req.canonical_name}__staging"
 
-    # Unload old canonical (may not exist on first deploy — log but continue).
     old_unloaded = await backend.unload_adapter(req.canonical_name)
     if not old_unloaded:
         logger.warning("swap: could not unload old %s — proceeding", req.canonical_name)
@@ -87,7 +97,6 @@ async def swap_adapter(req: AdapterSwapRequest) -> Dict[str, Any]:
             ),
         )
 
-    # Unload staging — best-effort, non-fatal.
     await backend.unload_adapter(staging_name)
 
     logger.info("swap: %s → %s", req.canonical_name, req.new_path)
@@ -108,14 +117,14 @@ async def rollback_adapter(req: AdapterRollbackRequest) -> Dict[str, Any]:
     adapter_name: str | None = None
     adapter_entry: dict | None = None
     for name, entry in manifest.get("adapters", {}).items():
-        if entry.get("capability") == req.capability:
+        if entry.get("backend") == req.backend:
             adapter_name = name
             adapter_entry = entry
             break
 
     if adapter_entry is None:
         raise HTTPException(
-            status_code=404, detail=f"No adapter for capability '{req.capability}'"
+            status_code=404, detail=f"No adapter for backend '{req.backend}'"
         )
 
     previous_path = adapter_entry.get("previous_path")
@@ -125,7 +134,7 @@ async def rollback_adapter(req: AdapterRollbackRequest) -> Dict[str, Any]:
             detail=f"No previous_path recorded for {adapter_name} — nothing to roll back to",
         )
 
-    backend = get_backend_for_capability(req.capability)
+    backend = _get_backend_or_404(req.backend)
 
     await backend.unload_adapter(adapter_name)
     ok = await backend.load_adapter(adapter_name, previous_path)
@@ -143,9 +152,9 @@ async def rollback_adapter(req: AdapterRollbackRequest) -> Dict[str, Any]:
 async def list_adapters() -> Dict[str, Any]:
     """List currently loaded adapters across all backends."""
     result: Dict[str, Any] = {}
-    for family in ("deepseek", "mistral"):
+    for name in load_registry().backends:
         try:
-            result[family] = await get_backend(family).list_adapters()
+            result[name] = await get_backend(name).list_adapters()
         except Exception as exc:
-            result[family] = {"error": str(exc)}
+            result[name] = {"error": str(exc)}
     return result

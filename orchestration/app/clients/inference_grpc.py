@@ -96,7 +96,7 @@ class GrpcInferenceClient:
     ) -> "inference_pb2.GenerateRequest":
         """Convert the shared Pydantic contract to a proto request message."""
         proto_req = inference_pb2.GenerateRequest(
-            model_family=request.model_family,
+            backend=request.backend,
             role=request.role,
             messages=[
                 inference_pb2.MessageProto(
@@ -155,7 +155,7 @@ class GrpcInferenceClient:
         proto_resp = await self._stub.Generate(proto_req)
         return GenerateResponse(
             content=proto_resp.content,
-            model_family=request.model_family,   # echo from request, not response
+            backend=request.backend,             # echo from request, not response
             role=request.role,                   # echo from request, not response
             tokens_generated=proto_resp.tokens_generated,
             session_id=request.session_id,

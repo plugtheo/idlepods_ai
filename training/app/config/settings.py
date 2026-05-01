@@ -23,10 +23,10 @@ class TrainingSettings(BaseSettings):
         description="Directory to write trained LoRA adapter checkpoints",
     )
 
-    # Base model identifier
-    qwen_model: str = Field(
-        "Qwen/Qwen3-14B",
-        description="HuggingFace model ID for Qwen LoRA training",
+    # Backend registry
+    models_yaml_path: str = Field(
+        default="/config/models.yaml",
+        description="Path to the models.yaml registry file.",
     )
 
     # Diversity thresholds
@@ -88,7 +88,7 @@ class TrainingSettings(BaseSettings):
         description="Filesystem lock to prevent concurrent training jobs (scheduler-side only).",
     )
     vllm_services: list[str] = Field(
-        default_factory=lambda: ["vllm-qwen"],
+        default_factory=lambda: ["vllm-primary"],
         description="Compose service names of local vLLM instances to stop/start in BLOCK mode.",
     )
     compose_file: str = Field(

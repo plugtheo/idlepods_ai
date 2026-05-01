@@ -13,7 +13,7 @@ ORCHESTRATION__SHUTDOWN_DRAIN_TIMEOUT_S — seconds to wait for in-flight experi
 ORCHESTRATION__EMBEDDING_MODEL   — sentence-transformers model for embeddings
 ORCHESTRATION__CHROMADB_HOST     — empty = local PersistentClient; set = HttpClient
 
-Agent constants (AGENT_PROMPTS, role_max_tokens, role_model_family, role_adapter)
+Agent constants (AGENT_PROMPTS, role_max_tokens, role_backend, role_adapter)
 are also exported from this module so nodes.py has a single import point.
 """
 
@@ -222,20 +222,19 @@ class OrchestrationSettings(BaseSettings):
             'ORCHESTRATION__ROLE_MAX_TOKENS=\'{\'coder\'":2048,\'consensus\'":2048,...}\''
         ),
     )
-    role_model_family: Dict[str, str] = Field(
+    role_backend: Dict[str, str] = Field(
         default_factory=lambda: {
-            "planner":    "qwen",
-            "researcher": "qwen",
-            "coder":      "qwen",
-            "debugger":   "qwen",
-            "reviewer":   "qwen",
-            "critic":     "qwen",
-            "consensus":  "qwen",
+            "planner":    "primary",
+            "researcher": "primary",
+            "coder":      "primary",
+            "debugger":   "primary",
+            "reviewer":   "primary",
+            "critic":     "primary",
+            "consensus":  "primary",
         },
         description=(
-            "Maps each agent role to the vLLM model family it should run on. "
-            "Must align with the model families served by the Inference Service. "
-            "Override with ORCHESTRATION__ROLE_MODEL_FAMILY."
+            "Maps each agent role to the models.yaml backend name it should run on. "
+            "Override with ORCHESTRATION__ROLE_BACKEND."
         ),
     )
     role_adapter: Dict[str, Optional[str]] = Field(

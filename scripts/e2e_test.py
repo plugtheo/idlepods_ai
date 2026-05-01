@@ -164,10 +164,10 @@ ROLE_FORMAT_CHECKS: dict[str, list[tuple[str, re.Pattern | None]]] = {
                    ("code is well-formatted", MULTILINE_CODE_RE)],
     "debugger":   [("has ISSUE:", re.compile(r"ISSUE\s*:", re.I)),
                    ("has FIX:",   re.compile(r"FIX\s*:",   re.I))],
-    # reviewer uses review_lora (DeepSeek); structured format from system prompt is enforced.
+    # reviewer uses review_lora; structured format from system prompt is enforced.
     "reviewer":   [("has SCORE:",      re.compile(r"SCORE\s*:",   re.I)),
                    ("has ISSUES:",     re.compile(r"ISSUES\s*:",  re.I))],
-    # critic uses criticism_lora (Mistral) with proper context thanks to expanded history filter.
+    # critic uses criticism_lora; expanded history filter provides proper context.
     "critic":     [("has SCORE:",      re.compile(r"SCORE\s*:",   re.I)),
                    ("has BLOCKERS:",   re.compile(r"BLOCKERS\s*:", re.I))],
     "planner":    [("has numbered list", NUMBERED_LIST_RE)],
@@ -457,37 +457,37 @@ def _smoke_test_adapters(base_url: str) -> None:
          _SYS.format(
              sys="You are CoderAgent — an expert software engineer across Python, JavaScript/TypeScript, Go, Rust, SQL, React, Vue, CSS, and shell scripting",
              user="Write a Python function that returns the nth Fibonacci number using memoization."),
-         "coding_lora     / deepseek",
+         "coding_lora     / primary",
          re.compile(r"def |```|return", re.I)),
         ("http://localhost:8000", "debugging_lora",
          _SYS.format(
              sys="You are DebuggerAgent — an expert debugger and root-cause analyst for all programming languages and runtimes",
              user="Fix this: def divide(a, b): return a / b  # crashes when b=0"),
-         "debugging_lora  / deepseek",
+         "debugging_lora  / primary",
          re.compile(r"ISSUE\s*:|ZeroDivision|zero", re.I)),
         ("http://localhost:8000", "review_lora",
          _SYS.format(
              sys="You are ReviewerAgent — an expert code reviewer focused on correctness, security (OWASP), style, and maintainability",
              user="Review this code:\ndef add(a, b):\n    return a + b"),
-         "review_lora     / deepseek",
+         "review_lora     / primary",
          re.compile(r"SCORE\s*:", re.I)),
-        ("http://localhost:8001", "planning_lora",
+        ("http://localhost:8000", "planning_lora",
          _SYS.format(
              sys="You are PlannerAgent — an expert technical project planner and system architect",
              user="Plan a REST API for a simple todo list application."),
-         "planning_lora   / mistral",
+         "planning_lora   / primary",
          re.compile(r"^\s*\d+\.", re.M)),
-        ("http://localhost:8001", "research_lora",
+        ("http://localhost:8000", "research_lora",
          _SYS.format(
              sys="You are ResearchAgent — an expert technical researcher and knowledge synthesizer",
              user="What are the key differences between REST and GraphQL APIs?"),
-         "research_lora   / mistral",
+         "research_lora   / primary",
          re.compile(r"REST|GraphQL|query|schema", re.I)),
-        ("http://localhost:8001", "criticism_lora",
+        ("http://localhost:8000", "criticism_lora",
          _SYS.format(
              sys="You are CriticAgent — a ruthless quality gatekeeper.\nYour job: give an honest overall assessment of the full solution so far.\nOutput:\nSCORE: <0.0\u20131.0>\nVERDICT: <one sentence summary>\nBLOCKERS: <critical issues that must be fixed, or 'None'>\nIMPROVEMENT: <the single most impactful change>",
              user="Critique this solution: A single-threaded Python web server that stores all session data in a global dictionary, with no authentication, deployed directly to production."),
-         "criticism_lora  / mistral",
+         "criticism_lora  / primary",
          re.compile(r"SCORE\s*:|BLOCKERS\s*:", re.I)),
     ]
 

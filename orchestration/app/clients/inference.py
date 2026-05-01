@@ -95,11 +95,11 @@ class InferenceClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def tokenize(self, model_family: str, text: str) -> int:
-        """POST /v1/tokenize → token count for text using the specified model family."""
+    async def tokenize(self, backend: str, text: str) -> int:
+        """POST /v1/tokenize → token count for text using the specified backend."""
         resp = await self._client.post(
             f"{self._base_url}/v1/tokenize",
-            json={"model_family": model_family, "text": text},
+            json={"backend": backend, "text": text},
         )
         resp.raise_for_status()
         return int(resp.json()["token_count"])

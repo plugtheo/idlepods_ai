@@ -26,6 +26,23 @@ import re
 from shared.contracts.agent_prompts import AGENT_PROMPTS as _AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE as _CAP_TO_ROLE
 
 
+def _resolve_registry_default() -> str:
+    try:
+        from shared.contracts.models import load_registry
+        return load_registry().default_backend
+    except Exception:
+        return "primary"
+
+
+def _resolve_base_model() -> str:
+    try:
+        from shared.contracts.models import load_registry
+        registry = load_registry()
+        return registry.backends[registry.default_backend].model_id
+    except Exception:
+        return "Qwen/Qwen3-14B"
+
+
 # ---------------------------------------------------------------------------
 # Versioning helpers — imported by train_gpu_simple.py and trainer_entry.py
 # so both the one-time bootstrap path and the online self-training path use
@@ -169,7 +186,7 @@ def _post_train_stage(
         "name":           f"{capability}_lora",
         "version":        new_version,
         "capability":     capability,
-        "model_family":   "deepseek" if "deepseek" in base_model_id.lower() else "mistral",
+        "backend":        _resolve_registry_default(),
         "base_model":     base_model_id,
         "status":         "staging",
         "created_at":     created_at,
@@ -268,7 +285,7 @@ def _promote_to_active(
 
         manifest["adapters"][adapter_name] = {
             "capability":       capability,
-            "model_family":     new_meta.get("model_family", ""),
+            "backend":          new_meta.get("backend", _resolve_registry_default()),
             "active_version":   new_version,
             "active_path":      str(checkpoint_dir / adapter_name),
             "previous_version": old_active_version,
@@ -517,11 +534,11 @@ class TrainingDatasetBuilder:
 class LoRATrainer:
     """Train LoRA adapter on prepared dataset"""
     
-    def __init__(self, 
-                 base_model: str = "deepseek-coder-6.7b",
+    def __init__(self,
+                 base_model: Optional[str] = None,
                  output_dir: str = "./data/adapters",
                  max_seq_length: int = 2048):
-        self.base_model = base_model
+        self.base_model = base_model or _resolve_base_model()
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.max_seq_length = max_seq_length
@@ -641,25 +658,6 @@ class LoRATrainer:
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
 
-            # Fix the Metaspace pre-tokenizer — DeepSeek ONLY.
-            # DeepSeek's tokenizer ships with Metaspace(replacement="▁") but its
-            # BPE vocab uses Ġ (U+0120, GPT-2 byte-level convention).  Metaspace
-            # silently maps spaces to ▁ but the merge rules don't know ▁, so every
-            # word splits on unknown bytes → spaceless generated sequences.
-            # Fix: replace with ByteLevel(add_prefix_space=False) so Ġ-prefixed
-            # tokens are produced and round-trip through _fix_bpe_artifacts at
-            # inference time.
-            #
-            # Mistral uses a genuine SentencePiece tokenizer whose vocab contains
-            # ▁-prefixed tokens (e.g. ▁Python, ▁the).  Metaspace IS the correct
-            # pre-tokenizer for Mistral — applying ByteLevel would produce Ġ-prefixed
-            # tokens that don't exist in Mistral's vocab, catastrophically breaking
-            # tokenization during training and inference.
-            _is_deepseek = "deepseek" in self.base_model.lower()
-            if _is_deepseek:
-                from tokenizers.pre_tokenizers import ByteLevel
-                tokenizer.backend_tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
-
             # Apply LoRA to both attention AND FFN layers for better fine-tuning
             # quality. Attention-only LoRA (v2.0) caused the model to learn
             # incorrect token distributions leading to garbled output.
@@ -742,44 +740,8 @@ class LoRATrainer:
             print("[TRAINER] Starting Unsloth training...")
             trainer.train()
 
-            # Save adapter weights only — do NOT call tokenizer.save_pretrained().
-            # Unsloth's modified tokenizer produces mojibake in tokenizer_config.json
-            # (UTF-8 special token strings double-encoded as Latin-1 bytes).
-            # Instead, we write a corrected tokenizer.json directly from the
-            # in-memory tokenizer's backend representation, which contains only
-            # the vocab, merge rules, and pre_tokenizer — none of the problematic
-            # special-token config that causes vLLM to reject the file.
-            #
-            # Why we MUST write tokenizer.json at all:
-            #   vLLM at inference defaults to the base model tokenizer.json which
-            #   has Metaspace(replacement="▁") as the pre_tokenizer.  That
-            #   tokenizes the input prompt differently than training (ByteLevel),
-            #   producing different token IDs for the same prompt → different
-            #   RoPE positions for the [RESPONSE] boundary → adapter attention
-            #   patterns activate on the wrong input context.
-            #   Saving the corrected tokenizer.json makes vLLM load ByteLevel for
-            #   this adapter, ensuring training/inference tokenization is identical.
             self.adapter_id = self.output_dir.name
             model.save_pretrained(str(self.output_dir))
-
-            # Write corrected tokenizer.json (DeepSeek only).
-            # For DeepSeek we must persist the ByteLevel pre-tokenizer so vLLM at
-            # inference uses the same tokenization as training.  We serialise the
-            # in-memory backend tokenizer directly (bypasses Unsloth save path —
-            # no tokenizer_config.json, no mojibake risk).
-            #
-            # For Mistral the base model tokenizer.json already has the correct
-            # Metaspace pre-tokenizer, so writing nothing is safe; vLLM falls back
-            # to the base model file and gets exactly what was used during training.
-            if _is_deepseek:
-                try:
-                    tok_json_str = tokenizer.backend_tokenizer.to_str()
-                    (self.output_dir / "tokenizer.json").write_text(tok_json_str, encoding="utf-8")
-                    print("[TRAINER] [OK] Corrected tokenizer.json written (ByteLevel pre-tokenizer)")
-                except Exception as _te:
-                    print(f"[TRAINER] [WARN] Could not write tokenizer.json: {_te} — vLLM will use base model tokenizer")
-            else:
-                print("[TRAINER] [OK] Mistral tokenizer — no tokenizer.json patch needed (Metaspace is correct)")
 
             # Guard against silent save failures (out-of-disk-space, Unsloth
             # version mismatch, etc.) where save_pretrained() returns without
@@ -861,12 +823,12 @@ class LoRAAgentTrainerPipeline:
     
     def __init__(self,
                  agent_runs_file: Optional[str] = None,
-                 base_model: str = "deepseek-coder-6.7b"):
+                 base_model: Optional[str] = None):
         self.agent_runs_file = agent_runs_file
-        self.base_model = base_model
+        self.base_model = base_model or _resolve_base_model()
         self.dataset_manager = AgentOutputDataset()
         self.trainer_builder = TrainingDatasetBuilder()
-        self.lora_trainer = LoRATrainer(base_model=base_model)
+        self.lora_trainer = LoRATrainer(base_model=self.base_model)
         
         self.run_id = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.report = {
@@ -1026,9 +988,7 @@ async def main():
     """Example usage"""
     
     # Initialize pipeline
-    pipeline = LoRAAgentTrainerPipeline(
-        base_model="deepseek-coder-6.7b"
-    )
+    pipeline = LoRAAgentTrainerPipeline()
     
     # Run complete pipeline
     report = await pipeline.run(

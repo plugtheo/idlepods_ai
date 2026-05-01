@@ -12,15 +12,12 @@ Pipeline:
   3. After training, versioned metadata and a root manifest are written so
      vLLM can discover and hot-load newly produced adapters.
 
-Model assignment (mirrors ModelRegistry._CAPABILITY_MODEL_MAP):
-  coding / debugging / review       -> deepseek-ai/deepseek-coder-6.7b-instruct
-  planning / research / criticism   -> mistralai/Mistral-7B-Instruct-v0.1
+Model assignment: all capabilities use the default backend from models.yaml.
 
 Output (auto-discovered by ModelRegistry._scan_adapters):
   data/lora_checkpoints/{capability}_lora/
     adapter_model.safetensors
     adapter_config.json
-    tokenizer.json
     metadata.json
 """
 
@@ -51,8 +48,13 @@ from shared.contracts.agent_prompts import AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE
 # Agent capability → (base model id, system description)
 # Mirrors ModelRegistry._CAPABILITY_MODEL_MAP and local_models.json
 # ---------------------------------------------------------------------------
-DEEPSEEK_ID  = "deepseek-ai/deepseek-coder-6.7b-instruct"
-MISTRAL_ID   = "mistralai/Mistral-7B-Instruct-v0.1"
+def _resolve_base_model_id() -> str:
+    try:
+        from shared.contracts.models import load_registry
+        registry = load_registry()
+        return registry.backends[registry.default_backend].model_id
+    except Exception:
+        return "Qwen/Qwen3-14B"
 
 
 def _resolve_local_model_path(model_id: str) -> str:
@@ -102,17 +104,10 @@ LORA_MODULES = [
 # Bootstrap key → AGENT_PROMPTS key:
 #   coding → coder  |  debugging → debugger  |  review → reviewer
 #   planning → planner  |  research → researcher  |  criticism → critic
-_BOOTSTRAP_MODEL: Dict[str, str] = {
-    "coding":    DEEPSEEK_ID,
-    "debugging": DEEPSEEK_ID,
-    "review":    DEEPSEEK_ID,
-    "planning":  MISTRAL_ID,
-    "research":  MISTRAL_ID,
-    "criticism": MISTRAL_ID,
-}
+_BASE_MODEL_ID = _resolve_base_model_id()
 AGENT_SPECS: Dict[str, Tuple[str, str]] = {
-    cap: (_resolve_local_model_path(_BOOTSTRAP_MODEL[cap]), AGENT_PROMPTS[BOOTSTRAP_CAP_TO_ROLE[cap]])
-    for cap in _BOOTSTRAP_MODEL
+    cap: (_resolve_local_model_path(_BASE_MODEL_ID), AGENT_PROMPTS[BOOTSTRAP_CAP_TO_ROLE[cap]])
+    for cap in BOOTSTRAP_CAP_TO_ROLE
 }
 
 # Training hyper-parameters — passed through to LoRATrainer.

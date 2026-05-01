@@ -81,7 +81,7 @@ def _build_pydantic_request(request: "inference_pb2.GenerateRequest"):  # type: 
     adapter_name = request.adapter_name if request.HasField("adapter_name") else None
 
     return GenerateRequest(
-        model_family=request.model_family,
+        backend=request.backend,
         role=request.role,
         messages=messages,
         adapter_name=adapter_name,
@@ -105,7 +105,7 @@ if _GRPC_AVAILABLE:
         ) -> "inference_pb2.GenerateResponse":
             try:
                 pydantic_req = _build_pydantic_request(request)
-                backend = get_backend(pydantic_req.model_family)
+                backend = get_backend(pydantic_req.backend)
                 response = await backend.generate(pydantic_req)
                 return inference_pb2.GenerateResponse(
                     content=response.content,
@@ -128,7 +128,7 @@ if _GRPC_AVAILABLE:
             """
             try:
                 pydantic_req = _build_pydantic_request(request)
-                backend = get_backend(pydantic_req.model_family)
+                backend = get_backend(pydantic_req.backend)
                 token_count = 0
                 async for token in backend.generate_stream(pydantic_req):
                     token_count += 1

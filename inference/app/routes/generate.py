@@ -29,13 +29,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse
+from shared.contracts.models import load_registry
 from ..backends.factory import get_backend
 from ..backends.local_vllm import get_fallback_counts
 from ..config.settings import settings
 
 
 class _TokenizeBody(BaseModel):
-    model_family: str
+    backend: str
     text: str
 
 logger = logging.getLogger(__name__)
@@ -49,9 +50,9 @@ router = APIRouter()
     summary="Generate a model response",
 )
 async def generate(request: GenerateRequest) -> GenerateResponse:
-    """Run one LLM inference call via the backend for request.model_family."""
+    """Run one LLM inference call via the backend for request.backend."""
     try:
-        backend = get_backend(request.model_family)
+        backend = get_backend(request.backend)
         return await backend.generate(request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -73,7 +74,7 @@ async def generate_stream(request: GenerateRequest) -> StreamingResponse:
     Errors are reported as ``{"error": "<message>"}`` before the connection
     closes.
     """
-    backend = get_backend(request.model_family)
+    backend = get_backend(request.backend)
 
     async def _token_stream():
         try:
@@ -105,20 +106,20 @@ async def health() -> dict:
     """
     backends_status: dict = {}
 
-    for family in ("qwen",):
+    for name in load_registry().backends:
         try:
-            backend = get_backend(family)
+            backend = get_backend(name)
             backend_health = await backend.health()
             adapters = await backend.list_adapters()
-            backends_status[family] = {
+            backends_status[name] = {
                 "type": backend_health.get("backend", "unknown"),
                 "url": backend_health.get("url", ""),
                 "status": backend_health.get("status", "unknown"),
                 "adapters_loaded": adapters,
             }
         except Exception as exc:
-            logger.warning("Health check error for %s: %s", family, exc)
-            backends_status[family] = {
+            logger.warning("Health check error for %s: %s", name, exc)
+            backends_status[name] = {
                 "status": "unavailable",
                 "error": str(exc),
             }
@@ -135,15 +136,15 @@ async def health() -> dict:
 async def model_info() -> dict:
     """Query each vLLM backend for the served model's max_model_len."""
     result: dict = {}
-    for family in ("qwen",):
+    for name in load_registry().backends:
         try:
-            backend = get_backend(family)
-            result[family] = await backend.max_model_len()
+            backend = get_backend(name)
+            result[name] = await backend.max_model_len()
         except Exception as exc:
-            logger.error("model_info failed for %s: %s", family, exc)
+            logger.error("model_info failed for %s: %s", name, exc)
             raise HTTPException(
                 status_code=502,
-                detail=f"Failed to get model info for {family}: {exc}",
+                detail=f"Failed to get model info for {name}: {exc}",
             ) from exc
     return result
 
@@ -151,12 +152,16 @@ async def model_info() -> dict:
 @router.post("/v1/tokenize", summary="Return token count for a text string via a vLLM backend")
 async def tokenize_text(body: _TokenizeBody) -> dict:
     """Proxy a tokenization request to the appropriate vLLM backend."""
-    if body.model_family not in ("qwen",):
-        raise HTTPException(status_code=400, detail="model_family must be 'qwen'")
+    registry = load_registry()
+    if body.backend not in registry.backends:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown backend '{body.backend}'. Known: {list(registry.backends)}",
+        )
     try:
-        backend = get_backend(body.model_family)
+        backend = get_backend(body.backend)
         count = await backend.tokenize(body.text)
         return {"token_count": count}
     except Exception as exc:
-        logger.error("tokenize failed for %s: %s", body.model_family, exc)
+        logger.error("tokenize failed for %s: %s", body.backend, exc)
         raise HTTPException(status_code=502, detail=f"Tokenize failed: {exc}") from exc

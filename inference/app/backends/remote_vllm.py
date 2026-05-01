@@ -19,6 +19,7 @@ from typing import AsyncGenerator, Optional
 import httpx
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse
+from shared.contracts.models import BackendEntry
 from ..config.settings import settings
 from .base import InferenceBackend, InferenceError
 from .local_vllm import (
@@ -36,34 +37,27 @@ class RemoteVLLMBackend(InferenceBackend):
     Connects to any vLLM-compatible server (OpenAI-compatible API).
     """
 
-    def __init__(
-        self,
-        model_family: str,
-        base_url: str,
-        model_id: str,
-        auth_token: str = "",
-        ssl_verify: bool = True,
-    ) -> None:
-        self._model_family = model_family
-        self._base_url = base_url.rstrip("/")
-        self._model_id = model_id
-        self._auth_token = auth_token
+    def __init__(self, backend_name: str, entry: BackendEntry) -> None:
+        self._backend_name = backend_name
+        self._base_url = entry.served_url.rstrip("/")
+        self._model_id = entry.model_id
+        self._auth_token = entry.auth_token
         self._timeout = settings.request_timeout_seconds
 
         headers = {}
-        if auth_token:
-            headers["Authorization"] = f"Bearer {auth_token}"
+        if self._auth_token:
+            headers["Authorization"] = f"Bearer {self._auth_token}"
 
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
-            verify=ssl_verify,
+            verify=entry.ssl_verify,
             headers=headers,
             limits=httpx.Limits(
                 max_connections=settings.http_max_connections,
                 max_keepalive_connections=settings.http_max_keepalive_connections,
             ),
         )
-        self._registry = _AdapterRegistry(base_url, model_id)
+        self._registry = _AdapterRegistry(self._base_url, self._model_id)
 
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
         effective_model = await _resolve_model(
@@ -108,14 +102,14 @@ class RemoteVLLMBackend(InferenceBackend):
         tokens_out = data.get("usage", {}).get("completion_tokens", 0)
 
         logger.info(
-            "RemoteVLLM ← role=%s  family=%s  model=%s  tokens=%d  tool_calls=%s",
-            request.role, self._model_family, effective_model, tokens_out,
+            "RemoteVLLM ← role=%s  backend=%s  model=%s  tokens=%d  tool_calls=%s",
+            request.role, self._backend_name, effective_model, tokens_out,
             bool(tool_calls),
         )
 
         return GenerateResponse(
             content=content,
-            model_family=self._model_family,
+            backend=self._backend_name,
             role=request.role,
             tokens_generated=tokens_out,
             session_id=request.session_id,

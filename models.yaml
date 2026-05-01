@@ -1,0 +1,12 @@
+default_backend: primary
+backends:
+  primary:
+    served_url: http://vllm-primary:8000
+    model_id: Qwen/Qwen3-14B
+    max_model_len: 4096
+    quantization: fp8
+    chat_template_supports_tools: true
+    thinking_default: false
+    backend_type: local_vllm
+    auth_token: ""
+    ssl_verify: true

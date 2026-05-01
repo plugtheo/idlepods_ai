@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from shared.contracts.inference import GenerateRequest, Message
+from shared.contracts.models import load_registry
 from ..clients.inference import get_inference_client
 from ..config.settings import AGENT_PROMPTS, settings
 from ..tools.runner import build_tool_schemas, execute_tool_call
@@ -64,6 +65,13 @@ LABEL_PADDING_TOKENS = 5
 
 _TOOL_USING_ROLES = {"coder"}
 _MAX_TOOL_STEPS = 8
+
+
+def _default_backend() -> str:
+    try:
+        return load_registry().default_backend
+    except Exception:
+        return "primary"
 
 
 # ── Per-session token queues ──────────────────────────────────────────────
@@ -337,7 +345,7 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
     messages = _build_messages(role, state)
 
     request_kwargs: Dict[str, Any] = dict(
-        model_family=settings.role_model_family.get(role, "qwen"),
+        backend=settings.role_backend.get(role) or _default_backend(),
         role=role,
         messages=messages,
         adapter_name=settings.role_adapter.get(role),

@@ -36,6 +36,7 @@ from typing import AsyncGenerator, Optional
 import httpx
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse
+from shared.contracts.models import BackendEntry
 from ..config.settings import settings
 from .base import InferenceBackend, InferenceError
 
@@ -325,10 +326,10 @@ class LocalVLLMBackend(InferenceBackend):
     the appropriate URL and model ID for that family.
     """
 
-    def __init__(self, model_family: str, base_url: str, model_id: str) -> None:
-        self._model_family = model_family
-        self._base_url = base_url
-        self._model_id = model_id
+    def __init__(self, backend_name: str, entry: BackendEntry) -> None:
+        self._backend_name = backend_name
+        self._base_url = entry.served_url
+        self._model_id = entry.model_id
         self._timeout = settings.request_timeout_seconds
         # Persistent connection pool — eliminates per-call TCP setup overhead.
         self._client = httpx.AsyncClient(
@@ -397,13 +398,13 @@ class LocalVLLMBackend(InferenceBackend):
         tokens_out = data.get("usage", {}).get("completion_tokens", 0)
 
         logger.info(
-            "LocalVLLM ← role=%s  family=%s  model=%s  tokens=%d",
-            request.role, self._model_family, effective_model, tokens_out,
+            "LocalVLLM ← role=%s  backend=%s  model=%s  tokens=%d",
+            request.role, self._backend_name, effective_model, tokens_out,
         )
 
         return GenerateResponse(
             content=content,
-            model_family=self._model_family,
+            backend=self._backend_name,
             role=request.role,
             tokens_generated=tokens_out,
             session_id=request.session_id,

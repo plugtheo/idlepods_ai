@@ -9,14 +9,26 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from shared.contracts.models import load_registry
+
+
+def _default_backend() -> str:
+    try:
+        return load_registry().default_backend
+    except Exception:
+        return "primary"
+
+
 # Map adapter name → known capability details
 KNOWN_ADAPTERS = {
-    "coding_lora":   {"capability": "coding",    "family": "deepseek", "status": "broken"},
-    "debugging_lora":{"capability": "debugging", "family": "deepseek", "status": "broken"},
-    "review_lora":   {"capability": "review",    "family": "deepseek", "status": "disabled"},
-    "criticism_lora":{"capability": "criticism", "family": "mistral",  "status": "active"},
-    "planning_lora": {"capability": "planning",  "family": "mistral",  "status": "active"},
-    "research_lora": {"capability": "research",  "family": "mistral",  "status": "active"},
+    "coding_lora":   {"capability": "coding",    "status": "broken"},
+    "debugging_lora":{"capability": "debugging", "status": "broken"},
+    "review_lora":   {"capability": "review",    "status": "disabled"},
+    "criticism_lora":{"capability": "criticism", "status": "active"},
+    "planning_lora": {"capability": "planning",  "status": "active"},
+    "research_lora": {"capability": "research",  "status": "active"},
 }
 
 NOTES = {
@@ -44,24 +56,23 @@ for d in sorted(base.iterdir()):
         manifest_entries[name] = meta
         continue
 
-    # Read training params from adapter_config.json
     cfg_path = d / "adapter_config.json"
     cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
 
-    info = KNOWN_ADAPTERS.get(name, {"capability": name, "family": "unknown", "status": "unknown"})
+    info = KNOWN_ADAPTERS.get(name, {"capability": name, "status": "unknown"})
 
     meta = {
         "name":        name,
         "version":     "1.0.0",
         "capability":  info["capability"],
-        "model_family": info["family"],
+        "backend":     _default_backend(),
         "base_model":  cfg.get("base_model_name_or_path", "unknown"),
         "status":      info["status"],
         "note":        NOTES.get(name, ""),
         "lora_r":      cfg.get("r", 8),
         "lora_alpha":  cfg.get("lora_alpha", 16),
         "target_modules": cfg.get("target_modules", []),
-        "created_at":  "2026-03-27T00:00:00+00:00",   # approximate first training date
+        "created_at":  "2026-03-27T00:00:00+00:00",
         "history": [
             {
                 "version":    "1.0.0",
@@ -75,12 +86,12 @@ for d in sorted(base.iterdir()):
     manifest_entries[name] = meta
     print(f"[WROTE] {name}/metadata.json  v1.0.0  status={info['status']}")
 
-# Write root manifest — new schema with active_version/active_path/previous_version/history
+# Write root manifest
 manifest_adapters = {}
 for name, meta in manifest_entries.items():
     manifest_adapters[name] = {
         "capability":       meta.get("capability", ""),
-        "model_family":     meta.get("model_family", "unknown"),
+        "backend":          meta.get("backend", _default_backend()),
         "active_version":   meta.get("version", "1.0.0"),
         "active_path":      str(base / name),
         "previous_version": "",

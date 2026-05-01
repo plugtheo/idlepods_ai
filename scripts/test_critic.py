@@ -1,5 +1,19 @@
 """Test criticism_lora with exact orchestration system prompt."""
+import sys
+from pathlib import Path
+
 import requests
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+def _primary_url() -> str:
+    try:
+        from shared.contracts.models import load_registry
+        return load_registry().backends[load_registry().default_backend].served_url
+    except Exception:
+        return "http://localhost:8000"
+
 
 def chat(url, model, system, user, max_tokens=384):
     r = requests.post(f"{url}/v1/chat/completions", json={
@@ -33,8 +47,13 @@ TASK = (
     "    return decorator"
 )
 
+URL = _primary_url()
+
 print("--- criticism_lora ---")
-print(chat("http://localhost:8001", "criticism_lora", SYSTEM, TASK))
+print(chat(URL, "criticism_lora", SYSTEM, TASK))
 print()
-print("--- mistral base ---")
-print(chat("http://localhost:8001", "mistralai/Mistral-7B-Instruct-v0.1", SYSTEM, TASK))
+print("--- base model ---")
+from shared.contracts.models import load_registry as _lr
+_reg = _lr()
+_base = _reg.backends[_reg.default_backend].model_id
+print(chat(URL, _base, SYSTEM, TASK))

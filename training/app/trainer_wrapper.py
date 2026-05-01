@@ -75,8 +75,13 @@ def file_lock(path: str):
             pass
 
 
-def _base_model_for(capability: str) -> str:
-    return settings.qwen_model
+def _base_model_for(role: str) -> str:
+    from shared.contracts.models import load_registry
+    try:
+        registry = load_registry(settings.models_yaml_path)
+        return registry.backends[registry.default_backend].model_id
+    except Exception:
+        return "Qwen/Qwen3-14B"
 
 
 def _run_local(records: list[dict]) -> None:

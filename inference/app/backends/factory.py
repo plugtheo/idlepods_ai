@@ -1,13 +1,11 @@
 """
 Backend factory
 ================
-Returns the configured inference backend for the Qwen model family.
-Backends are singletons — one instance per model family, created on first
-call and reused for the lifetime of the process.
+Returns the configured inference backend for a given backend name.
+Backends are singletons keyed by backend name, created on first call
+and reused for the lifetime of the process.
 
-Config drives the selection:
-  INFERENCE__QWEN_BACKEND=local_vllm  (default) → LocalVLLMBackend
-  INFERENCE__QWEN_BACKEND=remote_vllm            → RemoteVLLMBackend
+Backend identity and config are read from models.yaml via the shared registry.
 """
 
 from __future__ import annotations
@@ -16,75 +14,33 @@ import json
 import logging
 from pathlib import Path
 
+from shared.contracts.models import load_registry, get_backend_entry
+
 from .base import InferenceBackend
-from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 _backends: dict[str, InferenceBackend] = {}
 
-# Maps capability label (bootstrap form) → model family (vLLM server).
-# Must stay in sync with docker/compose.yml vLLM service split.
-CAPABILITY_TO_FAMILY: dict[str, str] = {
-    "coding":    "deepseek",
-    "debugging": "deepseek",
-    "review":    "deepseek",
-    "planning":  "mistral",
-    "research":  "mistral",
-    "criticism": "mistral",
-}
 
+def get_backend(backend_name: str) -> InferenceBackend:
+    """Return the singleton inference backend for *backend_name*."""
+    if backend_name in _backends:
+        return _backends[backend_name]
 
-def get_backend(model_family: str) -> InferenceBackend:
-    """
-    Return the singleton inference backend for *model_family*.
+    entry = get_backend_entry(backend_name)
 
-    Parameters
-    ----------
-    model_family:
-        "qwen" (case-insensitive).
-    """
-    family = model_family.lower()
-
-    if family in _backends:
-        return _backends[family]
-
-    if family == "qwen":
-        backend_type = settings.qwen_backend
-        url          = settings.qwen_url
-        model_id     = settings.qwen_model_id
-        auth_token   = settings.qwen_auth_token
-        ssl_verify   = settings.qwen_ssl_verify
-    else:
-        raise ValueError(
-            f"Unknown model_family '{model_family}'. Supported: qwen"
-        )
-
-    if backend_type == "remote_vllm":
+    if entry.backend_type == "remote_vllm":
         from .remote_vllm import RemoteVLLMBackend
-        backend = RemoteVLLMBackend(family, url, model_id, auth_token, ssl_verify)
-        logger.info(
-            "InferenceBackend[%s]: RemoteVLLMBackend → %s", family, url
-        )
+        backend: InferenceBackend = RemoteVLLMBackend(backend_name, entry)
+        logger.info("InferenceBackend[%s]: RemoteVLLMBackend → %s", backend_name, entry.served_url)
     else:
         from .local_vllm import LocalVLLMBackend
-        backend = LocalVLLMBackend(family, url, model_id)
-        logger.info(
-            "InferenceBackend[%s]: LocalVLLMBackend → %s", family, url
-        )
+        backend = LocalVLLMBackend(backend_name, entry)
+        logger.info("InferenceBackend[%s]: LocalVLLMBackend → %s", backend_name, entry.served_url)
 
-    _backends[family] = backend
+    _backends[backend_name] = backend
     return backend
-
-
-def get_backend_for_capability(capability: str) -> InferenceBackend:
-    """Return the backend that serves *capability* (e.g. 'coding' → deepseek backend)."""
-    family = CAPABILITY_TO_FAMILY.get(capability.lower())
-    if family is None:
-        raise ValueError(
-            f"Unknown capability '{capability}'. Known: {list(CAPABILITY_TO_FAMILY)}"
-        )
-    return get_backend(family)
 
 
 async def bootstrap_adapters(manifest_path: str) -> None:
@@ -102,16 +58,24 @@ async def bootstrap_adapters(manifest_path: str) -> None:
         logger.warning("bootstrap_adapters: could not read manifest: %s — skipping", exc)
         return
 
+    registry = load_registry()
+
     for adapter_name, entry in manifest.get("adapters", {}).items():
-        capability = entry.get("capability", "")
-        # New schema: active_path; old schema: fall through gracefully.
+        backend_key = entry.get("backend")
+        if backend_key is None:
+            # v1 manifest entry without a backend field — fall back to default.
+            backend_key = registry.default_backend
+            logger.warning(
+                "bootstrap_adapters: %s has no 'backend' field — using default '%s'",
+                adapter_name, backend_key,
+            )
         active_path = entry.get("active_path")
         previous_path = entry.get("previous_path")
         if not active_path:
             logger.debug("bootstrap_adapters: %s has no active_path — skipping", adapter_name)
             continue
         try:
-            backend = get_backend_for_capability(capability)
+            backend = get_backend(backend_key)
         except ValueError as exc:
             logger.warning("bootstrap_adapters: %s", exc)
             continue

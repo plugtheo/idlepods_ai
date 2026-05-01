@@ -2,10 +2,7 @@
 Inference Service — settings
 =============================
 All configuration is read from environment variables.
-
-The inference service runs locally on a self-hosted vLLM server (Qwen/Qwen3-14B).
-The only required parameters are the Qwen vLLM URL, model ID, gRPC defaults,
-timeout, and ports.
+Backend identity is driven by models.yaml (INFERENCE__MODELS_YAML_PATH).
 """
 
 from pydantic import Field
@@ -20,36 +17,14 @@ class InferenceSettings(BaseSettings):
         extra="ignore",
     )
 
-    # ── Qwen backend config ───────────────────────────────────────────────
-    qwen_backend: str = Field(
-        default="local_vllm",
-        description=(
-            "Backend type for Qwen family: 'local_vllm' (default) or 'remote_vllm'. "
-            "Set to 'remote_vllm' and point INFERENCE__QWEN_URL at any "
-            "OpenAI-compatible endpoint to route Qwen agent calls there."
-        ),
+    # ── Backend registry ──────────────────────────────────────────────────
+    models_yaml_path: str = Field(
+        default="/config/models.yaml",
+        description="Path to the models.yaml registry file.",
     )
-    qwen_url: str = Field(
-        default="http://vllm-qwen:8000",
-        description=(
-            "Base URL of the Qwen vLLM OpenAI-compatible server. "
-            "Override to http://localhost:8000 for bare-metal local runs."
-        ),
-    )
-    qwen_model_id: str = Field(
-        default="Qwen/Qwen3-14B",
-        description="HuggingFace model ID served by the Qwen vLLM server.",
-    )
-    qwen_auth_token: str = Field(
-        default="",
-        description=(
-            "Optional Bearer token for secured remote Qwen endpoints. "
-            "Only used when qwen_backend=remote_vllm."
-        ),
-    )
-    qwen_ssl_verify: bool = Field(
-        default=True,
-        description="Verify SSL certificates for remote Qwen connections.",
+    accept_legacy_backend_names: bool = Field(
+        default=False,
+        description="Accept old model-name strings (qwen/deepseek/mistral) as backend aliases.",
     )
 
     # ── HTTP client settings ──────────────────────────────────────────────
@@ -94,11 +69,6 @@ class InferenceSettings(BaseSettings):
             "Default top_p applied by the gRPC server when the proto request "
             "omits the field. Override with INFERENCE__GRPC_DEFAULT_TOP_P."
         ),
-    )
-
-    mode: str = Field(
-        default="local",
-        description="Inference service mode, currently always local self-hosted vLLM.",
     )
 
     # ── Service ports ─────────────────────────────────────────────────────

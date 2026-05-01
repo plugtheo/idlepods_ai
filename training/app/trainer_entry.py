@@ -8,9 +8,9 @@ converts it into SFT (Supervised Fine-Tuning) training pairs for LoRATrainer.
 Usage:
     python -m services.training.app.trainer_entry \\
         --data-path /tmp/data.jsonl \\
-        --base-model deepseek-ai/deepseek-coder-6.7b-instruct \\
+        --base-model Qwen/Qwen3-14B \\
         --output-dir /data/lora_checkpoints \\
-        --capability coder
+        --role coder
 
 JSONL schema (ExperienceEvent, written by orchestration/app/routes/run.py):
     {

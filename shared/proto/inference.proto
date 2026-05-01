@@ -40,7 +40,7 @@ message MessageProto {
 }
 
 message GenerateRequest {
-  string              model_family  = 1;  // "deepseek" | "mistral"
+  string              backend       = 1;  // opaque backend name from models.yaml, e.g. "primary"
   string              role          = 2;  // agent role, e.g. "coder"
   repeated MessageProto messages    = 3;
 

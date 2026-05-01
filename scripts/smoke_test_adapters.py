@@ -104,8 +104,8 @@ def run_test(test: dict) -> dict:
         )
 
     # Decode the full sequence then strip the prompt — decoding only new
-    # tokens loses byte-level boundary context in BPE tokenizers (DeepSeek,
-    # LLaMA family) causing spaces to be dropped at the split point.
+    # tokens loses byte-level boundary context in BPE tokenizers causing
+    # spaces to be dropped at the split point.
     full_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     prompt_text = tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True)
     output_text = full_text[len(prompt_text):].lstrip()
