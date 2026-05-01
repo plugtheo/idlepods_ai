@@ -20,7 +20,7 @@ from shared.contracts.inference import GenerateResponse
 def _make_response(**kwargs):
     defaults = {
         "content": "generated output",
-        "model_family": "deepseek",
+        "model_family": "qwen",
         "role": "coder",
         "tokens_generated": 15,
         "session_id": "sess-1",
@@ -69,7 +69,7 @@ class TestGenerateStreamRoute:
         resp = inference_client.post(
             "/v1/generate/stream",
             json={
-                "model_family": "deepseek",
+                "model_family": "qwen",
                 "role": "coder",
                 "messages": [{"role": "user", "content": "write code"}],
             },
@@ -80,7 +80,7 @@ class TestGenerateStreamRoute:
         resp = inference_client.post(
             "/v1/generate/stream",
             json={
-                "model_family": "deepseek",
+                "model_family": "qwen",
                 "role": "coder",
                 "messages": [{"role": "user", "content": "write code"}],
             },
@@ -91,7 +91,7 @@ class TestGenerateStreamRoute:
         resp = inference_client.post(
             "/v1/generate/stream",
             json={
-                "model_family": "deepseek",
+                "model_family": "qwen",
                 "role": "coder",
                 "messages": [{"role": "user", "content": "hi"}],
             },
@@ -115,7 +115,7 @@ class TestGenerateStreamRoute:
         resp = inference_client.post(
             "/v1/generate/stream",
             json={
-                "model_family": "deepseek",
+                "model_family": "qwen",
                 "role": "coder",
                 "messages": [{"role": "user", "content": "boom"}],
             },
@@ -140,7 +140,7 @@ class TestGenerateStreamRoute:
         resp = inference_client.post(
             "/v1/generate/stream",
             json={
-                "model_family": "deepseek",
+                "model_family": "qwen",
                 "role": "coder",
                 "messages": [{"role": "user", "content": "complete this"}],
             },
@@ -159,7 +159,7 @@ class TestGenerateStreamRoute:
         resp = inference_client.post(
             "/v1/generate/stream",
             json={
-                "model_family": "deepseek",
+                "model_family": "qwen",
                 "role": "coder",
                 "messages": [{"role": "user", "content": "empty"}],
             },

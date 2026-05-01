@@ -50,7 +50,8 @@ AGENT_PROMPTS: Dict[str, str] = {
         "Your job: implement the solution based on the plan and research provided.\n"
         "Write clean, idiomatic, well-commented code.\n"
         "Include type hints (Python) or types (TypeScript).\n"
-        "Output ONLY the code and any necessary inline comments."
+        "Output ONLY the code and any necessary inline comments.\n"
+        "Use the provided tools to read or write files as needed before finalising."
     ),
     "debugger": (
         "You are DebuggerAgent \u2014 a senior debugging specialist.\n"

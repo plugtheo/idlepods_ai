@@ -43,10 +43,8 @@ Next request uses improved model
 | Service | Port | Role |
 | --- | --- | --- |
 | [gateway](gateway/) | 8080 | Entry point — auth, routing |
-| [orchestration](orchestration/) | 8001 | LangGraph agent pipeline |
-| [inference](inference/) | 8010 / 50051 | LLM backend — DeepSeek (coding) + Mistral (reasoning) |
-| [context](context/) | 8011 | ChromaDB few-shot + repo retrieval |
-| [experience](experience/) | 8012 | Persistence — JSONL + ChromaDB + training trigger |
+| [orchestration](orchestration/) | 8001 | LangGraph agent pipeline + context (in-process) + experience (in-process) |
+| [inference](inference/) | 8010 / 50051 | LLM backend — single Qwen/Qwen3-14B vLLM server with 6 LoRA adapters |
 | [training](training/) | 8013 | LoRA fine-tuning via Unsloth |
 | [shared](shared/) | — | Pydantic contracts, QueryRouter, gRPC stubs |
 
@@ -91,26 +89,27 @@ python scripts/generate_protos.py
 
 ## Adapter training notes
 
-**DeepSeek tokenizer:** `tokenizer.json` declares `Metaspace` but the BPE vocab uses GPT-2 byte-level (`Ġ`). Without the fix below, adapters learn to generate spaceless output. Apply immediately after Unsloth loads the tokenizer:
+All six LoRA adapters (`coding_lora`, `debugging_lora`, `review_lora`, `planning_lora`, `research_lora`, `criticism_lora`) are fine-tuned on **Qwen/Qwen3-14B** base.
 
-```python
-from tokenizers.pre_tokenizers import ByteLevel
-tokenizer.backend_tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
-```
+Training uses **ChatML** format (`<|im_start|>role\ncontent<|im_end|>`). The masking boundary for `DataCollatorForCompletionOnlyLM` is `<|im_start|>assistant\n` — only assistant turns are training targets. Tool-result turns (`role="tool"`) are never trained on.
 
-This is already applied in `training/training/lora_trainer.py`. After training, write only `tokenizer.json` directly from the backend tokenizer — do **not** let Unsloth write `tokenizer_config.json` (causes mojibake that makes vLLM reject the adapter).
+`coder` and `debugger` adapters receive tool-use SFT pairs (assistant tool-call emission + tool-result context) in addition to regular code-generation pairs. All adapters trained before the Qwen3-14B migration are invalid and require full retraining on the new base.
 
-All DeepSeek adapters trained before April 2026 (`debugging_lora`, `review_lora`) were trained with the broken pre-tokenizer and need retraining.
+Thinking mode is disabled at inference time via `chat_template_kwargs={"enable_thinking": False}` — no `<think>` tokens appear in agent outputs.
 
 ---
 
 ## Architecture decisions
 
-**Separate vLLM servers for DeepSeek and Mistral** — complementary strengths (code generation vs. reasoning), independent GPU memory allocation. Trade-off: agent communication is token-level, so long chains re-tokenize the full history each hop.
+**Single Qwen/Qwen3-14B vLLM server** — all six agent roles (planner, researcher, coder, debugger, reviewer, critic) share one server. Per-role specialisation is handled by LoRA adapters selected per request. GPU memory utilisation 0.90 on RTX 3090; `--max-model-len 4096` prevents OOM locally.
+
+**Native OpenAI function calling** — the coder and debugger agents use `--enable-auto-tool-choice --tool-call-parser hermes` on the vLLM server. Tool calls arrive as structured JSON (`response.tool_calls`); the `<<TOOL>><<END>>` regex-parse approach is retired. Supported tools: `read_file`, `write_file`, `list_files`, `run_command` (pytest/ruff/mypy allowlist).
 
 **gRPC for Orchestration → Inference, HTTP elsewhere** — the orchestration-to-inference call is the hot path (one call per agent node per iteration). Everything else is low-frequency enough that HTTP simplicity wins.
 
 **Fire-and-forget for experience recording and training notification** — decouples the user-facing response time from downstream storage and training evaluation latency.
+
+**Context and Experience services are in-process** — no separate context or experience containers; both run as async tasks inside the orchestration process.
 
 ## Limitations
 

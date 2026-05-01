@@ -17,8 +17,8 @@ graph TD
     
     E -->|LangGraph Pipeline| I["Agent Loop"]
     I -->|iterate agents<br/>until convergence| J["Current Agent"]
-    J -->|gRPC GenerateRequest| K["🔧 Inference (8010/50051)"]
-    K -->|DeepSeek or Mistral<br/>+ role-specific LoRA| L["LLM Output"]
+    J -->|gRPC GenerateRequest<br/>+ tool schemas for coder/debugger| K["🔧 Inference (8010/50051)"]
+    K -->|Qwen3-14B<br/>+ role-specific LoRA| L["LLM Output + tool_calls?"]
     L --> J
     
     J -->|score output| M["Review Agent"]
@@ -65,10 +65,9 @@ graph TD
 - **Convergence**: Extracts SCORE from reviewer/critic output, compares against threshold (default 0.85)
 
 ### Inference Service (8010 / 50051)
-- **Dual vLLM Backends**:
-  - DeepSeek-Coder-6.7B (fp8) for: coder, debugger, reviewer
-  - Mistral-7B (fp8) for: planner, researcher, critic
-- **LoRA Adapters**: Per-capability fine-tuned models loaded at runtime
+- **Single vLLM Backend**: Qwen/Qwen3-14B serving all agent roles
+- **LoRA Adapters**: Six per-capability adapters (`coding_lora`, `debugging_lora`, `review_lora`, `planning_lora`, `research_lora`, `criticism_lora`) loaded on one server
+- **Native Tool Calling**: `--enable-auto-tool-choice --tool-call-parser hermes`; tools passed as OpenAI function schemas; thinking mode disabled via `chat_template_kwargs`
 - **gRPC Interface**: High-frequency hot path (one call per agent per iteration)
 
 ### Training Service (8013)
@@ -77,7 +76,9 @@ graph TD
   - min_quality_score = 0.65
   - min_score_spread = 0.15 (diversity)
   - min_diversity_ratio = 0.60
-- **Subprocess Launch**: Unsloth QLoRA fine-tune on DeepSeek or Mistral
+- **Subprocess Launch**: Unsloth QLoRA fine-tune on Qwen/Qwen3-14B base
+- **Training Format**: ChatML (`<|im_start|>role\ncontent<|im_end|>`); masking boundary `<|im_start|>assistant\n`
+- **Tool-Use SFT**: `coder`/`debugger` batches include `tool_turns` (assistant tool-call + tool-result pairs); other roles exclude tool turns
 - **Hot Reload**: vLLM picks up new adapters automatically; next request uses improved model
 
 ## Data Models
@@ -106,9 +107,12 @@ AgentState (LangGraph TypedDict):
   user_prompt: str
   agent_chain: List[str]
   agent_chain_index: int
-  few_shots: List[ExperienceEvent] # from ChromaDB
-  repo_snippets: List[str]         # from repo scanner
-  iteration_history: List[dict]    # per iteration: outputs + scores
+  few_shots: List[dict]            # from ChromaDB (RAG)
+  repo_snippets: List[dict]        # from repo scanner
+  iteration_history: List[dict]    # per step: role, output, tool_calls?, tool_call_id?
+  pending_tool_calls: List[dict]   # OpenAI-format {id, function:{name,arguments}}
+  tool_steps_used: int
+  tool_originating_role: str
   current_iteration: int
   best_score: float
   best_output: str
@@ -120,18 +124,22 @@ ExperienceEvent (JSONL record):
   prompt: str
   final_output: str
   agent_chain: List[str]
-  contributions: {
-    "agent_name": {
-      "output": str,
-      "score": float
-    }
-  }
+  contributions: List[AgentContribution]  # role="tool" rows excluded
   final_score: float
   iterations: int
   converged: bool
   intent: str
   complexity: str
   timestamp: ISO8601
+  scorer_rule_version: str
+
+AgentContribution:
+  role: str
+  output: str
+  quality_score: float
+  iteration: int
+  messages: List[dict]            # full ChatML prompt sent to LLM (SFT instruction)
+  tool_turns: Optional[List[dict]] # interleaved assistant+tool message dicts for ReAct SFT
 ```
 
 ## Self-Improvement Loop

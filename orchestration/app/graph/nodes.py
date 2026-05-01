@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional
 from shared.contracts.inference import GenerateRequest, Message
 from ..clients.inference import get_inference_client
 from ..config.settings import AGENT_PROMPTS, settings
+from ..tools.runner import build_tool_schemas, execute_tool_call
 from ..utils.inference_optimizer import InferenceOptimizer
 from ..utils.scoring import validate_output
 from .state import AgentState
@@ -58,8 +59,11 @@ _optimizer = InferenceOptimizer(
 
 logger = logging.getLogger(__name__)
 
-ROLE_NAME_OVERHEAD_TOKENS = 20  # per-message role/name field cost not counted in content
-LABEL_PADDING_TOKENS = 5        # slack tokens reserved per history label string
+ROLE_NAME_OVERHEAD_TOKENS = 20
+LABEL_PADDING_TOKENS = 5
+
+_TOOL_USING_ROLES = {"coder"}
+_MAX_TOOL_STEPS = 8
 
 
 # ── Per-session token queues ──────────────────────────────────────────────
@@ -148,9 +152,16 @@ def _build_messages(
     current_iteration    = state.get("current_iteration", 1)
     conversation_history = state.get("conversation_history", [])
 
-    # Filter history so each agent only sees relevant predecessors.
+    # Separate tool-loop entries (coder+tool_calls pairs and tool results) so
+    # they can be injected as proper OpenAI messages rather than as prose labels.
     raw_history = state.get("iteration_history", [])
-    iteration_history = _optimizer.filter_history(role, raw_history)
+    tool_loop_entries = [
+        h for h in raw_history
+        if h.get("role") == "tool"
+        or (h.get("role") == role and "tool_calls" in h)
+    ]
+    regular_raw = [h for h in raw_history if h not in tool_loop_entries]
+    iteration_history = _optimizer.filter_history(role, regular_raw)
 
     model_context_len = settings.model_context_len
     role_max_tokens   = settings.role_max_tokens.get(role, 1024)
@@ -160,8 +171,8 @@ def _build_messages(
     user_msg   = Message(role="user", content=user_prompt)
 
     fixed_tokens = (
-        _estimate_tokens(system_msg.content)
-        + _estimate_tokens(user_msg.content)
+        _estimate_tokens(system_msg.content or "")
+        + _estimate_tokens(user_msg.content or "")
         + ROLE_NAME_OVERHEAD_TOKENS
     )
 
@@ -291,6 +302,19 @@ def _build_messages(
             messages.append(Message(role="user",      content="\n".join(history_lines)))
             messages.append(Message(role="assistant", content="I've reviewed the prior outputs."))
 
+    # ── Tool-loop messages (OpenAI assistant+tool pairs, chronological) ──
+    if tool_loop_entries and role in _TOOL_USING_ROLES:
+        for entry in tool_loop_entries:
+            if "tool_calls" in entry:
+                messages.append(Message(role="assistant", tool_calls=entry["tool_calls"]))
+            else:
+                messages.append(Message(
+                    role="tool",
+                    tool_call_id=entry.get("tool_call_id", ""),
+                    content=entry.get("output", ""),
+                    name=entry.get("name"),
+                ))
+
     # ── Final user task ───────────────────────────────────────────────────
     messages.append(user_msg)
 
@@ -312,23 +336,26 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
 
     messages = _build_messages(role, state)
 
-    request = GenerateRequest(
-        model_family=settings.role_model_family.get(role, "mistral"),
+    request_kwargs: Dict[str, Any] = dict(
+        model_family=settings.role_model_family.get(role, "qwen"),
         role=role,
         messages=messages,
         adapter_name=settings.role_adapter.get(role),
         max_tokens=settings.role_max_tokens.get(role, 1024),
         session_id=session_id,
     )
+    if role in _TOOL_USING_ROLES:
+        request_kwargs["tools"] = build_tool_schemas()
 
+    request = GenerateRequest(**request_kwargs)
+
+    response = None
     try:
         client = get_inference_client()
         q = get_token_queue(session_id)
 
-        if q is not None and hasattr(client, "generate_stream"):
-            # Streaming path: announce the agent once, then push each token as
-            # a bare chunk so the client renders output as it arrives without
-            # per-token metadata noise.  Local accumulation is unchanged.
+        # Tool-using roles always use the blocking path so response.tool_calls is available.
+        if q is not None and hasattr(client, "generate_stream") and role not in _TOOL_USING_ROLES:
             thinking_msg, _ = AGENT_FRIENDLY.get(role, (f"{role.capitalize()} is working...", role))
             await q.put({"type": "agent_start", "role": role, "message": thinking_msg})
             tokens: List[str] = []
@@ -346,11 +373,8 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
                     "[%s] Stream inference failed for role=%s: %s",
                     session_id[:8], role, exc,
                 )
-                # Use whatever tokens arrived before the error; fall back to
-                # an error placeholder only if nothing was received at all.
                 output = "".join(tokens) if tokens else f"[{role} agent unavailable: {exc}]"
         else:
-            # Blocking path (gRPC streaming disabled or client lacks method).
             response = await client.generate(request)
             output = response.content
             logger.info(
@@ -389,6 +413,18 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
     }
 
     updated_history = list(state.get("iteration_history", [])) + [history_entry]
+
+    # Detect native tool calls in the response for tool-using roles.
+    native_tool_calls = response.tool_calls if response is not None else None
+    if native_tool_calls:
+        history_entry["tool_calls"] = native_tool_calls
+        history_entry["output"] = ""
+        return {
+            "iteration_history": updated_history,
+            "last_output": "",
+            "pending_tool_calls": native_tool_calls,
+            "tool_originating_role": role,
+        }
 
     # Advance the chain index so the edge router moves to the next agent
     next_index = state.get("agent_chain_index", 0) + 1
@@ -461,3 +497,58 @@ async def consensus_node(state: AgentState) -> dict:
     delta["final_output"] = consensus_output
     delta["final_score"] = state.get("best_score", 0.0)
     return delta
+
+
+async def tool_executor_node(state: AgentState) -> dict:
+    """Execute pending OpenAI-format tool calls; record each result as a role='tool' history entry."""
+    pending = state.get("pending_tool_calls", [])
+    tool_steps_used = state.get("tool_steps_used", 0)
+    session_id = state.get("session_id", "")
+    current_iteration = state.get("current_iteration", 1)
+
+    if tool_steps_used >= _MAX_TOOL_STEPS:
+        exhausted_entry = {
+            "role": "tool",
+            "tool_call_id": "exhausted",
+            "name": "budget",
+            "iteration": current_iteration,
+            "output": "Tool budget exhausted — finalise your answer without further tool calls.",
+            "error": False,
+            "tool_step": tool_steps_used,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        logger.warning("[%s] Tool budget exhausted (max=%d)", session_id[:8], _MAX_TOOL_STEPS)
+        return {
+            "iteration_history": list(state.get("iteration_history", [])) + [exhausted_entry],
+            "pending_tool_calls": [],
+        }
+
+    tool_entries = []
+    tool_names = []
+    for call in pending:
+        r = execute_tool_call(call)
+        tool_names.append(r["tool"])
+        entry = {
+            "role": "tool",
+            "tool_call_id": call.get("id", ""),
+            "name": r["tool"],
+            "iteration": current_iteration,
+            "output": r["output"],
+            "error": r["error"],
+            "tool_step": tool_steps_used + 1,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        tool_entries.append(entry)
+
+    logger.info(
+        "[%s] tool_executor: step=%d  tools=%s",
+        session_id[:8], tool_steps_used + 1, tool_names,
+    )
+
+    combined = "\n".join(e["output"] for e in tool_entries)
+    return {
+        "iteration_history": list(state.get("iteration_history", [])) + tool_entries,
+        "pending_tool_calls": [],
+        "tool_steps_used": tool_steps_used + 1,
+        "last_output": combined,
+    }

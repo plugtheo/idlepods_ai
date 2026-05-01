@@ -13,7 +13,7 @@ from shared.contracts.inference import GenerateResponse
 def _make_response(**kwargs):
     defaults = {
         "content": "generated output",
-        "model_family": "deepseek",
+        "model_family": "qwen",
         "role": "coder",
         "tokens_generated": 15,
         "session_id": "sess-1",
@@ -49,7 +49,7 @@ class TestGenerateRoute:
         resp = inference_client.post(
             "/v1/generate",
             json={
-                "model_family": "deepseek",
+                "model_family": "qwen",
                 "role": "coder",
                 "messages": [{"role": "user", "content": "write a function"}],
             },
@@ -84,7 +84,7 @@ class TestGenerateRoute:
         resp = inference_client.post(
             "/v1/generate",
             json={
-                "model_family": "deepseek",
+                "model_family": "qwen",
                 "role": "coder",
                 "messages": [{"role": "user", "content": "x"}],
             },

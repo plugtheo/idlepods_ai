@@ -37,25 +37,26 @@ services:
 
   # ── Local vLLM servers ───────────────────────────────────────────────────
 
-  vllm-deepseek:
+  vllm-qwen:
     image: vllm/vllm-openai:v0.7.3
     runtime: nvidia
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
     command: >
-      --model deepseek-ai/deepseek-coder-6.7b-instruct
+      --model Qwen/Qwen3-14B
       --enable-lora
       --max-lora-rank 64
       --max-loras 8
       --port 8000
       --host 0.0.0.0
-      --quantization fp8
+      --enable-auto-tool-choice
+      --tool-call-parser hermes
+      --gpu-memory-utilization 0.90
       --max-model-len 4096
       --gpu-memory-utilization 0.45
       --tokenizer-mode slow
     volumes:
-      # Base model weights — pre-downloaded on host at HF_CACHE_DIR
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
       # LoRA adapters — written by Training Service; read by vLLM at runtime load
       - ../data/lora_checkpoints:/lora_checkpoints
@@ -70,41 +71,6 @@ services:
       retries: 10
       start_period: 120s
 
-  vllm-mistral:
-    image: vllm/vllm-openai:v0.7.3
-    runtime: nvidia
-    depends_on:
-      vllm-deepseek:
-        condition: service_healthy
-    environment:
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
-      - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-    command: >
-      --model mistralai/Mistral-7B-Instruct-v0.1
-      --enable-lora
-      --max-lora-rank 64
-      --max-loras 8
-      --port 8001
-      --host 0.0.0.0
-      --quantization fp8
-      --max-model-len 4096
-      --gpu-memory-utilization 0.40
-    volumes:
-      # Base model weights — pre-downloaded on host at HF_CACHE_DIR
-      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
-      # LoRA adapters — written by Training Service; read by vLLM at runtime load
-      - ../data/lora_checkpoints:/lora_checkpoints
-    ports:
-      - "8001:8001"
-    networks:
-      - idledev
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 120s
-
   # ── Inference Service ──────────────────────────────────────────────────────
 
   inference:
@@ -113,23 +79,15 @@ services:
       dockerfile: inference/Dockerfile
     env_file: ../.env
     environment:
-      - INFERENCE__DEEPSEEK_URL=http://vllm-deepseek:8000
-      - INFERENCE__MISTRAL_URL=http://vllm-mistral:8001
+      - INFERENCE__QWEN_URL=http://vllm-qwen:8000
       - INFERENCE__GRPC_PORT=50051
-      # Backend selection (default: local_vllm for both families).
-      # To route a family to a remote vLLM server, set e.g.:
-      #   INFERENCE__MISTRAL_BACKEND=remote_vllm
-      #   INFERENCE__MISTRAL_URL=https://my-server.example.com:8000
-      #   INFERENCE__MISTRAL_AUTH_TOKEN=<optional bearer token>
     networks:
       - idledev
     ports:
       - "8010:8010"
       - "50051:50051"   # gRPC — internal + host-accessible for direct client access
-    depends_on:                          # ADD THIS BLOCK
-      vllm-deepseek:
-        condition: service_healthy
-      vllm-mistral:
+    depends_on:
+      vllm-qwen:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:

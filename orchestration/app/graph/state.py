@@ -106,3 +106,13 @@ class AgentState(TypedDict, total=False):
     that have already quality-converged — consensus would only paraphrase
     an already-clean output, wasting an inference call.
     """
+
+    # ── Tool use (ReAct loop) ─────────────────────────────────────────────────
+    pending_tool_calls: List[Dict[str, Any]]
+    """Tool calls emitted by the last coder output; cleared after tool_executor runs."""
+
+    tool_steps_used: int
+    """Number of tool execution rounds completed in the current pipeline run."""
+
+    tool_originating_role: str
+    """Role that emitted the pending tool call; used to route back after tool_executor."""

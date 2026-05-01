@@ -109,7 +109,7 @@ _grpc_mod, _grpc_aio_mod, _pb2, _pb2_grpc = _install_grpc_stubs()
 
 
 def _make_proto_request(
-    model_family="deepseek",
+    model_family="qwen",
     role="coder",
     messages=None,
     session_id="sess-grpc",
@@ -144,7 +144,7 @@ class TestBuildPydanticRequest:
     def test_basic_conversion(self):
         proto_req = _make_proto_request()
         pydantic_req = self.srv._build_pydantic_request(proto_req)
-        assert pydantic_req.model_family == "deepseek"
+        assert pydantic_req.model_family == "qwen"
         assert pydantic_req.role == "coder"
         assert len(pydantic_req.messages) == 1
         assert pydantic_req.messages[0].role == "user"
@@ -212,7 +212,7 @@ class TestInferenceServicerGenerate:
         backend.generate = AsyncMock(
             return_value=GenerateResponse(
                 content="result text",
-                model_family="deepseek",
+                model_family="qwen",
                 role="coder",
                 tokens_generated=10,
                 session_id=None,

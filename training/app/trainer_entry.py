@@ -148,23 +148,28 @@ def _is_clean_output(text: str) -> bool:
 
 def _format_messages_as_prompt(messages: List[Dict[str, Any]]) -> str:
     """
-    Render a chat message list into a flat prompt string for SFTTrainer.
+    Render a chat message list into ChatML format for SFTTrainer.
 
-    SFTTrainer with dataset_text_field="instruction" expects a single string
-    containing the full input context.  We concatenate all turns except the
-    final assistant turn (which becomes the response label).
+    The response boundary token is <|im_start|>assistant\n — DataCollatorForCompletionOnlyLM
+    uses this as the masking boundary so only the assistant response is trained on.
     """
     parts: List[str] = []
     for msg in messages:
         role = msg.get("role", "user")
-        content = msg.get("content", "")
+        content = msg.get("content") or ""
+        tool_calls = msg.get("tool_calls")
         if role == "system":
-            parts.append(f"[SYSTEM]\n{content}")
+            parts.append(f"<|im_start|>system\n{content}<|im_end|>")
         elif role == "user":
-            parts.append(f"[USER]\n{content}")
+            parts.append(f"<|im_start|>user\n{content}<|im_end|>")
         elif role == "assistant":
-            parts.append(f"[ASSISTANT]\n{content}")
-    return "\n\n".join(parts)
+            if tool_calls:
+                parts.append(f"<|im_start|>assistant\n{json.dumps(tool_calls)}<|im_end|>")
+            else:
+                parts.append(f"<|im_start|>assistant\n{content}<|im_end|>")
+        elif role == "tool":
+            parts.append(f"<|im_start|>tool\n{content}<|im_end|>")
+    return "\n".join(parts)
 
 
 def _load_sft_pairs(
@@ -225,8 +230,14 @@ def _load_sft_pairs(
                             flush=True,
                         )
                         continue
+                    # Append tool_turns (assistant tool-call + tool-result exchanges) to the
+                    # instruction so the SFT pair captures the full ReAct context.
+                    # DataCollatorForCompletionOnlyLM masks tool-result turns automatically
+                    # since only <|im_start|>assistant\n is the training target boundary.
+                    tool_turns = contribution.get("tool_turns") or []
+                    instruction_messages = list(messages) + tool_turns
                     pairs.append({
-                        "instruction": _format_messages_as_prompt(messages),
+                        "instruction": _format_messages_as_prompt(instruction_messages),
                         "response": full_output,
                         "score": score,
                     })
@@ -257,13 +268,11 @@ def _load_sft_pairs(
 
 def _make_fallback_prompt(prompt: str, capability: str) -> str:
     """
-    Build a minimal [SYSTEM]/[USER] prompt for old records that lack
-    per-contribution messages.  Without the [SYSTEM] block the DCFCOL
-    masking boundary ([RESPONSE]\\n) is still present, but the model would
-    train on a different prefix distribution than modern records.
+    Build a minimal ChatML system+user prompt for old records that lack
+    per-contribution messages.
     """
     sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
-    return f"[SYSTEM]\n{sys_prompt}\n\n[USER]\n{prompt}"
+    return f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>"
 
 
 def _load_curated_pairs(capability: str, data_root: Path, max_samples: int) -> List[Dict[str, str]]:
@@ -295,14 +304,11 @@ def _load_curated_pairs(capability: str, data_root: Path, max_samples: int) -> L
             instruction = rec.get("instruction", "")
             response = rec.get("response", "")
             if instruction and response:
-                # Wrap the curated instruction with [SYSTEM]/[USER] headers so
-                # it matches the format of experience-derived training pairs
-                # (which are built by _format_messages_as_prompt).  The system
-                # prompt must be byte-for-byte identical to AGENT_PROMPTS in
-                # orchestration/app/config/settings.py to avoid training/inference
-                # mismatch in the DCFCOL [RESPONSE]\n masking boundary.
+                # Wrap the curated instruction in ChatML so it matches the format
+                # of experience-derived training pairs built by _format_messages_as_prompt.
+                # The masking boundary is <|im_start|>assistant\n.
                 sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
-                formatted_instruction = f"[SYSTEM]\n{sys_prompt}\n\n[USER]\n{instruction}"
+                formatted_instruction = f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{instruction}<|im_end|>"
                 pairs.append({"instruction": formatted_instruction, "response": response, "score": 1.0})
 
     if len(pairs) > max_samples:

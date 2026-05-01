@@ -14,14 +14,14 @@ class TestAdapterRegistry:
 
         registry = _AdapterRegistry(
             base_url="http://fake-vllm:8000",
-            base_model_id="deepseek-ai/deepseek-coder-6.7b-instruct",
+            base_model_id="Qwen/Qwen3-14B",
             ttl=120,
         )
 
         model_list_resp = {
             "data": [
-                {"id": "deepseek-ai/deepseek-coder-6.7b-instruct"},
-                {"id": "deepseek-ai/deepseek-coder-6.7b-instruct/coding_lora"},
+                {"id": "Qwen/Qwen3-14B"},
+                {"id": "Qwen/Qwen3-14B/coding_lora"},
             ]
         }
 
@@ -43,13 +43,13 @@ class TestAdapterRegistry:
 
         registry = _AdapterRegistry(
             base_url="http://fake-vllm:8000",
-            base_model_id="deepseek-ai/deepseek-coder-6.7b-instruct",
+            base_model_id="Qwen/Qwen3-14B",
             ttl=120,
         )
 
         model_list_resp = {
             "data": [
-                {"id": "deepseek-ai/deepseek-coder-6.7b-instruct"},
+                {"id": "Qwen/Qwen3-14B"},
             ]
         }
 
@@ -71,11 +71,11 @@ class TestAdapterRegistry:
 
         registry = _AdapterRegistry(
             base_url="http://fake-vllm:8000",
-            base_model_id="deepseek-ai/deepseek-coder-6.7b-instruct",
+            base_model_id="Qwen/Qwen3-14B",
             ttl=120,
         )
         # Pre-populate cache as if a prior fetch succeeded (qualified form).
-        registry._known = {"deepseek-ai/deepseek-coder-6.7b-instruct/coding_lora"}
+        registry._known = {"Qwen/Qwen3-14B/coding_lora"}
         registry._fetched_at = 0.0  # Force stale so it tries to refresh
 
         mock_client = AsyncMock()
@@ -93,7 +93,7 @@ class TestAdapterRegistry:
 
         registry = _AdapterRegistry(
             base_url="http://fake-vllm:8000",
-            base_model_id="deepseek-ai/deepseek-coder-6.7b-instruct",
+            base_model_id="Qwen/Qwen3-14B",
             ttl=120,
         )
         # Mark cache as recently fetched

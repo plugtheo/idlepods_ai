@@ -8,10 +8,9 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-def _make_settings(deepseek="deepseek-ai/ds", mistral="mistralai/ms", output_dir="/tmp/lora", hf_token=""):
+def _make_settings(qwen="Qwen/Qwen3-14B", output_dir="/tmp/lora", hf_token=""):
     s = MagicMock()
-    s.deepseek_model = deepseek
-    s.mistral_model = mistral
+    s.qwen_model = qwen
     s.output_dir = output_dir
     s.hf_token = hf_token
     return s
@@ -57,12 +56,12 @@ class TestTrainerLauncher:
         cmd_args = mock_exec.call_args[0]
         assert "trainer_entry" in " ".join(str(a) for a in cmd_args)
 
-    async def test_coding_capability_uses_deepseek_model(self):
+    async def test_coding_capability_uses_qwen_model(self):
         from services.training.app.utils import trainer_launcher
         trainer_launcher._training_running = False
 
         mock_proc = _make_proc()
-        mock_settings = _make_settings(deepseek="deepseek-model", mistral="mistral-model")
+        mock_settings = _make_settings(qwen="qwen-test-model")
 
         with (
             patch("services.training.app.utils.trainer_launcher.settings", mock_settings),
@@ -79,14 +78,14 @@ class TestTrainerLauncher:
 
         cmd_args = list(mock_exec.call_args[0])
         cmd_str = " ".join(str(a) for a in cmd_args)
-        assert "deepseek-model" in cmd_str
+        assert "qwen-test-model" in cmd_str
 
-    async def test_planning_capability_uses_mistral_model(self):
+    async def test_planning_capability_uses_qwen_model(self):
         from services.training.app.utils import trainer_launcher
         trainer_launcher._training_running = False
 
         mock_proc = _make_proc()
-        mock_settings = _make_settings(deepseek="deepseek-model", mistral="mistral-model")
+        mock_settings = _make_settings(qwen="qwen-test-model")
 
         with (
             patch("services.training.app.utils.trainer_launcher.settings", mock_settings),
@@ -102,7 +101,7 @@ class TestTrainerLauncher:
             )
 
         cmd_str = " ".join(str(a) for a in mock_exec.call_args[0])
-        assert "mistral-model" in cmd_str
+        assert "qwen-test-model" in cmd_str
 
     async def test_skips_launch_when_already_running(self):
         from services.training.app.utils import trainer_launcher

@@ -22,6 +22,7 @@ def _base_state(**overrides):
         "max_iterations": 5,
         "convergence_threshold": 0.85,
         "iteration_history": [],
+        "conversation_history": [],
         "last_output": "",
         "iteration_scores": [],
         "best_score": 0.0,
@@ -30,6 +31,9 @@ def _base_state(**overrides):
         "quality_converged": False,
         "final_output": "",
         "final_score": 0.0,
+        "pending_tool_calls": [],
+        "tool_steps_used": 0,
+        "tool_originating_role": "",
     }
     state.update(overrides)
     return state
@@ -91,7 +95,7 @@ class TestCheckConvergence:
             convergence_threshold=0.85,
         )
         result = check_convergence(state)
-        assert result == "consensus"
+        assert result == "planner"
 
     def test_max_iterations_returns_consensus(self):
         from services.orchestration.app.graph.edges import check_convergence
