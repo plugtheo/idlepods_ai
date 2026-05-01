@@ -39,8 +39,8 @@ docker-compose.*.yml
 data/
 
 # Claude
-plans/
-plans/archive
+
+plans/archive/
 
 # Scripts
 scripts/eval_reports/
