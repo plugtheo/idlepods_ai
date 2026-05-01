@@ -3,7 +3,7 @@ Inference Service — gRPC server
 ================================
 Runs an async gRPC server alongside the FastAPI/uvicorn HTTP server.
 Both transports share the same backend logic via
-``services.inference.app.backends.factory.get_backend(model_family)``.
+``services.inference.app.backends.factory.get_backend(backend_name)``.
 
 Port: configurable via ``INFERENCE__GRPC_PORT`` (default 50051).
 

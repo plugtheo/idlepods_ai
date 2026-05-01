@@ -55,9 +55,10 @@ def _on_grpc_task_done(task: asyncio.Task) -> None:
 async def lifespan(app: FastAPI):
     global _grpc_task
 
-    # Eagerly initialise the qwen backend so the first real request is not slow.
+    # Eagerly initialise the default backend so the first real request is not slow.
     from .backends.factory import get_backend
-    get_backend("qwen")
+    from shared.contracts.models import load_registry
+    get_backend(load_registry().default_backend)
 
     # Start gRPC server as a background task alongside uvicorn.
     from .grpc.server import serve as grpc_serve

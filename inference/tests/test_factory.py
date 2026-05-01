@@ -1,72 +1,68 @@
 """
-Tests for the backend factory (get_backend(model_family)).
+Tests for the backend factory (get_backend(backend_name)).
 
 Covers:
-- qwen with local_vllm backend → LocalVLLMBackend
-- qwen with remote_vllm backend → RemoteVLLMBackend
-- Unknown model_family raises ValueError
-- Calling get_backend() twice for same family returns same instance
-- Family name is case-insensitive
+- primary with local_vllm backend_type → LocalVLLMBackend
+- primary with remote_vllm backend_type → RemoteVLLMBackend
+- Unknown backend name raises ValueError
+- Calling get_backend() twice for same name returns same instance (singleton)
 """
 import pytest
 from unittest.mock import MagicMock, patch
 
+from shared.contracts.models import BackendEntry, ModelsRegistry
 
-def _make_settings(qwen_backend="local_vllm"):
-    s = MagicMock()
-    s.qwen_backend = qwen_backend
-    s.qwen_url = "http://vllm-qwen:8000"
-    s.qwen_model_id = "Qwen/Qwen3-14B"
-    s.qwen_auth_token = ""
-    s.qwen_ssl_verify = True
-    s.request_timeout_seconds = 120.0
-    return s
+
+def _make_registry(backend_type="local_vllm"):
+    entry = BackendEntry(
+        served_url="http://vllm-primary:8000",
+        model_id="Qwen/Qwen3-14B",
+        backend_type=backend_type,
+    )
+    return ModelsRegistry(default_backend="primary", backends={"primary": entry})
 
 
 class TestBackendFactory:
     def setup_method(self):
-        """Reset per-family singletons before each test."""
+        """Reset per-name singletons before each test."""
         import services.inference.app.backends.factory as factory_mod
         factory_mod._backends.clear()
 
-    def test_qwen_local_returns_local_vllm_backend(self):
-        with patch("services.inference.app.backends.factory.settings", _make_settings()):
+    def test_primary_local_returns_local_vllm_backend(self):
+        with patch(
+            "services.inference.app.backends.factory.get_backend_entry",
+            return_value=_make_registry().backends["primary"],
+        ):
             from services.inference.app.backends.factory import get_backend
             from services.inference.app.backends.local_vllm import LocalVLLMBackend
 
-            backend = get_backend("qwen")
+            backend = get_backend("primary")
             assert isinstance(backend, LocalVLLMBackend)
 
-    def test_qwen_remote_returns_remote_vllm_backend(self):
+    def test_primary_remote_returns_remote_vllm_backend(self):
         with patch(
-            "services.inference.app.backends.factory.settings",
-            _make_settings(qwen_backend="remote_vllm"),
+            "services.inference.app.backends.factory.get_backend_entry",
+            return_value=_make_registry(backend_type="remote_vllm").backends["primary"],
         ):
             from services.inference.app.backends.factory import get_backend
             from services.inference.app.backends.remote_vllm import RemoteVLLMBackend
 
-            backend = get_backend("qwen")
+            backend = get_backend("primary")
             assert isinstance(backend, RemoteVLLMBackend)
 
-    def test_unknown_family_raises(self):
-        with patch("services.inference.app.backends.factory.settings", _make_settings()):
+    def test_unknown_backend_raises(self):
+        from services.inference.app.backends.factory import get_backend
+
+        with pytest.raises(ValueError):
+            get_backend("nonexistent_backend_xyz")
+
+    def test_singleton_per_name(self):
+        with patch(
+            "services.inference.app.backends.factory.get_backend_entry",
+            return_value=_make_registry().backends["primary"],
+        ):
             from services.inference.app.backends.factory import get_backend
 
-            with pytest.raises(ValueError, match="Unknown model_family"):
-                get_backend("llama")
-
-    def test_family_name_case_insensitive(self):
-        with patch("services.inference.app.backends.factory.settings", _make_settings()):
-            from services.inference.app.backends.factory import get_backend
-            from services.inference.app.backends.local_vllm import LocalVLLMBackend
-
-            backend = get_backend("Qwen")
-            assert isinstance(backend, LocalVLLMBackend)
-
-    def test_singleton_per_family(self):
-        with patch("services.inference.app.backends.factory.settings", _make_settings()):
-            from services.inference.app.backends.factory import get_backend
-
-            b1 = get_backend("qwen")
-            b2 = get_backend("qwen")
+            b1 = get_backend("primary")
+            b2 = get_backend("primary")
             assert b1 is b2

@@ -35,12 +35,9 @@ def _resolve_registry_default() -> str:
 
 
 def _resolve_base_model() -> str:
-    try:
-        from shared.contracts.models import load_registry
-        registry = load_registry()
-        return registry.backends[registry.default_backend].model_id
-    except Exception:
-        return "Qwen/Qwen3-14B"
+    from shared.contracts.models import load_registry
+    registry = load_registry()
+    return registry.backends[registry.default_backend].model_id
 
 
 # ---------------------------------------------------------------------------

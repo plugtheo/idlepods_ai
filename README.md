@@ -17,11 +17,9 @@ Pipeline completes (converges or max_iterations)
     ↓
 Orchestration publishes ExperienceEvent
     ↓ (fire-and-forget async, doesn't block user response)
-Experience Service stores to JSONL + ChromaDB
-    ↓
-Experience Service notifies Training Service
+Orchestration stores to JSONL + ChromaDB
     ↓ (async background task)
-Training Service evaluates thresholds
+Training job evaluates thresholds
     ↓ Batch size: ≥ 50 total experiences accumulated (min_batch_size)
     ↓ Score spread: max_score - min_score ≥ 0.15 (ensures diverse quality labels, not all high or all low)
     ↓ Diversity ratio: ≥ 60% of records have unique prompt fingerprints (deduplication guard)

@@ -13,13 +13,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse, Message
 
-_QWEN_URL = "http://vllm-qwen:8000"
-_QWEN_MODEL = "Qwen/Qwen3-14B"
+_BACKEND_URL = "http://vllm-primary:8000"
+_BACKEND_MODEL = "Qwen/Qwen3-14B"
 
 
-def _make_request(family="qwen", role="coder", adapter=None):
+def _make_request(backend="primary", role="coder", adapter=None):
     return GenerateRequest(
-        model_family=family,
+        backend=backend,
         role=role,
         messages=[Message(role="user", content="write code")],
         adapter_name=adapter,
@@ -56,7 +56,9 @@ def _make_completions_response(content="def hello(): pass", tokens=10):
 def _make_backend(mock_client):
     """Return a LocalVLLMBackend with the httpx client replaced by mock_client."""
     from services.inference.app.backends.local_vllm import LocalVLLMBackend
-    backend = LocalVLLMBackend("qwen", _QWEN_URL, _QWEN_MODEL)
+    from shared.contracts.models import BackendEntry
+    entry = BackendEntry(served_url=_BACKEND_URL, model_id=_BACKEND_MODEL)
+    backend = LocalVLLMBackend("primary", entry)
     backend._client = mock_client
     backend._registry._client = mock_client
     backend._registry._fetched_at = float("inf")  # prevent HTTP refresh
@@ -71,14 +73,14 @@ class TestLocalVLLMBackend:
         mock_client.post = AsyncMock(return_value=_make_completions_response("print('hi')", tokens=5))
 
         backend = _make_backend(mock_client)
-        backend._registry._known = {f"{_QWEN_MODEL}/coding_lora"}
+        backend._registry._known = {f"{_BACKEND_MODEL}/coding_lora"}
 
         resp = await backend.generate(_make_request(adapter="coding_lora"))
 
         assert isinstance(resp, GenerateResponse)
         assert resp.content == "print('hi')"
         assert resp.tokens_generated == 5
-        assert resp.model_family == "qwen"
+        assert resp.backend == "primary"
 
         payload_sent = mock_client.post.call_args[1]["json"]
         assert payload_sent["model"] == "coding_lora"
@@ -113,8 +115,8 @@ class TestLocalVLLMBackend:
         import services.inference.app.backends.factory as factory_mod
         factory_mod._backends.clear()
 
-        with pytest.raises(ValueError, match="Unknown model_family"):
-            factory_mod.get_backend("llama")
+        with pytest.raises(ValueError):
+            factory_mod.get_backend("nonexistent_backend_xyz")
 
     async def test_http_error_propagates(self):
         import httpx

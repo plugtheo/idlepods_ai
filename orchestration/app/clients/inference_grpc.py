@@ -20,7 +20,7 @@ Payload optimizations applied
   send temperature/top_p/max_tokens/adapter_name when they differ from the
   agreed server defaults (0.2 / 0.95 / 1024 / None).
 - No echoed response fields: GenerateResponse carries only content +
-  tokens_generated; model_family/role/session_id are elided.
+  tokens_generated; backend/role/session_id are elided.
 - gzip channel compression: applied at channel level for large message bodies
   (system prompts, history context).
 """

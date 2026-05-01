@@ -55,9 +55,9 @@ def _ensure_grpc_stubs():
     )
 
     class _ProtoRequest:
-        def __init__(self, *, model_family="", role="", messages=None, session_id="",
+        def __init__(self, *, backend="", role="", messages=None, session_id="",
                      adapter_name=None, max_tokens=None, temperature=None, top_p=None):
-            self.model_family = model_family
+            self.backend = backend
             self.role = role
             self.messages = messages or []
             self.session_id = session_id
@@ -128,7 +128,7 @@ def _make_client() -> "GrpcInferenceClient":
 
 
 def _make_request(
-    model_family="qwen",
+    backend="primary",
     role="coder",
     messages=None,
     max_tokens=1024,
@@ -140,7 +140,7 @@ def _make_request(
     if messages is None:
         messages = [Message(role="user", content="write a function")]
     return GenerateRequest(
-        model_family=model_family,
+        backend=backend,
         role=role,
         messages=messages,
         max_tokens=max_tokens,
@@ -206,11 +206,11 @@ class TestBuildProtoRequest:
         proto = client._build_proto_request(req)
         assert proto.messages[0].role == 1  # ROLE_USER
 
-    def test_model_family_and_role_strings_passed_through(self):
+    def test_backend_and_role_strings_passed_through(self):
         client = _make_client()
-        req = _make_request(model_family="qwen", role="planner")
+        req = _make_request(backend="primary", role="planner")
         proto = client._build_proto_request(req)
-        assert proto.model_family == "qwen"
+        assert proto.backend == "primary"
         assert proto.role == "planner"
 
     def test_session_id_empty_string_when_none(self):
@@ -294,11 +294,11 @@ class TestGrpcClientGenerateStream:
             )
 
         client._stub.GenerateStream = _stub_stream
-        pydantic_req = _make_request(model_family="qwen", role="planner")
+        pydantic_req = _make_request(backend="primary", role="planner")
 
         await self._collect_tokens(client, pydantic_req)
 
-        assert captured["req"].model_family == "qwen"
+        assert captured["req"].backend == "primary"
         assert captured["req"].role == "planner"
 
 
@@ -311,13 +311,13 @@ class TestGrpcClientGenerate:
         proto_resp = _pb2.GenerateResponse(content="result", tokens_generated=5)
         client._stub.Generate = AsyncMock(return_value=proto_resp)
 
-        req = _make_request(model_family="qwen", role="coder", session_id="sess-x")
+        req = _make_request(backend="primary", role="coder", session_id="sess-x")
         client._version_checked = False
         response = await client.generate(req)
 
         assert response.content == "result"
         assert response.tokens_generated == 5
-        assert response.model_family == "qwen"   # echoed from request
+        assert response.backend == "primary"   # echoed from request
         assert response.role == "coder"          # echoed from request
         assert response.session_id == "sess-x"  # echoed from request
 

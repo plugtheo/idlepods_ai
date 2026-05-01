@@ -10,8 +10,8 @@ graph TD
     C -->|intent, complexity| D["Select Agent Chain"]
     D -->|OrchestrationRequest| E["🎯 Orchestration (8001)"]
     
-    E -->|fetch context| F["📚 Context Service (8011)"]
-    F -->|ChromaDB search| G["Retrieval"]
+    E -->|build context / RAG| F["📚 Context Enrichment (in-process)"]
+    F -->|ChromaDB search + repo scan| G["Retrieval"]
     G -->|few-shot examples<br/>repo snippets| H["BuiltContext"]
     H --> E
     
@@ -28,7 +28,7 @@ graph TD
     P --> J
     O -->|final_output| Q["✓ Response to User"]
     
-    O -->|ExperienceEvent| R["💾 Experience (8012)"]
+    O -->|ExperienceEvent| R["💾 Experience recording (in-process)"]
     R -->|append| S["JSONL + ChromaDB"]
     R -->|notify| T["🎓 Training (8013)"]
     
@@ -62,6 +62,7 @@ graph TD
 ### Orchestration (8001)
 - **LangGraph Pipeline**: State machine with convergence scoring
 - **Agent Loop**: Iterates through agent_chain until convergence or max_iterations
+- **Context & Experience**: Context enrichment, repo scan, and experience recording all run as in-process async tasks
 - **Convergence**: Extracts SCORE from reviewer/critic output, compares against threshold (default 0.85)
 
 ### Inference Service (8010 / 50051)
@@ -159,7 +160,7 @@ AgentContribution:
 
 | Component | Failure Mode | Behavior |
 |-----------|--------------|----------|
-| Context Service | Timeout (>2s) or unavailable | Pipeline continues with empty few_shots + repo_snippets |
+| Context enrichment | Timeout (>2s) or unavailable | Pipeline continues with empty few_shots + repo_snippets |
 | ChromaDB | Write fails | JSONL append succeeds; embedding upsert silently fails |
 | ChromaDB | Read fails | RAG returns empty list; pipeline continues |
 | Inference (vLLM) | Node down | gRPC connection refused; Orchestration returns 503 |

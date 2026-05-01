@@ -80,8 +80,8 @@ def _base_model_for(role: str) -> str:
     try:
         registry = load_registry(settings.models_yaml_path)
         return registry.backends[registry.default_backend].model_id
-    except Exception:
-        return "Qwen/Qwen3-14B"
+    except Exception as exc:
+        raise RuntimeError(f"Cannot resolve base model from registry: {exc}") from exc
 
 
 def _run_local(records: list[dict]) -> None:

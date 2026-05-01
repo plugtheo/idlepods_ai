@@ -109,7 +109,7 @@ _grpc_mod, _grpc_aio_mod, _pb2, _pb2_grpc = _install_grpc_stubs()
 
 
 def _make_proto_request(
-    model_family="qwen",
+    backend="primary",
     role="coder",
     messages=None,
     session_id="sess-grpc",
@@ -117,7 +117,7 @@ def _make_proto_request(
 ):
     """Build a fake proto GenerateRequest with optional field tracking."""
     req = _pb2.GenerateRequest(
-        model_family=model_family,
+        backend=backend,
         role=role,
         messages=messages or [_pb2.MessageProto(role=1, content="write code")],
         session_id=session_id,
@@ -144,7 +144,7 @@ class TestBuildPydanticRequest:
     def test_basic_conversion(self):
         proto_req = _make_proto_request()
         pydantic_req = self.srv._build_pydantic_request(proto_req)
-        assert pydantic_req.model_family == "qwen"
+        assert pydantic_req.backend == "primary"
         assert pydantic_req.role == "coder"
         assert len(pydantic_req.messages) == 1
         assert pydantic_req.messages[0].role == "user"
@@ -212,7 +212,7 @@ class TestInferenceServicerGenerate:
         backend.generate = AsyncMock(
             return_value=GenerateResponse(
                 content="result text",
-                model_family="qwen",
+                backend="primary",
                 role="coder",
                 tokens_generated=10,
                 session_id=None,

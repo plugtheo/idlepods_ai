@@ -4,9 +4,9 @@ LocalVLLMBackend
 Calls a locally running vLLM server via its OpenAI-compatible
 `/v1/chat/completions` endpoint.
 
-Each instance serves one model family (deepseek or mistral) and is
-constructed with the corresponding URL and model ID.  The factory
-(backends/factory.py) creates one singleton instance per family.
+Each instance serves one backend entry from models.yaml and is
+constructed with the corresponding backend name and BackendEntry.  The factory
+(backends/factory.py) creates one singleton instance per backend.
 
 Adapter handling
 ----------------
@@ -216,7 +216,7 @@ class _AdapterRegistry:
 
         Matches both the bare adapter name (e.g. 'coding_lora') and the
         qualified form vLLM returns in /v1/models (e.g.
-        'deepseek-ai/deepseek-coder-6.7b-instruct/coding_lora').
+        'base-model-id/coding_lora').
         """
         await self._refresh_if_stale()
         return adapter_name in self._known or any(

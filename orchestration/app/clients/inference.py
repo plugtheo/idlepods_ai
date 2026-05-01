@@ -90,7 +90,7 @@ class InferenceClient:
                     yield token
 
     async def get_model_info(self) -> dict:
-        """GET /v1/model-info → {"deepseek": <max_model_len>, "mistral": <max_model_len>}."""
+        """GET /v1/model-info → {backend_name: <max_model_len>, ...}."""
         resp = await self._client.get(f"{self._base_url}/v1/model-info")
         resp.raise_for_status()
         return resp.json()

@@ -24,7 +24,7 @@ class InferenceSettings(BaseSettings):
     )
     accept_legacy_backend_names: bool = Field(
         default=False,
-        description="Accept old model-name strings (qwen/deepseek/mistral) as backend aliases.",
+        description="Accept legacy model-name strings as backend aliases (see _LEGACY_BACKEND_ALIASES in contracts).",
     )
 
     # ── HTTP client settings ──────────────────────────────────────────────

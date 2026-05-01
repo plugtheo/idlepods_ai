@@ -145,12 +145,9 @@ ROLE_MAX_TOKENS: dict[str, int] = {
 
 # Fallback base-model names when vLLM /v1/models cannot be reached
 def _get_base_model_id() -> str:
-    try:
-        from shared.contracts.models import load_registry
-        registry = load_registry()
-        return registry.backends[registry.default_backend].model_id
-    except Exception:
-        return "Qwen/Qwen3-14B"
+    from shared.contracts.models import load_registry
+    registry = load_registry()
+    return registry.backends[registry.default_backend].model_id
 
 # Required structural output fields for evaluator roles
 EVALUATOR_REQUIRED_FIELDS: dict[str, list[str]] = {

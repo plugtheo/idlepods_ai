@@ -8,7 +8,7 @@ converts it into SFT (Supervised Fine-Tuning) training pairs for LoRATrainer.
 Usage:
     python -m services.training.app.trainer_entry \\
         --data-path /tmp/data.jsonl \\
-        --base-model Qwen/Qwen3-14B \\
+        --base-model <model_id from models.yaml> \\
         --output-dir /data/lora_checkpoints \\
         --role coder
 

@@ -59,7 +59,7 @@ def _blocking_client(content="generated content"):
     client.generate = AsyncMock(
         return_value=GenerateResponse(
             content=content,
-            model_family="qwen",
+            backend="primary",
             role="coder",
             tokens_generated=5,
         )
@@ -73,7 +73,7 @@ def _streaming_client(*tokens):
     client.generate = AsyncMock(
         return_value=GenerateResponse(
             content="".join(tokens),
-            model_family="qwen",
+            backend="primary",
             role="coder",
             tokens_generated=len(tokens),
         )
@@ -214,7 +214,7 @@ class TestRunAgentNodeStreamingPath:
         client.generate = AsyncMock(
             return_value=GenerateResponse(
                 content="fallback",
-                model_family="qwen",
+                backend="primary",
                 role="reviewer",
                 tokens_generated=1,
             )
@@ -291,7 +291,7 @@ class TestRunAgentNodeBlockingPath:
         client.generate = AsyncMock(
             return_value=GenerateResponse(
                 content="no-stream result",
-                model_family="qwen",
+                backend="primary",
                 role="reviewer",
                 tokens_generated=3,
             )

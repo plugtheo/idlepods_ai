@@ -48,7 +48,7 @@ def _mock_inference_client(content="generated code"):
     client.generate = AsyncMock(
         return_value=GenerateResponse(
             content=content,
-            model_family="qwen",
+            backend="primary",
             role="coder",
             tokens_generated=50,
         )

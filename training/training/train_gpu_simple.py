@@ -49,12 +49,9 @@ from shared.contracts.agent_prompts import AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE
 # Mirrors ModelRegistry._CAPABILITY_MODEL_MAP and local_models.json
 # ---------------------------------------------------------------------------
 def _resolve_base_model_id() -> str:
-    try:
-        from shared.contracts.models import load_registry
-        registry = load_registry()
-        return registry.backends[registry.default_backend].model_id
-    except Exception:
-        return "Qwen/Qwen3-14B"
+    from shared.contracts.models import load_registry
+    registry = load_registry()
+    return registry.backends[registry.default_backend].model_id
 
 
 def _resolve_local_model_path(model_id: str) -> str:

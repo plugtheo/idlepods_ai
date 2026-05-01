@@ -15,13 +15,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse, Message
 
-_QWEN_URL = "http://vllm-qwen:8000"
-_QWEN_MODEL = "Qwen/Qwen3-14B"
+_BACKEND_URL = "http://vllm-primary:8000"
+_BACKEND_MODEL = "Qwen/Qwen3-14B"
 
 
-def _make_request(family="qwen", role="coder", adapter=None):
+def _make_request(backend="primary", role="coder", adapter=None):
     return GenerateRequest(
-        model_family=family,
+        backend=backend,
         role=role,
         messages=[Message(role="user", content="write code")],
         adapter_name=adapter,
@@ -57,7 +57,9 @@ def _make_streaming_mock_client(lines):
 def _make_backend(client_mock):
     """Return a LocalVLLMBackend with the httpx client replaced by client_mock."""
     from services.inference.app.backends.local_vllm import LocalVLLMBackend
-    backend = LocalVLLMBackend("qwen", _QWEN_URL, _QWEN_MODEL)
+    from shared.contracts.models import BackendEntry
+    entry = BackendEntry(served_url=_BACKEND_URL, model_id=_BACKEND_MODEL)
+    backend = LocalVLLMBackend("primary", entry)
     backend._client = client_mock
     backend._registry._client = client_mock
     backend._registry._known = set()
@@ -137,7 +139,7 @@ class TestBaseBackendStreamFallback:
             async def generate(self, request):
                 return GenerateResponse(
                     content="full response text",
-                    model_family="qwen",
+                    backend="primary",
                     role="coder",
                     tokens_generated=3,
                     session_id=None,
@@ -154,7 +156,7 @@ class TestBaseBackendStreamFallback:
             async def generate(self, request):
                 return GenerateResponse(
                     content="abc def ghi",
-                    model_family="qwen",
+                    backend="primary",
                     role="coder",
                     tokens_generated=3,
                     session_id=None,

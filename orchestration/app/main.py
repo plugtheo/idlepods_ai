@@ -59,7 +59,8 @@ async def _startup_checks() -> None:
 
         # --- Task 2: chars_per_token calibration ---
         corpus_len = len(_CALIBRATION_CORPUS)
-        for family in ("qwen",):
+        from shared.contracts.models import load_registry as _load_reg
+        for family in list(_load_reg().backends):
             try:
                 token_count = await client.tokenize(family, _CALIBRATION_CORPUS)
             except Exception as exc:

@@ -203,16 +203,6 @@ def validate(capability: str, adapter_dir: Path) -> bool:
         print("  [VALIDATE] unsloth/torch not available — skipping (PASS)")
         return True
 
-    # Determine model family from adapter metadata — gates tokenizer fix below.
-    _meta_path = adapter_dir / f"{capability}_lora" / "metadata.json"
-    _base_model = ""
-    try:
-        import json as _json
-        _base_model = _json.loads(_meta_path.read_text()).get("base_model", "")
-    except Exception:
-        pass
-    _is_deepseek = "deepseek" in _base_model.lower()
-
     try:
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name    = adapter_path,
@@ -221,15 +211,6 @@ def validate(capability: str, adapter_dir: Path) -> bool:
             load_in_4bit   = True,
         )
         FastLanguageModel.for_inference(model)
-        # Apply the ByteLevel pre-tokenizer fix for DeepSeek adapters only.
-        # DeepSeek's vocab uses Ġ-prefixed tokens but ships with Metaspace;
-        # ByteLevel was applied during training, so validation must match.
-        # Mistral's vocab uses ▁-prefixed tokens and Metaspace IS correct —
-        # applying ByteLevel to Mistral would produce Ġ tokens absent from
-        # Mistral's vocab, causing validation to test a broken tokenizer state.
-        if _is_deepseek:
-            from tokenizers.pre_tokenizers import ByteLevel as _ByteLevel
-            tokenizer.backend_tokenizer.pre_tokenizer = _ByteLevel(add_prefix_space=False)
     except Exception as exc:
         print(f"  [VALIDATE] FAIL — adapter load error: {exc}")
         return False
