@@ -76,11 +76,7 @@ def file_lock(path: str):
 
 
 def _base_model_for(capability: str) -> str:
-    return (
-        settings.deepseek_model
-        if any(x in capability for x in ("cod", "debug", "review"))
-        else settings.mistral_model
-    )
+    return settings.qwen_model
 
 
 def _run_local(records: list[dict]) -> None:

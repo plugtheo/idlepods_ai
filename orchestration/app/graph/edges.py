@@ -48,6 +48,12 @@ _AGENT_NODES = {
 }
 
 
+def route_after_tool_user(state: AgentState) -> str:
+    if state.get("pending_tool_calls"):
+        return "tool_executor"
+    return next_in_chain(state)
+
+
 def route_entry(state: AgentState) -> str:
     """
     Decide where to start the agent chain.

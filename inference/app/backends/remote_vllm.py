@@ -2,23 +2,18 @@
 RemoteVLLMBackend
 =================
 Connects to any vLLM-compatible server (OpenAI-compatible API).
-Suitable for user-hosted GPU servers, shared inference endpoints, or
-cloud-deployed vLLM instances.
+All requests go through /v1/chat/completions — adapters are activated via
+the model name field, not the legacy /v1/completions endpoint.
 
-Structurally identical to LocalVLLMBackend.  The only differences are:
-- The base URL is externally configured rather than derived from container names.
-- An optional Bearer token auth header is added when a token is provided.
-- SSL verification can be toggled.
-
-The same _fix_bpe_artifacts() post-processing is applied to all output and
-the same adapter availability cache (2-minute TTL) is used.
+Native tool calling is supported: pass tools in the request and tool_calls
+are extracted from the response.  Thinking mode is always disabled via
+chat_template_kwargs so Qwen3 runs in non-thinking mode.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import time
 from typing import AsyncGenerator, Optional
 
 import httpx
@@ -29,8 +24,6 @@ from .base import InferenceBackend, InferenceError
 from .local_vllm import (
     ADAPTER_CACHE_TTL_SECONDS,
     _AdapterRegistry,
-    _ADAPTER_STOP_TOKENS,
-    _build_adapter_prompt,
     _fix_bpe_artifacts,
     _resolve_model,
 )
@@ -41,8 +34,6 @@ logger = logging.getLogger(__name__)
 class RemoteVLLMBackend(InferenceBackend):
     """
     Connects to any vLLM-compatible server (OpenAI-compatible API).
-    Suitable for user-hosted GPU servers, shared inference endpoints,
-    or cloud-deployed vLLM instances.
     """
 
     def __init__(
@@ -79,56 +70,47 @@ class RemoteVLLMBackend(InferenceBackend):
             self._model_id, request.adapter_name, self._registry, request.role
         )
 
-        messages = [m.model_dump() for m in request.messages]
-        using_adapter = effective_model != self._model_id
+        messages = [m.model_dump(exclude_none=True) for m in request.messages]
 
         logger.debug(
-            "RemoteVLLM → %s  model=%s  role=%s  msgs=%d  adapter=%s",
-            self._base_url, effective_model, request.role, len(messages), using_adapter,
+            "RemoteVLLM → %s  model=%s  role=%s  msgs=%d  tools=%s",
+            self._base_url, effective_model, request.role, len(messages),
+            bool(request.tools),
         )
 
+        payload: dict = {
+            "model":       effective_model,
+            "messages":    messages,
+            "max_tokens":  request.max_tokens,
+            "temperature": request.temperature,
+            "top_p":       request.top_p,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        if request.tools:
+            payload["tools"] = [t.model_dump() for t in request.tools]
+
         try:
-            if using_adapter:
-                payload = {
-                    "model":       effective_model,
-                    "prompt":      _build_adapter_prompt(messages),
-                    "max_tokens":  request.max_tokens,
-                    "temperature": request.temperature,
-                    "top_p":       request.top_p,
-                    "stop":        _ADAPTER_STOP_TOKENS,
-                }
-                resp = await self._client.post(
-                    f"{self._base_url}/v1/completions",
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                content = _fix_bpe_artifacts(data["choices"][0]["text"])
-            else:
-                payload = {
-                    "model":       effective_model,
-                    "messages":    messages,
-                    "max_tokens":  request.max_tokens,
-                    "temperature": request.temperature,
-                    "top_p":       request.top_p,
-                }
-                resp = await self._client.post(
-                    f"{self._base_url}/v1/chat/completions",
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                content = _fix_bpe_artifacts(data["choices"][0]["message"]["content"])
+            resp = await self._client.post(
+                f"{self._base_url}/v1/chat/completions",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
         except Exception as exc:
             raise InferenceError(str(exc)) from exc
+
+        choice  = data["choices"][0]
+        message = choice["message"]
+        content = _fix_bpe_artifacts(message.get("content") or "")
+        tool_calls = message.get("tool_calls")
 
         tokens_out = data.get("usage", {}).get("completion_tokens", 0)
 
         logger.info(
-            "RemoteVLLM ← role=%s  family=%s  model=%s  tokens=%d",
+            "RemoteVLLM ← role=%s  family=%s  model=%s  tokens=%d  tool_calls=%s",
             request.role, self._model_family, effective_model, tokens_out,
+            bool(tool_calls),
         )
 
         return GenerateResponse(
@@ -137,6 +119,7 @@ class RemoteVLLMBackend(InferenceBackend):
             role=request.role,
             tokens_generated=tokens_out,
             session_id=request.session_id,
+            tool_calls=tool_calls,
         )
 
     async def generate_stream(
@@ -147,34 +130,21 @@ class RemoteVLLMBackend(InferenceBackend):
             self._model_id, request.adapter_name, self._registry, request.role
         )
 
-        messages = [m.model_dump() for m in request.messages]
-        using_adapter = effective_model != self._model_id
+        messages = [m.model_dump(exclude_none=True) for m in request.messages]
 
-        if using_adapter:
-            stream_payload: dict = {
-                "model":       effective_model,
-                "prompt":      _build_adapter_prompt(messages),
-                "max_tokens":  request.max_tokens,
-                "temperature": request.temperature,
-                "top_p":       request.top_p,
-                "stop":        _ADAPTER_STOP_TOKENS,
-                "stream":      True,
-            }
-            stream_endpoint = f"{self._base_url}/v1/completions"
-        else:
-            stream_payload = {
-                "model":       effective_model,
-                "messages":    messages,
-                "max_tokens":  request.max_tokens,
-                "temperature": request.temperature,
-                "top_p":       request.top_p,
-                "stream":      True,
-            }
-            stream_endpoint = f"{self._base_url}/v1/chat/completions"
+        stream_payload: dict = {
+            "model":       effective_model,
+            "messages":    messages,
+            "max_tokens":  request.max_tokens,
+            "temperature": request.temperature,
+            "top_p":       request.top_p,
+            "stream":      True,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
 
         async with self._client.stream(
             "POST",
-            stream_endpoint,
+            f"{self._base_url}/v1/chat/completions",
             json=stream_payload,
             headers={"Content-Type": "application/json"},
         ) as resp:
@@ -189,14 +159,11 @@ class RemoteVLLMBackend(InferenceBackend):
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                if using_adapter:
-                    token = chunk.get("choices", [{}])[0].get("text", "")
-                else:
-                    token = (
-                        chunk.get("choices", [{}])[0]
-                        .get("delta", {})
-                        .get("content", "")
-                    )
+                token = (
+                    chunk.get("choices", [{}])[0]
+                    .get("delta", {})
+                    .get("content", "")
+                )
                 if token:
                     yield _fix_bpe_artifacts(token)
 

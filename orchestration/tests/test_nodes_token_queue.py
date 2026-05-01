@@ -37,6 +37,7 @@ def _base_state(**overrides):
         "max_iterations": 3,
         "convergence_threshold": 0.85,
         "iteration_history": [],
+        "conversation_history": [],
         "last_output": "",
         "iteration_scores": [],
         "best_score": 0.0,
@@ -45,6 +46,9 @@ def _base_state(**overrides):
         "quality_converged": False,
         "final_output": "",
         "final_score": 0.0,
+        "pending_tool_calls": [],
+        "tool_steps_used": 0,
+        "tool_originating_role": "",
     }
     state.update(overrides)
     return state
@@ -55,7 +59,7 @@ def _blocking_client(content="generated content"):
     client.generate = AsyncMock(
         return_value=GenerateResponse(
             content=content,
-            model_family="deepseek",
+            model_family="qwen",
             role="coder",
             tokens_generated=5,
         )
@@ -69,7 +73,7 @@ def _streaming_client(*tokens):
     client.generate = AsyncMock(
         return_value=GenerateResponse(
             content="".join(tokens),
-            model_family="deepseek",
+            model_family="qwen",
             role="coder",
             tokens_generated=len(tokens),
         )
@@ -131,6 +135,8 @@ class TestTokenQueueRegistry:
 
 
 # ─── _run_agent_node (streaming path) ─────────────────────────────────────────
+# Streaming is only triggered for non-tool-using roles (reviewer, planner, etc.).
+# Coder is a tool-using role and always uses the blocking path — see blocking tests.
 
 @pytest.mark.asyncio
 class TestRunAgentNodeStreamingPath:
@@ -150,9 +156,8 @@ class TestRunAgentNodeStreamingPath:
             "services.orchestration.app.graph.nodes.get_inference_client",
             return_value=client,
         ):
-            delta = await self.nodes.coder_node(state)
+            delta = await self.nodes.reviewer_node(state)
 
-        # Collect all items put on the queue (non-blocking)
         events = []
         while not q.empty():
             events.append(q.get_nowait())
@@ -173,7 +178,7 @@ class TestRunAgentNodeStreamingPath:
             "services.orchestration.app.graph.nodes.get_inference_client",
             return_value=client,
         ):
-            delta = await self.nodes.coder_node(state)
+            delta = await self.nodes.reviewer_node(state)
 
         assert delta["last_output"] == "def binary_search(): pass"
 
@@ -188,11 +193,11 @@ class TestRunAgentNodeStreamingPath:
             "services.orchestration.app.graph.nodes.get_inference_client",
             return_value=client,
         ):
-            delta = await self.nodes.coder_node(state)
+            delta = await self.nodes.reviewer_node(state)
 
         history = delta["iteration_history"]
         assert len(history) == 1
-        assert history[0]["role"] == "coder"
+        assert history[0]["role"] == "reviewer"
         assert history[0]["iteration"] == 1
 
     async def test_stream_error_uses_partial_tokens(self):
@@ -209,8 +214,8 @@ class TestRunAgentNodeStreamingPath:
         client.generate = AsyncMock(
             return_value=GenerateResponse(
                 content="fallback",
-                model_family="deepseek",
-                role="coder",
+                model_family="qwen",
+                role="reviewer",
                 tokens_generated=1,
             )
         )
@@ -220,9 +225,8 @@ class TestRunAgentNodeStreamingPath:
             "services.orchestration.app.graph.nodes.get_inference_client",
             return_value=client,
         ):
-            delta = await self.nodes.coder_node(state)
+            delta = await self.nodes.reviewer_node(state)
 
-        # Should not raise — partial tokens are kept
         assert "partial" in delta["last_output"]
 
     async def test_generate_stream_not_called_when_not_registered(self):
@@ -234,7 +238,7 @@ class TestRunAgentNodeStreamingPath:
             "services.orchestration.app.graph.nodes.get_inference_client",
             return_value=client,
         ):
-            delta = await self.nodes.coder_node(state)
+            await self.nodes.reviewer_node(state)
 
         client.generate_stream.assert_not_called()
         client.generate.assert_awaited_once()
@@ -252,7 +256,7 @@ class TestRunAgentNodeStreamingPath:
             "services.orchestration.app.graph.nodes.get_inference_client",
             return_value=client,
         ):
-            await self.nodes.coder_node(state)
+            await self.nodes.reviewer_node(state)
 
         client.generate_stream.assert_not_called()
         client.generate.assert_awaited_once()
@@ -287,8 +291,8 @@ class TestRunAgentNodeBlockingPath:
         client.generate = AsyncMock(
             return_value=GenerateResponse(
                 content="no-stream result",
-                model_family="deepseek",
-                role="coder",
+                model_family="qwen",
+                role="reviewer",
                 tokens_generated=3,
             )
         )
@@ -302,10 +306,27 @@ class TestRunAgentNodeBlockingPath:
             "services.orchestration.app.graph.nodes.get_inference_client",
             return_value=client,
         ):
-            delta = await self.nodes.coder_node(state)
+            delta = await self.nodes.reviewer_node(state)
 
         client.generate.assert_awaited_once()
         assert delta["last_output"] == "no-stream result"
+
+    async def test_coder_always_uses_blocking_even_with_queue(self):
+        """Coder is a tool-using role — it always uses the blocking path."""
+        q: asyncio.Queue = asyncio.Queue()
+        self.nodes.register_token_queue("coder-sess", q)
+
+        client = _streaming_client("def f(): pass")
+        state = _base_state(session_id="coder-sess")
+
+        with patch(
+            "services.orchestration.app.graph.nodes.get_inference_client",
+            return_value=client,
+        ):
+            await self.nodes.coder_node(state)
+
+        client.generate_stream.assert_not_called()
+        client.generate.assert_awaited_once()
 
     async def test_history_entry_appended_on_blocking_path(self):
         client = _blocking_client("block output")

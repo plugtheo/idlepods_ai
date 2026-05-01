@@ -38,6 +38,7 @@ from .edges import (
     _AGENT_NODES,
     check_convergence as _check_convergence_edge,
     next_in_chain,
+    route_after_tool_user,
     route_entry,
 )
 from .nodes import (
@@ -49,6 +50,7 @@ from .nodes import (
     researcher_node,
     review_critic_node,
     reviewer_node,
+    tool_executor_node,
 )
 from .state import AgentState
 from ..utils.scoring import score_iteration
@@ -58,7 +60,7 @@ logger = logging.getLogger(__name__)
 SHORT_CHAIN_MAX_AGENTS = 2   # chains at or below this length skip the consensus node
 MIN_PER_ITERATION_NODES = 5  # minimum node count assumed per iteration for recursion limit
 PIPELINE_HELPER_NODES = 4    # non-agent nodes per iteration (check_conv, finalize, update_loop, …)
-RECURSION_LIMIT_BUFFER = 15  # extra node budget above the worst-case estimate
+RECURSION_LIMIT_BUFFER = 50  # extra node budget above the worst-case estimate (includes tool ReAct steps)
 
 
 # ── State-updating node for "continue looping" branch ──────────────────────
@@ -193,6 +195,7 @@ def build_pipeline() -> CompiledStateGraph:
     graph.add_node("critic",        critic_node)
     graph.add_node("review_critic", review_critic_node)
     graph.add_node("consensus",     consensus_node)
+    graph.add_node("tool_executor", tool_executor_node)
 
     # Helper nodes (no inference call)
     graph.add_node("check_convergence", _noop_convergence_anchor)  # no-op; routing done via edge
@@ -206,14 +209,26 @@ def build_pipeline() -> CompiledStateGraph:
         {role: role for role in _AGENT_NODES},
     )
 
-    # After each agent node: advance chain or go to convergence check
+    # After each agent node: advance chain or go to convergence check.
+    # Tool-using roles route through route_after_tool_user so a tool call
+    # detours to tool_executor instead of advancing the chain.
     _all_agent_roles = list(_AGENT_NODES.keys())
     _non_consensus_roles = [r for r in _all_agent_roles if r != "consensus"]
+    _tool_using = {"coder"} & set(_non_consensus_roles)
+    targets = {r: r for r in _non_consensus_roles}
+    targets["check_convergence"] = "check_convergence"
+    targets["tool_executor"] = "tool_executor"
 
     for role in _non_consensus_roles:
-        targets = {r: r for r in _non_consensus_roles}
-        targets["check_convergence"] = "check_convergence"
-        graph.add_conditional_edges(role, _next_in_chain_or_convergence, targets)
+        edge_fn = route_after_tool_user if role in _tool_using else _next_in_chain_or_convergence
+        graph.add_conditional_edges(role, edge_fn, targets)
+
+    # tool_executor routes back to whichever role emitted the pending call.
+    graph.add_conditional_edges(
+        "tool_executor",
+        lambda s: s.get("tool_originating_role", "coder"),
+        {role: role for role in _AGENT_NODES},
+    )
 
     # check_convergence: either finalize (→ consensus) or loop
     graph.add_conditional_edges(

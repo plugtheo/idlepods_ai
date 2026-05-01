@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 _ROLE_HISTORY_FILTER: Dict[str, Optional[Set[str]]] = {
     "planner":    None,
     "researcher": {"planner"},
-    "coder":      {"planner", "researcher"},
+    "coder":      {"planner", "researcher", "tool"},
     "debugger":   {"coder", "planner"},
     "reviewer":   {"coder", "debugger"},
     "critic":     {"reviewer", "planner", "researcher"},  # see all roles so planner/research chains get proper critique context

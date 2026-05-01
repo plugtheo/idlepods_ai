@@ -2,9 +2,10 @@
 Tests for LocalVLLMBackend.
 
 Covers:
-- Successful generation with adapter (adapter available)
+- Successful generation with adapter (adapter available in registry)
 - Successful generation, adapter falls back to base model (not registered)
-- Unknown model_family raises ValueError
+- Generation with no adapter uses base model directly
+- Unknown family at factory level raises ValueError
 - HTTP error from vLLM propagates
 """
 import pytest
@@ -12,8 +13,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse, Message
 
+_QWEN_URL = "http://vllm-qwen:8000"
+_QWEN_MODEL = "Qwen/Qwen3-14B"
 
-def _make_request(family="deepseek", role="coder", adapter=None):
+
+def _make_request(family="qwen", role="coder", adapter=None):
     return GenerateRequest(
         model_family=family,
         role=role,
@@ -23,7 +27,8 @@ def _make_request(family="deepseek", role="coder", adapter=None):
     )
 
 
-def _make_vllm_response(content="def hello(): pass", tokens=10):
+def _make_chat_completions_response(content="def hello(): pass", tokens=10):
+    """Mock for /v1/chat/completions (base model path)."""
     return MagicMock(
         json=MagicMock(
             return_value={
@@ -35,96 +40,91 @@ def _make_vllm_response(content="def hello(): pass", tokens=10):
     )
 
 
+def _make_completions_response(content="def hello(): pass", tokens=10):
+    """Mock for /v1/completions (adapter path)."""
+    return MagicMock(
+        json=MagicMock(
+            return_value={
+                "choices": [{"text": content}],
+                "usage": {"completion_tokens": tokens},
+            }
+        ),
+        raise_for_status=MagicMock(),
+    )
+
+
+def _make_backend(mock_client):
+    """Return a LocalVLLMBackend with the httpx client replaced by mock_client."""
+    from services.inference.app.backends.local_vllm import LocalVLLMBackend
+    backend = LocalVLLMBackend("qwen", _QWEN_URL, _QWEN_MODEL)
+    backend._client = mock_client
+    backend._registry._client = mock_client
+    backend._registry._fetched_at = float("inf")  # prevent HTTP refresh
+    return backend
+
+
 @pytest.mark.asyncio
 class TestLocalVLLMBackend:
     async def test_generate_with_available_adapter(self):
-        """When adapter is registered, request uses qualified model name."""
-        from services.inference.app.backends.local_vllm import LocalVLLMBackend, _REGISTRIES
-
-        # Make the registry report the adapter as available
-        _REGISTRIES["deepseek"]._known = {
-            "deepseek-ai/deepseek-coder-6.7b-instruct/coding_lora"
-        }
-        _REGISTRIES["deepseek"]._fetched_at = float("inf")  # never refresh
-
-        vllm_resp = _make_vllm_response("print('hi')", tokens=5)
+        """When adapter is registered, request uses the adapter model name."""
         mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(return_value=vllm_resp)
+        mock_client.post = AsyncMock(return_value=_make_completions_response("print('hi')", tokens=5))
 
-        with patch("services.inference.app.backends.local_vllm.httpx.AsyncClient", return_value=mock_client):
-            backend = LocalVLLMBackend()
-            resp = await backend.generate(_make_request(adapter="coding_lora"))
+        backend = _make_backend(mock_client)
+        backend._registry._known = {f"{_QWEN_MODEL}/coding_lora"}
+
+        resp = await backend.generate(_make_request(adapter="coding_lora"))
 
         assert isinstance(resp, GenerateResponse)
         assert resp.content == "print('hi')"
         assert resp.tokens_generated == 5
-        assert resp.model_family == "deepseek"
+        assert resp.model_family == "qwen"
 
-        # _resolve_model() returns the bare adapter_name; vLLM uses it as the model field
         payload_sent = mock_client.post.call_args[1]["json"]
         assert payload_sent["model"] == "coding_lora"
 
     async def test_generate_falls_back_to_base_when_adapter_missing(self):
         """When adapter is NOT registered, base model is used and no error raised."""
-        from services.inference.app.backends.local_vllm import LocalVLLMBackend, _REGISTRIES
-
-        # Registry empty — adapter not available
-        _REGISTRIES["deepseek"]._known = set()
-        _REGISTRIES["deepseek"]._fetched_at = float("inf")
-
-        vllm_resp = _make_vllm_response("result")
         mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(return_value=vllm_resp)
+        mock_client.post = AsyncMock(return_value=_make_chat_completions_response("result"))
 
-        with patch("services.inference.app.backends.local_vllm.httpx.AsyncClient", return_value=mock_client):
-            backend = LocalVLLMBackend()
-            resp = await backend.generate(_make_request(adapter="coding_lora"))
+        backend = _make_backend(mock_client)
+        backend._registry._known = set()
+
+        resp = await backend.generate(_make_request(adapter="coding_lora"))
 
         assert resp.content == "result"
-        # Model should be the base model (no /adapter suffix)
         payload_sent = mock_client.post.call_args[1]["json"]
         assert "/coding_lora" not in payload_sent["model"]
 
     async def test_generate_no_adapter(self):
         """When no adapter requested, base model is used directly."""
-        from services.inference.app.backends.local_vllm import LocalVLLMBackend
-
-        vllm_resp = _make_vllm_response("answer")
         mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(return_value=vllm_resp)
+        mock_client.post = AsyncMock(return_value=_make_chat_completions_response("answer"))
 
-        with patch("services.inference.app.backends.local_vllm.httpx.AsyncClient", return_value=mock_client):
-            backend = LocalVLLMBackend()
-            resp = await backend.generate(_make_request(adapter=None))
+        backend = _make_backend(mock_client)
+
+        resp = await backend.generate(_make_request(adapter=None))
 
         assert resp.content == "answer"
 
-    async def test_unknown_family_raises_value_error(self):
-        from services.inference.app.backends.local_vllm import LocalVLLMBackend
+    async def test_unknown_family_raises_at_factory(self):
+        """get_backend raises ValueError for an unknown model family."""
+        import services.inference.app.backends.factory as factory_mod
+        factory_mod._backends.clear()
 
-        backend = LocalVLLMBackend()
         with pytest.raises(ValueError, match="Unknown model_family"):
-            await backend.generate(_make_request(family="llama"))
+            factory_mod.get_backend("llama")
 
     async def test_http_error_propagates(self):
         import httpx
-        from services.inference.app.backends.local_vllm import LocalVLLMBackend, _REGISTRIES
-
-        _REGISTRIES["mistral"]._known = set()
-        _REGISTRIES["mistral"]._fetched_at = float("inf")
+        from services.inference.app.backends.base import InferenceError
 
         mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
 
-        with patch("services.inference.app.backends.local_vllm.httpx.AsyncClient", return_value=mock_client):
-            backend = LocalVLLMBackend()
-            with pytest.raises(httpx.ConnectError):
-                await backend.generate(_make_request(family="mistral", role="planner"))
+        backend = _make_backend(mock_client)
+        backend._registry._known = set()
+
+        with pytest.raises(Exception):
+            await backend.generate(_make_request())

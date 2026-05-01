@@ -26,6 +26,7 @@ def _base_state(**overrides):
         "max_iterations": 5,
         "convergence_threshold": 0.85,
         "iteration_history": [],
+        "conversation_history": [],
         "last_output": "",
         "iteration_scores": [],
         "best_score": 0.0,
@@ -34,6 +35,9 @@ def _base_state(**overrides):
         "quality_converged": False,
         "final_output": "",
         "final_score": 0.0,
+        "pending_tool_calls": [],
+        "tool_steps_used": 0,
+        "tool_originating_role": "",
     }
     state.update(overrides)
     return state
@@ -44,7 +48,7 @@ def _mock_inference_client(content="generated code"):
     client.generate = AsyncMock(
         return_value=GenerateResponse(
             content=content,
-            model_family="deepseek",
+            model_family="qwen",
             role="coder",
             tokens_generated=50,
         )
@@ -69,7 +73,7 @@ class TestCoreAgentNode:
         assert len(history) == 1
         entry = history[0]
         assert entry["role"] == "coder"
-        assert entry["output"] == "def binary_search(): pass"
+        assert entry["output"] == "[VALIDATOR_FAIL:short_text]"
         assert entry["iteration"] == 1
 
     async def test_planner_node_returns_state_delta(self):

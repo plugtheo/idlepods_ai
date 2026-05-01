@@ -128,7 +128,7 @@ def _make_client() -> "GrpcInferenceClient":
 
 
 def _make_request(
-    model_family="deepseek",
+    model_family="qwen",
     role="coder",
     messages=None,
     max_tokens=1024,
@@ -208,9 +208,9 @@ class TestBuildProtoRequest:
 
     def test_model_family_and_role_strings_passed_through(self):
         client = _make_client()
-        req = _make_request(model_family="mistral", role="planner")
+        req = _make_request(model_family="qwen", role="planner")
         proto = client._build_proto_request(req)
-        assert proto.model_family == "mistral"
+        assert proto.model_family == "qwen"
         assert proto.role == "planner"
 
     def test_session_id_empty_string_when_none(self):
@@ -294,11 +294,11 @@ class TestGrpcClientGenerateStream:
             )
 
         client._stub.GenerateStream = _stub_stream
-        pydantic_req = _make_request(model_family="mistral", role="planner")
+        pydantic_req = _make_request(model_family="qwen", role="planner")
 
         await self._collect_tokens(client, pydantic_req)
 
-        assert captured["req"].model_family == "mistral"
+        assert captured["req"].model_family == "qwen"
         assert captured["req"].role == "planner"
 
 
@@ -311,15 +311,15 @@ class TestGrpcClientGenerate:
         proto_resp = _pb2.GenerateResponse(content="result", tokens_generated=5)
         client._stub.Generate = AsyncMock(return_value=proto_resp)
 
-        req = _make_request(model_family="deepseek", role="coder", session_id="sess-x")
-        from services.orchestration.app.clients.inference_grpc import GrpcInferenceClient
-        response = await GrpcInferenceClient.generate(client, req)
+        req = _make_request(model_family="qwen", role="coder", session_id="sess-x")
+        client._version_checked = False
+        response = await client.generate(req)
 
         assert response.content == "result"
         assert response.tokens_generated == 5
-        assert response.model_family == "deepseek"  # echoed from request
-        assert response.role == "coder"             # echoed from request
-        assert response.session_id == "sess-x"      # echoed from request
+        assert response.model_family == "qwen"   # echoed from request
+        assert response.role == "coder"          # echoed from request
+        assert response.session_id == "sess-x"  # echoed from request
 
 
 # ─── health ───────────────────────────────────────────────────────────────────

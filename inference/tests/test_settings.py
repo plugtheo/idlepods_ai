@@ -11,5 +11,5 @@ class TestInferenceSettings:
         with patch.dict(os.environ, {}, clear=False):
             from services.inference.app.config.settings import InferenceSettings
             s = InferenceSettings()
-            assert "deepseek" in s.deepseek_url
-            assert "mistral" in s.mistral_url
+            assert "qwen" in s.qwen_url.lower()
+            assert s.qwen_model_id == "Qwen/Qwen3-14B"

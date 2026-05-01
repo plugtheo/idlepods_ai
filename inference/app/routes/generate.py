@@ -105,7 +105,7 @@ async def health() -> dict:
     """
     backends_status: dict = {}
 
-    for family in ("deepseek", "mistral"):
+    for family in ("qwen",):
         try:
             backend = get_backend(family)
             backend_health = await backend.health()
@@ -135,7 +135,7 @@ async def health() -> dict:
 async def model_info() -> dict:
     """Query each vLLM backend for the served model's max_model_len."""
     result: dict = {}
-    for family in ("deepseek", "mistral"):
+    for family in ("qwen",):
         try:
             backend = get_backend(family)
             result[family] = await backend.max_model_len()
@@ -151,8 +151,8 @@ async def model_info() -> dict:
 @router.post("/v1/tokenize", summary="Return token count for a text string via a vLLM backend")
 async def tokenize_text(body: _TokenizeBody) -> dict:
     """Proxy a tokenization request to the appropriate vLLM backend."""
-    if body.model_family not in ("deepseek", "mistral"):
-        raise HTTPException(status_code=400, detail="model_family must be 'deepseek' or 'mistral'")
+    if body.model_family not in ("qwen",):
+        raise HTTPException(status_code=400, detail="model_family must be 'qwen'")
     try:
         backend = get_backend(body.model_family)
         count = await backend.tokenize(body.text)

@@ -3,9 +3,9 @@ Inference Service — settings
 =============================
 All configuration is read from environment variables.
 
-The inference service runs locally on self-hosted vLLM servers.
-The only required parameters are the DeepSeek and Mistral vLLM URLs,
-model IDs, gRPC defaults, timeout, and ports.
+The inference service runs locally on a self-hosted vLLM server (Qwen/Qwen3-14B).
+The only required parameters are the Qwen vLLM URL, model ID, gRPC defaults,
+timeout, and ports.
 """
 
 from pydantic import Field
@@ -20,68 +20,36 @@ class InferenceSettings(BaseSettings):
         extra="ignore",
     )
 
-    # ── DeepSeek backend config ───────────────────────────────────────────
-    deepseek_backend: str = Field(
+    # ── Qwen backend config ───────────────────────────────────────────────
+    qwen_backend: str = Field(
         default="local_vllm",
         description=(
-            "Backend type for DeepSeek family: 'local_vllm' (default) or 'remote_vllm'. "
-            "Set to 'remote_vllm' and point INFERENCE__DEEPSEEK_URL at any "
-            "OpenAI-compatible endpoint to route DeepSeek agent calls there."
+            "Backend type for Qwen family: 'local_vllm' (default) or 'remote_vllm'. "
+            "Set to 'remote_vllm' and point INFERENCE__QWEN_URL at any "
+            "OpenAI-compatible endpoint to route Qwen agent calls there."
         ),
     )
-    deepseek_url: str = Field(
-        default="http://vllm-deepseek:8000",
+    qwen_url: str = Field(
+        default="http://vllm-qwen:8000",
         description=(
-            "Base URL of the DeepSeek vLLM OpenAI-compatible server. "
+            "Base URL of the Qwen vLLM OpenAI-compatible server. "
             "Override to http://localhost:8000 for bare-metal local runs."
         ),
     )
-    deepseek_model_id: str = Field(
-        default="deepseek-ai/deepseek-coder-6.7b-instruct",
-        description="HuggingFace model ID served by the DeepSeek vLLM server.",
+    qwen_model_id: str = Field(
+        default="Qwen/Qwen3-14B",
+        description="HuggingFace model ID served by the Qwen vLLM server.",
     )
-    deepseek_auth_token: str = Field(
+    qwen_auth_token: str = Field(
         default="",
         description=(
-            "Optional Bearer token for secured remote DeepSeek endpoints. "
-            "Only used when deepseek_backend=remote_vllm."
+            "Optional Bearer token for secured remote Qwen endpoints. "
+            "Only used when qwen_backend=remote_vllm."
         ),
     )
-    deepseek_ssl_verify: bool = Field(
+    qwen_ssl_verify: bool = Field(
         default=True,
-        description="Verify SSL certificates for remote DeepSeek connections.",
-    )
-
-    # ── Mistral backend config ────────────────────────────────────────────
-    mistral_backend: str = Field(
-        default="local_vllm",
-        description=(
-            "Backend type for Mistral family: 'local_vllm' (default) or 'remote_vllm'. "
-            "Set to 'remote_vllm' and point INFERENCE__MISTRAL_URL at any "
-            "OpenAI-compatible endpoint to route Mistral agent calls there."
-        ),
-    )
-    mistral_url: str = Field(
-        default="http://vllm-mistral:8001",
-        description=(
-            "Base URL of the Mistral vLLM OpenAI-compatible server. "
-            "Override to http://localhost:8001 for bare-metal local runs."
-        ),
-    )
-    mistral_model_id: str = Field(
-        default="mistralai/Mistral-7B-Instruct-v0.1",
-        description="HuggingFace model ID served by the Mistral vLLM server.",
-    )
-    mistral_auth_token: str = Field(
-        default="",
-        description=(
-            "Optional Bearer token for secured remote Mistral endpoints. "
-            "Only used when mistral_backend=remote_vllm."
-        ),
-    )
-    mistral_ssl_verify: bool = Field(
-        default=True,
-        description="Verify SSL certificates for remote Mistral connections.",
+        description="Verify SSL certificates for remote Qwen connections.",
     )
 
     # ── HTTP client settings ──────────────────────────────────────────────
@@ -99,10 +67,6 @@ class InferenceSettings(BaseSettings):
     )
 
     # ── gRPC server-side sampling defaults ────────────────────────────────
-    # Applied when a proto request omits optional sampling fields.
-    # These mirror the shared/contracts/inference.py Pydantic defaults so
-    # both HTTP and gRPC paths produce identical behaviour when callers omit
-    # the fields. Centralised here so a single env-var change updates both.
     grpc_default_max_tokens: int = Field(
         default=1024,
         ge=1,

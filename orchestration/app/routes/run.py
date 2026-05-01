@@ -172,23 +172,40 @@ def _build_contributions(history: list) -> List[AgentContribution]:
     """
     Build a list of AgentContribution objects from the pipeline history.
 
-    Per-agent quality scores are extracted from each history entry using
-    score_per_entry() — evaluator roles prefer an explicit SCORE annotation,
-    generative roles fall back to a heuristic based on output content.
+    role='tool' entries are execution scaffolding — they are skipped here and
+    instead surfaced via tool_turns on the preceding agent contribution.
     """
-    return [
-        AgentContribution(
-            role=h["role"],
-            # Use full_output (raw LLM response) when available; fall back
-            # to the compact extracted version stored in "output".
-            output=str(h.get("full_output") or h.get("output", "")),
-            quality_score=score_per_entry(h),
-            iteration=h.get("iteration", 1),
-            # Full message list paired with output forms a complete SFT training pair.
-            messages=h.get("messages"),
+    contributions = []
+    for i, h in enumerate(history):
+        role = h.get("role", "")
+        if role == "tool":
+            continue
+
+        tool_turns = None
+        if "tool_calls" in h:
+            tool_turns = [{"role": "assistant", "tool_calls": h["tool_calls"], "content": None}]
+            j = i + 1
+            while j < len(history) and history[j].get("role") == "tool":
+                t = history[j]
+                tool_turns.append({
+                    "role": "tool",
+                    "tool_call_id": t.get("tool_call_id", ""),
+                    "name": t.get("name", ""),
+                    "content": t.get("output", ""),
+                })
+                j += 1
+
+        contributions.append(
+            AgentContribution(
+                role=role,
+                output=str(h.get("full_output") or h.get("output", "")),
+                quality_score=score_per_entry(h),
+                iteration=h.get("iteration", 1),
+                messages=h.get("messages"),
+                tool_turns=tool_turns,
+            )
         )
-        for h in history
-    ]
+    return contributions
 
 
 # ── HTTP endpoints ─────────────────────────────────────────────────────────

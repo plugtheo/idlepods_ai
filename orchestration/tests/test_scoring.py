@@ -48,7 +48,8 @@ class TestHeuristicScore:
 
     def test_explicit_score_takes_priority(self):
         from services.orchestration.app.utils.scoring import heuristic_score
-        result = heuristic_score("Detailed review of the implementation quality here. SCORE: 0.90", "reviewer")
+        text = "Detailed review of the implementation quality here.\nISSUES: none\nSUGGESTIONS: none\nSCORE: 0.90"
+        result = heuristic_score(text, "reviewer")
         assert result == pytest.approx(0.90)
 
     def test_positive_signal_raises_score(self):
@@ -84,7 +85,7 @@ class TestScoreIteration:
         from services.orchestration.app.utils.scoring import score_iteration
         history = [
             {"iteration": 1, "role": "coder", "output": "def f(): pass"},
-            {"iteration": 1, "role": "reviewer", "output": "This implementation is correct and well structured. SCORE: 0.80 looks good"},
+            {"iteration": 1, "role": "reviewer", "output": "This implementation is correct and well structured.\nISSUES: none\nSUGGESTIONS: none\nSCORE: 0.80"},
         ]
         score = score_iteration(history, 1)
         assert score == pytest.approx(0.80)
@@ -92,8 +93,8 @@ class TestScoreIteration:
     def test_uses_last_reviewer_in_iteration(self):
         from services.orchestration.app.utils.scoring import score_iteration
         history = [
-            {"iteration": 1, "role": "reviewer", "output": "Some issues with error handling need fixing here. SCORE: 0.60"},
-            {"iteration": 1, "role": "critic", "output": "Overall structure is acceptable but needs more test coverage. SCORE: 0.75"},
+            {"iteration": 1, "role": "reviewer", "output": "Some issues with error handling need fixing here.\nISSUES: error handling gaps\nSUGGESTIONS: add try/except\nSCORE: 0.60"},
+            {"iteration": 1, "role": "critic", "output": "Overall structure is acceptable but needs more test coverage.\nBLOCKERS: none\nIMPROVEMENT: add unit tests\nSCORE: 0.75"},
         ]
         score = score_iteration(history, 1)
         # Should use the highest or last evaluation score

@@ -59,7 +59,7 @@ async def _startup_checks() -> None:
 
         # --- Task 2: chars_per_token calibration ---
         corpus_len = len(_CALIBRATION_CORPUS)
-        for family in ("deepseek", "mistral"):
+        for family in ("qwen",):
             try:
                 token_count = await client.tokenize(family, _CALIBRATION_CORPUS)
             except Exception as exc:

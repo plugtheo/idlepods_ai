@@ -23,14 +23,10 @@ class TrainingSettings(BaseSettings):
         description="Directory to write trained LoRA adapter checkpoints",
     )
 
-    # Base model identifiers
-    deepseek_model: str = Field(
-        "deepseek-ai/deepseek-coder-6.7b-instruct",
-        description="HuggingFace model ID for DeepSeek LoRA training",
-    )
-    mistral_model: str = Field(
-        "mistralai/Mistral-7B-Instruct-v0.1",
-        description="HuggingFace model ID for Mistral LoRA training",
+    # Base model identifier
+    qwen_model: str = Field(
+        "Qwen/Qwen3-14B",
+        description="HuggingFace model ID for Qwen LoRA training",
     )
 
     # Diversity thresholds
@@ -92,7 +88,7 @@ class TrainingSettings(BaseSettings):
         description="Filesystem lock to prevent concurrent training jobs (scheduler-side only).",
     )
     vllm_services: list[str] = Field(
-        default_factory=lambda: ["vllm-deepseek", "vllm-mistral"],
+        default_factory=lambda: ["vllm-qwen"],
         description="Compose service names of local vLLM instances to stop/start in BLOCK mode.",
     )
     compose_file: str = Field(

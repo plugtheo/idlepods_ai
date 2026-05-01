@@ -30,6 +30,15 @@ class AgentContribution(BaseModel):
             "supervised fine-tuning example for future from-scratch training."
         ),
     )
+    tool_turns: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description=(
+            "Interleaved tool-call/tool-result message dicts emitted during this "
+            "agent's ReAct loop. Each entry is an OpenAI-format message dict "
+            "(role='assistant' with tool_calls, or role='tool' with tool_call_id). "
+            "None for agents that did not invoke any tools."
+        ),
+    )
 
 
 class ExperienceEvent(BaseModel):

@@ -224,13 +224,13 @@ class OrchestrationSettings(BaseSettings):
     )
     role_model_family: Dict[str, str] = Field(
         default_factory=lambda: {
-            "planner":    "mistral",
-            "researcher": "mistral",
-            "coder":      "deepseek",
-            "debugger":   "deepseek",
-            "reviewer":   "deepseek",
-            "critic":     "mistral",
-            "consensus":  "mistral",
+            "planner":    "qwen",
+            "researcher": "qwen",
+            "coder":      "qwen",
+            "debugger":   "qwen",
+            "reviewer":   "qwen",
+            "critic":     "qwen",
+            "consensus":  "qwen",
         },
         description=(
             "Maps each agent role to the vLLM model family it should run on. "

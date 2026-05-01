@@ -25,21 +25,21 @@ class TestMessage:
         with pytest.raises(ValidationError):
             Message(content="Hello")
 
-    def test_missing_content_raises(self):
+    def test_missing_content_is_none(self):
         from shared.contracts.inference import Message
-        with pytest.raises(ValidationError):
-            Message(role="user")
+        msg = Message(role="user")
+        assert msg.content is None
 
 
 class TestGenerateRequest:
     def test_minimal_valid_request(self):
         from shared.contracts.inference import GenerateRequest, Message
         req = GenerateRequest(
-            model_family="deepseek",
+            model_family="qwen",
             role="coder",
             messages=[Message(role="user", content="Write a function")],
         )
-        assert req.model_family == "deepseek"
+        assert req.model_family == "qwen"
         assert req.adapter_name is None
         assert req.max_tokens == 1024
         assert req.temperature == 0.2
@@ -47,7 +47,7 @@ class TestGenerateRequest:
     def test_with_adapter(self):
         from shared.contracts.inference import GenerateRequest, Message
         req = GenerateRequest(
-            model_family="mistral",
+            model_family="qwen",
             role="planner",
             messages=[Message(role="user", content="Plan this")],
             adapter_name="planning_lora",
@@ -58,7 +58,7 @@ class TestGenerateRequest:
         from shared.contracts.inference import GenerateRequest, Message
         with pytest.raises(ValidationError):
             GenerateRequest(
-                model_family="deepseek",
+                model_family="qwen",
                 role="coder",
                 messages=[Message(role="user", content="x")],
                 temperature=3.0,  # above max 2.0
@@ -68,7 +68,7 @@ class TestGenerateRequest:
         from shared.contracts.inference import GenerateRequest, Message
         with pytest.raises(ValidationError):
             GenerateRequest(
-                model_family="deepseek",
+                model_family="qwen",
                 role="coder",
                 messages=[Message(role="user", content="x")],
                 max_tokens=0,  # below min 1
@@ -80,7 +80,7 @@ class TestGenerateResponse:
         from shared.contracts.inference import GenerateResponse
         resp = GenerateResponse(
             content="def hello(): pass",
-            model_family="deepseek",
+            model_family="qwen",
             role="coder",
         )
         assert resp.tokens_generated == 0
@@ -90,7 +90,7 @@ class TestGenerateResponse:
         from shared.contracts.inference import GenerateResponse
         resp = GenerateResponse(
             content="result",
-            model_family="mistral",
+            model_family="qwen",
             role="planner",
             tokens_generated=42,
             session_id="sess-123",

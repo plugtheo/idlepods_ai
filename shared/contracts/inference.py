@@ -3,13 +3,14 @@ Inference Service contracts
 ===========================
 Shapes used when Orchestration Service calls the Inference Service.
 
-A `Message` is one turn in a conversation (system/user/assistant).
+A `Message` is one turn in a conversation (system/user/assistant/tool).
 `GenerateRequest` carries the full messages list plus which model family
 and LoRA adapter to use.
-`GenerateResponse` wraps the model's output text back to the caller.
+`GenerateResponse` wraps the model's output text (and any tool calls) back
+to the caller.
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -17,17 +18,25 @@ from pydantic import BaseModel, Field
 class Message(BaseModel):
     """One conversation turn."""
 
-    role: str = Field(
-        description="One of: 'system', 'user', 'assistant'."
-    )
-    content: str = Field(description="Text content of this turn.")
+    role: str
+    content: Optional[str] = None
+    tool_calls: Optional[List] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
+
+
+class ToolDefinition(BaseModel):
+    """OpenAI-compatible function tool definition."""
+
+    type: str = "function"
+    function: Dict[str, Any]
 
 
 class GenerateRequest(BaseModel):
     """Request sent from Orchestration → Inference Service."""
 
     model_family: str = Field(
-        description="Which model family to use: 'deepseek' or 'mistral'."
+        description="Which model family to use, e.g. 'qwen'."
     )
     role: str = Field(
         description="Agent role performing this call, e.g. 'coder', 'planner'."
@@ -49,6 +58,14 @@ class GenerateRequest(BaseModel):
         default=None,
         description="Opaque string for log correlation across service calls.",
     )
+    tools: Optional[List[ToolDefinition]] = Field(
+        default=None,
+        description="OpenAI-compatible tool definitions to pass to the model.",
+    )
+    thinking_enabled: bool = Field(
+        default=False,
+        description="Enable Qwen3 thinking mode (disabled by default).",
+    )
 
 
 class GenerateResponse(BaseModel):
@@ -61,3 +78,7 @@ class GenerateResponse(BaseModel):
         default=0, description="Number of tokens in the generated output."
     )
     session_id: Optional[str] = Field(default=None)
+    tool_calls: Optional[List] = Field(
+        default=None,
+        description="OpenAI-format tool calls emitted by the model, if any.",
+    )
