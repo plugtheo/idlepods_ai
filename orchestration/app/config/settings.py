@@ -8,8 +8,8 @@ ORCHESTRATION__DEFAULT_MAX_ITER  — default max agent-chain iterations
 ORCHESTRATION__CONVERGENCE_THRESHOLD — default quality score to stop looping
 
 ORCHESTRATION__JSONL_PATH        — append-only experience file
-ORCHESTRATION__MIN_BATCH_SIZE    — minimum records before training trigger
-ORCHESTRATION__TRAINING_URL      — Training Service base URL
+ORCHESTRATION__SPOOL_PATH        — spool file for in-flight experiences drained at shutdown
+ORCHESTRATION__SHUTDOWN_DRAIN_TIMEOUT_S — seconds to wait for in-flight experience tasks at shutdown
 ORCHESTRATION__EMBEDDING_MODEL   — sentence-transformers model for embeddings
 ORCHESTRATION__CHROMADB_HOST     — empty = local PersistentClient; set = HttpClient
 
@@ -268,17 +268,13 @@ class OrchestrationSettings(BaseSettings):
         default="/data/experiences.jsonl",
         description="Append-only JSONL file for experience records.",
     )
-    min_batch_size: int = Field(
-        default=50,
-        description=(
-            "Minimum stored experiences before a training trigger is attempted. "
-            "Single source of truth — replaces the duplicated value previously in "
-            "both experience/ and training/ settings."
-        ),
+    spool_path: str = Field(
+        default="/data/experiences.spool.jsonl",
+        description="Spool file holding experience records whose in-flight tasks did not finish before shutdown.",
     )
-    training_url: str = Field(
-        default="http://training:8013",
-        description="Training Service base URL for LoRA trigger notifications.",
+    shutdown_drain_timeout_s: float = Field(
+        default=10.0,
+        description="Seconds to wait for in-flight experience-recording tasks to complete during shutdown before spooling the rest.",
     )
 
     # ── Context enrichment (formerly the Context Service) ─────────────────
