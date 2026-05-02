@@ -310,6 +310,13 @@ def _build_messages(
             messages.append(Message(role="user",      content="\n".join(history_lines)))
             messages.append(Message(role="assistant", content="I've reviewed the prior outputs."))
 
+    # ── User task ─────────────────────────────────────────────────────────
+    # Must precede any tool-loop entries: OpenAI conversation order is
+    # user → assistant(tool_calls) → tool(result) → assistant(next).
+    # Appending user AFTER the tool turns confuses the model into treating
+    # the original request as a fresh turn and re-emitting the same tool call.
+    messages.append(user_msg)
+
     # ── Tool-loop messages (OpenAI assistant+tool pairs, chronological) ──
     if tool_loop_entries and role in _TOOL_USING_ROLES:
         for entry in tool_loop_entries:
@@ -322,9 +329,6 @@ def _build_messages(
                     content=entry.get("output", ""),
                     name=entry.get("name"),
                 ))
-
-    # ── Final user task ───────────────────────────────────────────────────
-    messages.append(user_msg)
 
     return messages
 
@@ -396,15 +400,22 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
     # Post-generation validator: prevent downstream agents seeing garbage output.
     # full_output retains the original so the convergence scorer still operates
     # on the real text (leakage detection, SCORE: extraction, etc.).
-    _valid, _reasons = validate_output(output, role)
-    if not _valid:
-        logger.warning(
-            "[%s] iter=%d  role=%s  validation_failed reasons=%s",
-            session_id[:8], current_iteration, role, _reasons,
-        )
-        display_output = f"[VALIDATOR_FAIL:{';'.join(_reasons)}]"
-    else:
+    # Skip validation when the response carries native tool_calls — a tool-call
+    # turn legitimately has empty/short content (the payload lives in tool_calls,
+    # not text), so prose-oriented checks like short_text don't apply.
+    has_tool_calls = response is not None and response.tool_calls
+    if has_tool_calls:
         display_output = output
+    else:
+        _valid, _reasons = validate_output(output, role)
+        if not _valid:
+            logger.warning(
+                "[%s] iter=%d  role=%s  validation_failed reasons=%s",
+                session_id[:8], current_iteration, role, _reasons,
+            )
+            display_output = f"[VALIDATOR_FAIL:{';'.join(_reasons)}]"
+        else:
+            display_output = output
 
     # Structured extraction: store compact key fields in history so downstream
     # agents' input token cost is lower.  Full output kept as last_output so

@@ -48,10 +48,11 @@ AGENT_PROMPTS: Dict[str, str] = {
     "coder": (
         "You are CoderAgent \u2014 an expert software engineer.\n"
         "Your job: implement the solution based on the plan and research provided.\n"
-        "Write clean, idiomatic, well-commented code.\n"
-        "Include type hints (Python) or types (TypeScript).\n"
-        "Output ONLY the code and any necessary inline comments.\n"
-        "Use the provided tools to read or write files as needed before finalising."
+        "Write clean, idiomatic code with type hints (Python) or types (TypeScript).\n"
+        "When tools are available, invoke them using the function-call interface \u2014 "
+        "do NOT write code that calls tool names as if they were Python functions. "
+        "Call read_file, write_file, etc. as function calls so their results are returned to you. "
+        "After receiving tool results, produce the final implementation."
     ),
     "debugger": (
         "You are DebuggerAgent \u2014 a senior debugging specialist.\n"

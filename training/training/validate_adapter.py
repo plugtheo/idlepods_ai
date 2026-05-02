@@ -44,6 +44,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from shared.contracts.agent_prompts import AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE
+from shared.contracts.training import AdapterRecipe, lookup_recipe
 
 # ---------------------------------------------------------------------------
 # BPE / contamination patterns (same as e2e_test.py)
@@ -203,12 +204,20 @@ def validate(capability: str, adapter_dir: Path) -> bool:
         print("  [VALIDATE] unsloth/torch not available — skipping (PASS)")
         return True
 
+    # Resolve recipe to determine load_in_4bit (QLoRA needs 4-bit base).
+    try:
+        from shared.contracts.models import load_registry as _lr
+        _backend = _lr().default_backend
+    except Exception:
+        _backend = "primary"
+    _recipe: AdapterRecipe = lookup_recipe(_backend, role_name)
+
     try:
         model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name    = adapter_path,
-            max_seq_length = 2048,
+            model_name     = adapter_path,
+            max_seq_length = _recipe.max_seq_length,
             dtype          = None,
-            load_in_4bit   = True,
+            load_in_4bit   = _recipe.load_in_4bit or _recipe.peft_type == "qlora",
         )
         FastLanguageModel.for_inference(model)
     except Exception as exc:

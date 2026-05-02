@@ -63,6 +63,20 @@ for d in sorted(base.iterdir()):
 
     info = KNOWN_ADAPTERS.get(name, {"capability": name, "status": "unknown"})
 
+    backend = _default_backend()
+    # Resolve recipe for this adapter's role (skip stale entries that pre-date recipe field).
+    _cap = info["capability"]
+    _role_map = {
+        "coding": "coder", "debugging": "debugger", "review": "reviewer",
+        "planning": "planner", "research": "researcher", "criticism": "critic",
+    }
+    _role = _role_map.get(_cap, _cap)
+    try:
+        _recipe = lookup_recipe(backend, _role)
+        _recipe_dict = _recipe.model_dump()
+    except Exception:
+        _recipe_dict = {}
+
     meta = {
         "name":        name,
         "version":     "1.0.0",
@@ -80,6 +94,7 @@ for d in sorted(base.iterdir()):
                 "version":    "1.0.0",
                 "created_at": _SEEDED_AT,
                 "note":       "Initial training run (r=8, warmup config). " + NOTES.get(name, ""),
+                "recipe":     _recipe_dict,
             }
         ],
     }

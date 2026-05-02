@@ -38,13 +38,14 @@ services:
   # ── Local vLLM servers ───────────────────────────────────────────────────
 
   vllm-primary:
-    image: vllm/vllm-openai:v0.7.3
+    image: vllm/vllm-openai:latest
     runtime: nvidia
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
     command: >
-      --model ${VLLM_MODEL_ID:-Qwen/Qwen3-14B}
+      --model ${VLLM_MODEL_ID:-Qwen/Qwen3-8B-AWQ}
+      --quantization awq_marlin
       --enable-lora
       --max-lora-rank 64
       --max-loras 8
@@ -52,10 +53,11 @@ services:
       --host 0.0.0.0
       --enable-auto-tool-choice
       --tool-call-parser hermes
-      --gpu-memory-utilization 0.90
-      --max-model-len ${VLLM_MAX_MODEL_LEN:-4096}
-      --gpu-memory-utilization 0.45
-      --tokenizer-mode slow
+      --gpu-memory-utilization 0.92
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-40960}
+      --kv-cache-dtype fp8
+      --max-num-seqs 1
+      --tokenizer-mode auto
     volumes:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
       # LoRA adapters — written by Training Service; read by vLLM at runtime load
@@ -230,6 +232,7 @@ services:
       - ORCHESTRATION__INFERENCE_GRPC_PORT=50051
       - ORCHESTRATION__JSONL_PATH=/data/experiences.jsonl
       - ORCHESTRATION__CHROMADB_PATH=/data/vector_store
+      - ORCHESTRATION__MODEL_CONTEXT_LEN=${VLLM_MAX_MODEL_LEN:-40960}
       - MODELS_YAML_PATH=/config/models.yaml
       # Uncomment to switch ChromaDB to server mode (also uncomment chromadb service above):
       # - ORCHESTRATION__CHROMADB_HOST=chromadb

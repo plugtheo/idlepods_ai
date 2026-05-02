@@ -28,6 +28,7 @@ from shared.manifest import write_manifest_locked, LegacyManifestError  # noqa: 
 from shared.contracts.manifest_schema import AdapterEntry, HistoryEntry, Manifest
 
 from shared.contracts.agent_prompts import AGENT_PROMPTS as _AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE as _CAP_TO_ROLE
+from shared.contracts.training import AdapterRecipe
 
 
 def _resolve_registry_default() -> str:
@@ -568,24 +569,18 @@ class LoRATrainer:
             print("[TRAINER] [INFO] Unsloth not available, using CPU training mode")
             return False
     
-    async def train(self, 
+    async def train(self,
                    dataset_path: Path,
                    num_epochs: int = 3,
                    learning_rate: float = 2e-4,
                    lora_rank: int = 16,
-                   lora_alpha: int = 32) -> Dict[str, Any]:
+                   lora_alpha: int = 32,
+                   recipe: Optional[AdapterRecipe] = None) -> Dict[str, Any]:
         """
-        Train LoRA adapter on dataset
-        
-        Args:
-            dataset_path: Path to JSONL training data
-            num_epochs: Number of training epochs
-            learning_rate: Learning rate for training
-            lora_rank: LoRA rank (lower = fewer parameters)
-            lora_alpha: LoRA alpha scaling factor
-        
-        Returns:
-            Training result with metrics
+        Train LoRA adapter on dataset.
+
+        recipe: when provided, PEFT config is applied via apply_recipe().
+        Falls back to explicit lora_rank / lora_alpha parameters otherwise.
         """
         
         print(f"\n{'='*70}")
@@ -644,16 +639,17 @@ class LoRATrainer:
                 record["completion"] = record.get("response", "")
         
         if self.HAS_UNSLOTH:
-            return await self._train_unsloth(dataset, num_epochs, learning_rate, lora_rank, lora_alpha)
+            return await self._train_unsloth(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe)
         else:
             return await self._train_mock(dataset, num_epochs)
-    
+
     async def _train_unsloth(self,
                              dataset: List[Dict],
                              num_epochs: int,
                              learning_rate: float,
                              lora_rank: int,
-                             lora_alpha: int) -> Dict[str, Any]:
+                             lora_alpha: int,
+                             recipe: Optional[AdapterRecipe] = None) -> Dict[str, Any]:
         """Train with actual Unsloth (requires GPU)"""
         try:
             from unsloth import FastLanguageModel
@@ -671,21 +667,19 @@ class LoRATrainer:
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
 
-            # Apply LoRA to both attention AND FFN layers for better fine-tuning
-            # quality. Attention-only LoRA (v2.0) caused the model to learn
-            # incorrect token distributions leading to garbled output.
-            model = FastLanguageModel.get_peft_model(
-                model,
-                r=lora_rank,
-                lora_alpha=lora_alpha,
-                target_modules=[
-                    "q_proj", "k_proj", "o_proj", "v_proj",  # attention
-                    "gate_proj", "up_proj", "down_proj",       # FFN (MLP)
-                ],
-                lora_dropout=0.0,  # 0.0 required for Unsloth fast QKV/O/MLP patching
-                bias="none",
-                use_gradient_checkpointing="unsloth",
-            )
+            # Apply LoRA via recipe (preferred) or explicit rank/alpha fallback.
+            if recipe is not None:
+                model = apply_recipe(model, recipe)
+            else:
+                model = FastLanguageModel.get_peft_model(
+                    model,
+                    r=lora_rank,
+                    lora_alpha=lora_alpha,
+                    target_modules=_ADAPTER_TARGET_MODULES,
+                    lora_dropout=0.0,
+                    bias="none",
+                    use_gradient_checkpointing="unsloth",
+                )
             
             print("[TRAINER] Preparing training data...")
 

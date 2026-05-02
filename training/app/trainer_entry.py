@@ -72,6 +72,7 @@ from training.lora_trainer import (
     _mark_failed,
 )
 from training.smoke_gate import run_smoke
+from shared.contracts.training import AdapterRecipe, lookup_recipe
 
 # System prompts — imported from the single source of truth so that training and
 # inference always use byte-identical strings.  Do NOT redefine these here.
@@ -337,6 +338,7 @@ def main() -> None:
     parser.add_argument("--base-model",  required=True,  help="HuggingFace model ID")
     parser.add_argument("--output-dir",  required=True,  help="Base adapter output directory (e.g. /data/lora_checkpoints)")
     parser.add_argument("--capability",  default="general", help="Capability label (e.g. coder, researcher)")
+    parser.add_argument("--recipe-name", default=None, help="Override recipe registry lookup (role name, e.g. coder)")
     args = parser.parse_args()
 
     # ---------------------------------------------------------------------------
@@ -366,6 +368,20 @@ def main() -> None:
     print(
         f"[trainer-entry] capability={args.capability!r}  "
         f"→ role_name={role_name!r}  cap_label={cap_label!r}",
+        flush=True,
+    )
+
+    # Resolve AdapterRecipe — registry lookup unless --recipe-name overrides it.
+    try:
+        from shared.contracts.models import load_registry
+        backend = load_registry().default_backend
+    except Exception:
+        backend = "primary"
+    _recipe_role = args.recipe_name if args.recipe_name else role_name
+    recipe: AdapterRecipe = lookup_recipe(backend, _recipe_role)
+    print(
+        f"[trainer-entry] recipe: peft_type={recipe.peft_type}  r={recipe.r}  "
+        f"alpha={recipe.alpha}  sft_format={recipe.sft_format}",
         flush=True,
     )
 
@@ -447,10 +463,11 @@ def main() -> None:
     try:
         result = asyncio.run(trainer.train(
             dataset_path=str(data_file),
-            num_epochs=_training_settings.lora_num_epochs,
-            learning_rate=_training_settings.lora_learning_rate,
-            lora_rank=_training_settings.lora_rank,
-            lora_alpha=_training_settings.lora_alpha,
+            num_epochs=recipe.num_epochs,
+            learning_rate=recipe.learning_rate,
+            lora_rank=recipe.r,
+            lora_alpha=recipe.alpha,
+            recipe=recipe,
         ))
     finally:
         # Always clean up the temp dataset file, even if training fails.
@@ -475,15 +492,18 @@ def main() -> None:
             old_version=old_version,
             base_model_id=args.base_model,
             n_samples=len(pairs),
-            num_epochs=_training_settings.lora_num_epochs,
-            learning_rate=_training_settings.lora_learning_rate,
-            lora_r=_training_settings.lora_rank,
-            lora_alpha=_training_settings.lora_alpha,
+            num_epochs=recipe.num_epochs,
+            learning_rate=recipe.learning_rate,
+            lora_r=recipe.r,
+            lora_alpha=recipe.alpha,
             final_loss=result.get("final_loss", 0.0),
             note="self-training",
             dataset_hash=dataset_hash,
             tokenizer_hash=tokenizer_hash,
         )
+        # Persist full recipe dict into the history entry (Plan C consumes this).
+        if new_meta.get("history"):
+            new_meta["history"][-1]["recipe"] = recipe.model_dump()
         new_version  = new_meta["version"]
         backend_key  = new_meta.get("backend", _resolve_registry_default())
         staging_name = f"{adapter_name}__staging"

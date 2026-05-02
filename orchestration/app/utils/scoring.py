@@ -71,7 +71,7 @@ _EVALUATOR_REQUIRED_FIELDS: Dict[str, List[str]] = {
 def _required_fields_present(text: str, role: str) -> bool:
     """Return True if all non-SCORE structured fields for *role* appear in *text*."""
     fields = _EVALUATOR_REQUIRED_FIELDS.get(role, [])
-    return all(re.search(rf"(?m)^{field}:", text) for field in fields)
+    return all(re.search(rf"(?mi)^{field}:", text) for field in fields)
 
 
 def extract_score_from_text(text: str) -> float | None:

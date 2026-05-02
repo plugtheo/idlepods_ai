@@ -105,11 +105,11 @@ class OrchestrationSettings(BaseSettings):
         description="Port of the Inference Service gRPC server.",
     )
     model_context_len: int = Field(
-        default=4096,
+        default=40960,
         description=(
             "Token context window of the deployed vLLM models. "
             "Must match --max-model-len in compose.yml. "
-            "Override with ORCHESTRATION__MODEL_CONTEXT_LEN=8192."
+            "Override with ORCHESTRATION__MODEL_CONTEXT_LEN."
         ),
     )
 
@@ -239,12 +239,12 @@ class OrchestrationSettings(BaseSettings):
     )
     role_adapter: Dict[str, Optional[str]] = Field(
         default_factory=lambda: {
-            "planner":    "planning_lora",
-            "researcher": "research_lora",
-            "coder":      "coding_lora",
-            "debugger":   "debugging_lora",
-            "reviewer":   "review_lora",
-            "critic":     "criticism_lora",
+            "planner":    None,
+            "researcher": None,
+            "coder":      None,
+            "debugger":   None,
+            "reviewer":   None,
+            "critic":     None,
             "consensus":  None,
         },
         description=(

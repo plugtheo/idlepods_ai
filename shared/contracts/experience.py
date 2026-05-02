@@ -39,6 +39,18 @@ class AgentContribution(BaseModel):
             "None for agents that did not invoke any tools."
         ),
     )
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="assistant→tool_calls round captured from iteration_history.",
+    )
+    tool_results: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="tool→content rounds paired with tool_calls.",
+    )
+    used_base_fallback: bool = Field(
+        default=False,
+        description="True when inference fell back to the base model (populated by Plan E).",
+    )
 
 
 class ExperienceEvent(BaseModel):

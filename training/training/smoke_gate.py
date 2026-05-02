@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import httpx
 
 from shared.contracts.agent_prompts import AGENT_PROMPTS
+from shared.contracts.training import AdapterRecipe
 
 logger = logging.getLogger(__name__)
 
@@ -71,11 +72,28 @@ def _shape_ok(role: str, text: str) -> bool:
     return len(t) > 0
 
 
+def _tool_call_shape_ok(response_json: dict) -> bool:
+    """Return True if the response contains a structurally-valid tool_calls array."""
+    choices = response_json.get("choices", [])
+    if not choices:
+        return False
+    msg = choices[0].get("message", {})
+    tool_calls = msg.get("tool_calls")
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return False
+    first = tool_calls[0]
+    return (
+        isinstance(first.get("id"), str)
+        and isinstance(first.get("function", {}).get("name"), str)
+    )
+
+
 def run_smoke(
     inference_url: str,
     role: str,
     staging_name: str,
     timeout: float = 30.0,
+    recipe: Optional[AdapterRecipe] = None,
 ) -> Dict[str, Any]:
     """
     Synchronous smoke test (runs inside the training subprocess).
