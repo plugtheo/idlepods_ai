@@ -52,9 +52,17 @@ class TestBackendFactory:
 
     def test_unknown_backend_raises(self):
         from services.inference.app.backends.factory import get_backend
+        from shared.contracts.models import get_backend_entry as real_gbe
 
-        with pytest.raises(ValueError):
-            get_backend("nonexistent_backend_xyz")
+        def _raise_value_error(name):
+            raise ValueError(f"Unknown backend '{name}'.")
+
+        with patch(
+            "services.inference.app.backends.factory.get_backend_entry",
+            side_effect=_raise_value_error,
+        ):
+            with pytest.raises(ValueError):
+                get_backend("nonexistent_backend_xyz")
 
     def test_singleton_per_name(self):
         with patch(

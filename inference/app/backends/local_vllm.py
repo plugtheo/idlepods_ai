@@ -339,7 +339,7 @@ class LocalVLLMBackend(InferenceBackend):
                 max_keepalive_connections=settings.http_max_keepalive_connections,
             ),
         )
-        self._registry = _AdapterRegistry(base_url, model_id)
+        self._registry = _AdapterRegistry(self._base_url, self._model_id)
 
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
         effective_model = await _resolve_model(

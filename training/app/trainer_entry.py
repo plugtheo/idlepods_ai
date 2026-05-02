@@ -420,6 +420,14 @@ def main() -> None:
 
     data_file = _save_sft_pairs(pairs, Path(args.output_dir) / "datasets")
 
+    # Compute dataset_hash from sorted SFT pair lines BEFORE training.
+    import hashlib as _hashlib
+    _h = _hashlib.sha256()
+    with open(data_file, "rb") as _fh:
+        for _line in sorted(_fh.readlines()):
+            _h.update(_line)
+    dataset_hash = _h.hexdigest()
+
     # Pre-training backup — MUST happen BEFORE LoRATrainer overwrites the adapter.
     # If we backed up AFTER training, the backup would contain the NEW weights,
     # making rollback useless.
@@ -454,6 +462,13 @@ def main() -> None:
     # Post-training: stage → smoke gate → swap+promote (or mark failed).
     # Skip entirely in mock mode (no GPU, no weights written).
     if result.get("method") != "mock":
+        # Compute tokenizer_hash from the tokenizer.json saved by unsloth/PEFT.
+        _tok_path = adapter_dir / "tokenizer.json"
+        if _tok_path.exists():
+            tokenizer_hash = _hashlib.sha256(_tok_path.read_bytes()).hexdigest()
+        else:
+            tokenizer_hash = "unknown"
+
         new_meta = _post_train_stage(
             save_path=adapter_dir,
             capability=cap_label,
@@ -466,16 +481,21 @@ def main() -> None:
             lora_alpha=_training_settings.lora_alpha,
             final_loss=result.get("final_loss", 0.0),
             note="self-training",
+            dataset_hash=dataset_hash,
+            tokenizer_hash=tokenizer_hash,
         )
         new_version  = new_meta["version"]
+        backend_key  = new_meta.get("backend", _resolve_registry_default())
         staging_name = f"{adapter_name}__staging"
         inference_url = os.environ.get("TRAINING__INFERENCE_URL", "http://inference:8010")
 
-        # Load staged adapter onto vLLM for smoke test
+        # Load staged adapter onto vLLM for smoke test.
+        # All inference-service adapter routes use `backend` (opaque registry key),
+        # not `capability` — Plan A invariant.
         try:
             load_resp = httpx.post(
                 f"{inference_url}/adapters/load",
-                json={"capability": cap_label, "lora_name": staging_name, "lora_path": adapter_output_dir},
+                json={"backend": backend_key, "lora_name": staging_name, "lora_path": adapter_output_dir},
                 timeout=60.0,
             )
             load_resp.raise_for_status()
@@ -496,7 +516,7 @@ def main() -> None:
                 swap_resp = httpx.post(
                     f"{inference_url}/adapters/swap",
                     json={
-                        "capability":     cap_label,
+                        "backend":        backend_key,
                         "canonical_name": adapter_name,
                         "new_path":       adapter_output_dir,
                     },
@@ -511,12 +531,14 @@ def main() -> None:
                 )
                 sys.exit(2)
 
+            eval_metrics = {k: v for k, v in smoke.items() if isinstance(v, (int, float))}
             _promote_to_active(
                 checkpoint_dir=Path(args.output_dir),
                 capability=cap_label,
                 new_meta=new_meta,
                 previous_backup_path=backup_path,
                 smoke_results=smoke,
+                eval_results=eval_metrics,
             )
             print(
                 f"[trainer-entry] Adapter v{new_version} active: {adapter_output_dir}",
@@ -527,7 +549,7 @@ def main() -> None:
             try:
                 httpx.post(
                     f"{inference_url}/adapters/unload",
-                    json={"capability": cap_label, "lora_name": staging_name},
+                    json={"backend": backend_key, "lora_name": staging_name},
                     timeout=30.0,
                 )
             except Exception:

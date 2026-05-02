@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest --version)",
+      "Bash(where pytest *)",
+      "Bash(py -3.11 -m pytest --version)",
+      "Bash(py -3.12 -m pytest --version)",
+      "Bash(py -3.10 -m pytest --version)",
+      "Bash(py *)",
+      "Bash(pip install *)",
+      "Bash(python -m pytest shared/tests/ inference/tests/ orchestration/tests/ -x --tb=short -q)",
+      "Bash(pip show *)",
+      "Bash(python -m pytest shared/tests/test_no_model_literals.py -v --tb=short)",
+      "Bash(python -c \"from shared.contracts.manifest_schema import Manifest, AdapterEntry, HistoryEntry; print\\('schema OK'\\)\")",
+      "Bash(python -c \"from shared.manifest import read_manifest, write_manifest_locked, LegacyManifestError; print\\('manifest OK'\\)\")",
+      "Bash(python -m pytest shared/tests/test_manifest_schema.py -q)",
+      "Bash(python -m pytest scripts/tests/test_migrate_manifest.py -q)",
+      "Bash(python -m pytest scripts/tests/test_migrate_manifest.py shared/tests/test_manifest_schema.py -q)",
+      "Bash(xargs grep *)",
+      "Bash(python3 -c \"from shared.manifest import read_manifest, write_manifest_locked, LegacyManifestError; from shared.contracts.manifest_schema import AdapterEntry, HistoryEntry, Manifest; print\\('Imports OK'\\)\")",
+      "Bash(python3 -c \"from shared.contracts.models import load_registry, get_backend_entry; print\\('Registry imports OK'\\)\")",
+      "Bash(python -m pytest inference/tests/ orchestration/tests/test_run_route.py -x -q)",
+      "Bash(python -m pytest shared/tests/ scripts/tests/ training/ -x -q)",
+      "Bash(python -m pytest shared/tests/ scripts/tests/ training/ -q --ignore=training/tests/test_trainer_launcher.py)",
+      "Bash(python -m pytest shared/tests/test_no_model_literals.py -v)",
+      "Bash(python -m pytest inference/tests/ orchestration/tests/test_run_route.py shared/tests/ scripts/tests/ -q)",
+      "Bash(python *)",
+      "Bash(Select-String -Pattern \"role_model_family\" healthcheck.py)"
+    ]
+  }
+}

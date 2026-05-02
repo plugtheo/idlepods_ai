@@ -10,11 +10,11 @@ Backend identity and config are read from models.yaml via the shared registry.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
 from shared.contracts.models import load_registry, get_backend_entry
+from shared.manifest import read_manifest, LegacyManifestError
 
 from .base import InferenceBackend
 
@@ -53,24 +53,22 @@ async def bootstrap_adapters(manifest_path: str) -> None:
         logger.info("bootstrap_adapters: no manifest at %s — nothing to load", manifest_path)
         return
     try:
-        manifest = json.loads(p.read_text())
+        manifest = read_manifest(p)
+    except LegacyManifestError as exc:
+        logger.fatal(
+            "bootstrap_adapters: %s — skipping adapter load. "
+            "Run: python scripts/migrate_manifest.py",
+            exc,
+        )
+        return
     except Exception as exc:
         logger.warning("bootstrap_adapters: could not read manifest: %s — skipping", exc)
         return
 
-    registry = load_registry()
-
-    for adapter_name, entry in manifest.get("adapters", {}).items():
-        backend_key = entry.get("backend")
-        if backend_key is None:
-            # v1 manifest entry without a backend field — fall back to default.
-            backend_key = registry.default_backend
-            logger.warning(
-                "bootstrap_adapters: %s has no 'backend' field — using default '%s'",
-                adapter_name, backend_key,
-            )
-        active_path = entry.get("active_path")
-        previous_path = entry.get("previous_path")
+    for adapter_name, entry in manifest.adapters.items():
+        backend_key = entry.backend
+        active_path = entry.active_path
+        previous_path = entry.previous_path
         if not active_path:
             logger.debug("bootstrap_adapters: %s has no active_path — skipping", adapter_name)
             continue

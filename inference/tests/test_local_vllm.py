@@ -113,10 +113,15 @@ class TestLocalVLLMBackend:
     async def test_unknown_family_raises_at_factory(self):
         """get_backend raises ValueError for an unknown model family."""
         import services.inference.app.backends.factory as factory_mod
+        from unittest.mock import patch
         factory_mod._backends.clear()
 
-        with pytest.raises(ValueError):
-            factory_mod.get_backend("nonexistent_backend_xyz")
+        def _raise(name):
+            raise ValueError(f"Unknown backend '{name}'.")
+
+        with patch("services.inference.app.backends.factory.get_backend_entry", side_effect=_raise):
+            with pytest.raises(ValueError):
+                factory_mod.get_backend("nonexistent_backend_xyz")
 
     async def test_http_error_propagates(self):
         import httpx

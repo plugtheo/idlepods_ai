@@ -3,7 +3,6 @@ Adapter lifecycle endpoints — runtime load/unload/swap/rollback for LoRA adapt
 """
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, Dict
@@ -12,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from shared.contracts.models import load_registry
+from shared.manifest import read_manifest, write_manifest_locked, LegacyManifestError
 from ..backends.factory import get_backend
 
 router = APIRouter(prefix="/adapters", tags=["adapters"])
@@ -105,19 +105,22 @@ async def swap_adapter(req: AdapterSwapRequest) -> Dict[str, Any]:
 
 @router.post("/rollback")
 async def rollback_adapter(req: AdapterRollbackRequest) -> Dict[str, Any]:
-    """Roll back to previous_version using the path recorded in the manifest."""
+    """Roll back to previous_version using the path recorded in the v2 manifest."""
     p = Path(_MANIFEST_PATH)
     if not p.exists():
         raise HTTPException(status_code=404, detail="Manifest not found")
     try:
-        manifest = json.loads(p.read_text())
+        manifest = read_manifest(p)
+    except LegacyManifestError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not read manifest: {exc}")
 
     adapter_name: str | None = None
-    adapter_entry: dict | None = None
-    for name, entry in manifest.get("adapters", {}).items():
-        if entry.get("backend") == req.backend:
+    from shared.contracts.manifest_schema import AdapterEntry as _AE
+    adapter_entry: _AE | None = None
+    for name, entry in manifest.adapters.items():
+        if entry.backend == req.backend:
             adapter_name = name
             adapter_entry = entry
             break
@@ -127,7 +130,7 @@ async def rollback_adapter(req: AdapterRollbackRequest) -> Dict[str, Any]:
             status_code=404, detail=f"No adapter for backend '{req.backend}'"
         )
 
-    previous_path = adapter_entry.get("previous_path")
+    previous_path = adapter_entry.previous_path
     if not previous_path:
         raise HTTPException(
             status_code=400,
@@ -143,6 +146,25 @@ async def rollback_adapter(req: AdapterRollbackRequest) -> Dict[str, Any]:
             status_code=500,
             detail=f"Failed to load previous adapter {adapter_name} from {previous_path}",
         )
+
+    # Swap active/previous in the manifest under lock.
+    from datetime import datetime, timezone as _tz
+    def _rollback_mutator(m) -> None:
+        e = m.adapters.get(adapter_name)
+        if e is None:
+            return
+        m.adapters[adapter_name] = e.model_copy(update={
+            "active_version": e.previous_version,
+            "active_path": e.previous_path,
+            "previous_version": e.active_version,
+            "previous_path": e.active_path,
+            "updated_at": datetime.now(_tz.utc),
+        })
+
+    try:
+        write_manifest_locked(p, _rollback_mutator)
+    except Exception as exc:
+        logger.warning("rollback: manifest update failed (adapter is live): %s", exc)
 
     logger.info("rollback: %s → %s", adapter_name, previous_path)
     return {"status": "ok", "rolled_back": adapter_name, "previous_path": previous_path}

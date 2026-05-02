@@ -1,9 +1,12 @@
 """
 Post-training smoke gate.
 
-Loads a staged adapter under '{name}__staging', runs a canonical per-role
-prompt against the live vLLM /v1/completions endpoint, and validates the
-response for emptiness, BPE artifacts, contamination, and role-shape.
+Sends a canonical per-role chat-completion prompt to the vLLM server using
+the staged adapter. Validates the response for emptiness, BPE artifacts,
+contamination, and role-shape.
+
+Uses /v1/chat/completions (OpenAI format) to match the ChatML training format
+produced by _format_messages_as_prompt in trainer_entry.py.
 
 Returns a result dict: {"pass": bool, "reason": str, "response_len": int}
 """
@@ -29,8 +32,6 @@ _SMOKE_PROMPTS: Dict[str, str] = {
     "critic":     "Evaluate this response: The answer is 42.",
 }
 
-_STOP_TOKENS = ["[SYSTEM]", "[USER]", "[ASSISTANT]", "\n[RESPONSE]"]
-
 _CONTAMINATION_MARKERS = (
     "session_id", "pipeline_metadata", "agent_chain",
     "iteration_scores", "ORCHESTRATION_",
@@ -38,7 +39,7 @@ _CONTAMINATION_MARKERS = (
 
 
 def _has_bpe_artifacts(text: str) -> bool:
-    return any("Ā" <= ch <= "Ń" for ch in text)
+    return any("Ā" <= ch <= "Ł" for ch in text)
 
 
 def _is_clean_output(text: str) -> bool:
@@ -79,33 +80,32 @@ def run_smoke(
     """
     Synchronous smoke test (runs inside the training subprocess).
 
-    Sends the canonical prompt for *role* to the vLLM server using the staged
-    adapter *staging_name* via POST /v1/completions.
+    Sends the canonical chat-completion prompt for *role* to the vLLM server
+    using the staged adapter *staging_name* via POST /v1/chat/completions.
+    Uses ChatML messages format — same format the adapter was trained on.
     """
-    prompt_text = _SMOKE_PROMPTS.get(role, "Say hello.")
+    user_prompt = _SMOKE_PROMPTS.get(role, "Say hello.")
     sys_prompt  = AGENT_PROMPTS.get(role, "You are a helpful AI assistant.")
-    prompt = (
-        f"[SYSTEM]\n{sys_prompt}\n\n"
-        f"[USER]\n{prompt_text}\n\n"
-        f"[RESPONSE]\n"
-    )
+
     payload = {
-        "model":       staging_name,
-        "prompt":      prompt,
-        "max_tokens":  128,
+        "model": staging_name,
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": 128,
         "temperature": 0.0,
-        "stop":        _STOP_TOKENS,
     }
 
     try:
         resp = httpx.post(
-            f"{inference_url}/v1/completions",
+            f"{inference_url}/v1/chat/completions",
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=timeout,
         )
         resp.raise_for_status()
-        text = resp.json()["choices"][0]["text"]
+        text = resp.json()["choices"][0]["message"]["content"]
     except Exception as exc:
         return {"pass": False, "reason": f"request_error: {exc}", "response_len": 0}
 

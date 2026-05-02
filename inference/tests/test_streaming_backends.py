@@ -144,6 +144,8 @@ class TestBaseBackendStreamFallback:
                     tokens_generated=3,
                     session_id=None,
                 )
+            async def health(self): return {"status": "ok"}
+            async def list_adapters(self): return []
 
         backend = _ConcreteBackend()
         chunks = [t async for t in backend.generate_stream(_make_request())]
@@ -161,6 +163,8 @@ class TestBaseBackendStreamFallback:
                     tokens_generated=3,
                     session_id=None,
                 )
+            async def health(self): return {"status": "ok"}
+            async def list_adapters(self): return []
 
         backend = _ConcreteBackend()
         chunks = [t async for t in backend.generate_stream(_make_request())]

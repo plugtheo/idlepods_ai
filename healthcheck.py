@@ -37,7 +37,7 @@ def c1():
             rel = str(f.relative_to(root))
             if any(rel == a.replace('\\', '/') or rel == a for a in ALLOWLIST):
                 continue
-            for n, l in enumerate(f.read_text(errors='replace').splitlines(), 1):
+            for n, l in enumerate(f.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
                 if BANNED.search(l):
                     hits.append(f' {rel}:{n}: {l.strip()}')
     if hits:
@@ -55,7 +55,7 @@ def c2():
         if not p.exists():
             continue
         for f in p.rglob('*.py'):
-            for n, l in enumerate(f.read_text(errors='replace').splitlines(), 1):
+            for n, l in enumerate(f.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
                 if 'model_family' in l:
                     hits.append(f' {f.relative_to(root)}:{n}: {l.strip()}')
     if hits:
@@ -75,15 +75,19 @@ def c3():
 check(3, 'CAPABILITY_TO_FAMILY deleted from factory.py', c3)
 
 
-# 4. role_model_family fully gone
+# 4. role_model_family fully gone (scan service dirs only, skip this script)
 def c4():
     hits = []
-    for f in root.rglob('*.py'):
-        if '.claude' in str(f):
+    for d in ['inference/app', 'orchestration/app', 'training/app', 'training/training', 'shared', 'scripts']:
+        p = root / d
+        if not p.exists():
             continue
-        txt = f.read_text(errors='replace')
-        if 'role_model_family' in txt:
-            hits.append(str(f.relative_to(root)))
+        for f in p.rglob('*.py'):
+            if '.claude' in str(f):
+                continue
+            txt = f.read_text(encoding='utf-8', errors='replace')
+            if 'role_model_family' in txt:
+                hits.append(str(f.relative_to(root)))
     if hits:
         raise AssertionError('still present in: ' + ', '.join(hits))
 
@@ -157,9 +161,9 @@ check(8, 'Legacy alias shim resolves qwen->primary', c8)
 # 9. inference settings: new fields present, old gone
 def c9():
     import importlib
-    import services.inference.app.config.settings as m
+    import inference.app.config.settings as m
     importlib.reload(m)
-    s = m.InferenceSettings()
+    s = m.settings
     assert hasattr(s, 'models_yaml_path')
     assert hasattr(s, 'accept_legacy_backend_names')
     for old in ['qwen_url', 'qwen_model_id', 'qwen_auth_token', 'qwen_ssl_verify']:
@@ -171,7 +175,7 @@ check(9, 'inference/app/config/settings clean', c9)
 
 # 10. orchestration settings: role_backend present
 def c10():
-    from services.orchestration.app.config.settings import settings
+    from orchestration.app.config.settings import settings
     assert hasattr(settings, 'role_backend'), 'missing role_backend'
     assert not hasattr(settings, 'role_model_family'), 'role_model_family still present'
 
@@ -181,7 +185,7 @@ check(10, 'orchestration/app/config/settings clean', c10)
 
 # 11. training settings: models_yaml_path present, qwen_model gone
 def c11():
-    from services.training.app.config.settings import settings
+    from training.app.config.settings import settings
     assert hasattr(settings, 'models_yaml_path')
     assert not hasattr(settings, 'qwen_model')
 
@@ -201,7 +205,7 @@ check(12, 'factory.py uses load_registry', c12)
 
 # 13. local_vllm.py: new constructor, no tokenizer hacks
 def c13():
-    src = (root / 'inference/app/backends/local_vllm.py').read_text()
+    src = (root / 'inference/app/backends/local_vllm.py').read_text(encoding='utf-8')
     assert 'backend_name' in src
     assert '_is_deepseek' not in src
     assert 'Metaspace' not in src
@@ -212,9 +216,12 @@ check(13, 'local_vllm.py constructor + no hacks', c13)
 
 # 14. proto field renamed, tag 1 kept
 def c14():
-    src = open('shared/proto/inference.proto').read()
-    assert 'string backend = 1' in src, 'field not renamed'
-    assert 'model_family' not in src, 'model_family still present'
+    src = open('shared/proto/inference.proto', encoding='utf-8').read()
+    # Proto uses alignment spacing: "string              backend       = 1;"
+    assert re.search(r'string\s+backend\s*=\s*1', src), 'field not renamed'
+    # model_family must not appear as a field definition (comments are OK)
+    non_comment_lines = [l for l in src.splitlines() if not l.strip().startswith('//')]
+    assert not any('model_family' in l for l in non_comment_lines), 'model_family field still present'
 
 
 check(14, 'inference.proto field renamed to backend', c14)
@@ -260,7 +267,7 @@ def c18():
         'training/training/lora_trainer.py',
         'training/training/validate_adapter.py'
     ]:
-        src = (root / f).read_text()
+        src = (root / f).read_text(encoding='utf-8')
         for banned in ['_is_deepseek', 'Metaspace', 'ByteLevel', 'tokenizer.json']:
             assert banned not in src, f'{banned} found in {f}'
 
@@ -289,7 +296,7 @@ def c20():
         p = root / s
         if not p.exists():
             continue
-        src = p.read_text()
+        src = p.read_text(encoding='utf-8')
         if 'ROLE_MODEL_FAMILY' in src:
             hits.append(f'{s}: ROLE_MODEL_FAMILY')
     if hits:

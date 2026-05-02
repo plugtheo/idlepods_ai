@@ -351,7 +351,7 @@ class TestServeAndShutdown:
         try:
             import logging
             with caplog.at_level(logging.WARNING, logger="services.inference.app.grpc.server"):
-                await srv.serve(port=50099)
+                await srv.serve()
             assert any("not started" in r.message for r in caplog.records)
         finally:
             srv._GRPC_AVAILABLE = original
@@ -362,9 +362,9 @@ class TestServeAndShutdown:
         mock_server = AsyncMock()
         srv._server = mock_server
 
-        await srv.shutdown(grace=0.0)
+        await srv.shutdown()
 
-        mock_server.stop.assert_awaited_once_with(0.0)
+        mock_server.stop.assert_awaited_once()
         assert srv._server is None
 
     async def test_shutdown_is_noop_when_no_server(self):
@@ -372,4 +372,4 @@ class TestServeAndShutdown:
         import services.inference.app.grpc.server as srv
         srv._server = None
         # Should not raise
-        await srv.shutdown(grace=1.0)
+        await srv.shutdown()

@@ -13,7 +13,8 @@ Pipeline:
 """
 
 import asyncio
-import contextlib
+import hashlib
+import importlib.metadata
 import json
 import os
 import shutil
@@ -22,6 +23,9 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 import random
 import re
+
+from shared.manifest import write_manifest_locked, LegacyManifestError  # noqa: F401
+from shared.contracts.manifest_schema import AdapterEntry, HistoryEntry, Manifest
 
 from shared.contracts.agent_prompts import AGENT_PROMPTS as _AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE as _CAP_TO_ROLE
 
@@ -53,27 +57,15 @@ _ADAPTER_TARGET_MODULES = [
 ]
 
 
-@contextlib.contextmanager
-def _manifest_file_lock(manifest_path: Path):
-    """Advisory exclusive lock around manifest RMW (POSIX only; no-op on Windows)."""
-    lock_path = manifest_path.with_suffix(".lock")
-    lock_fh = None
-    try:
-        lock_fh = open(lock_path, "w")
+
+def _compute_trainer_version() -> str:
+    parts = []
+    for pkg in ("trl", "unsloth"):
         try:
-            import fcntl
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
-        except ImportError:
+            parts.append(f"{pkg}=={importlib.metadata.version(pkg)}")
+        except importlib.metadata.PackageNotFoundError:
             pass
-        yield
-    finally:
-        if lock_fh is not None:
-            try:
-                import fcntl
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-            except ImportError:
-                pass
-            lock_fh.close()
+    return "|".join(parts) or "unknown"
 
 
 def _pre_train_backup(save_path: Path, capability: str) -> tuple:
@@ -125,6 +117,9 @@ def _post_train_stage(
     lora_alpha: int,
     final_loss: float,
     note: str = "bootstrap",
+    dataset_hash: str = "unknown",
+    tokenizer_hash: str = "unknown",
+    trainer_version: str = "",
 ) -> Dict[str, Any]:
     """
     Validate adapter weights and write metadata.json with status='staging'.
@@ -165,34 +160,41 @@ def _post_train_stage(
     now_iso    = datetime.now(timezone.utc).isoformat()
     created_at = old_created_at or now_iso
 
+    _tv = trainer_version or _compute_trainer_version()
     new_history_entry: Dict[str, Any] = {
-        "version":       new_version,
-        "status":        "staging",
-        "created_at":    now_iso,
-        "n_samples":     n_samples,
-        "epochs":        num_epochs,
-        "learning_rate": learning_rate,
-        "lora_r":        lora_r,
-        "lora_alpha":    lora_alpha,
-        "final_loss":    round(final_loss, 6),
-        "size_mb":       size_mb,
-        "note":          note,
+        "version":         new_version,
+        "status":          "staging",
+        "created_at":      now_iso,
+        "n_samples":       n_samples,
+        "epochs":          num_epochs,
+        "learning_rate":   learning_rate,
+        "lora_r":          lora_r,
+        "lora_alpha":      lora_alpha,
+        "final_loss":      round(final_loss, 6),
+        "size_mb":         size_mb,
+        "note":            note,
+        "dataset_hash":    dataset_hash,
+        "tokenizer_hash":  tokenizer_hash,
+        "trainer_version": _tv,
     }
 
     new_meta: Dict[str, Any] = {
-        "name":           f"{capability}_lora",
-        "version":        new_version,
-        "capability":     capability,
-        "backend":        _resolve_registry_default(),
-        "base_model":     base_model_id,
-        "status":         "staging",
-        "created_at":     created_at,
-        "updated_at":     now_iso,
-        "lora_r":         lora_r,
-        "lora_alpha":     lora_alpha,
-        "target_modules": _ADAPTER_TARGET_MODULES,
-        "size_mb":        size_mb,
-        "history":        old_history + [new_history_entry],
+        "name":            f"{capability}_lora",
+        "version":         new_version,
+        "capability":      capability,
+        "backend":         _resolve_registry_default(),
+        "base_model":      base_model_id,
+        "status":          "staging",
+        "created_at":      created_at,
+        "updated_at":      now_iso,
+        "lora_r":          lora_r,
+        "lora_alpha":      lora_alpha,
+        "target_modules":  _ADAPTER_TARGET_MODULES,
+        "size_mb":         size_mb,
+        "dataset_hash":    dataset_hash,
+        "tokenizer_hash":  tokenizer_hash,
+        "trainer_version": _tv,
+        "history":         old_history + [new_history_entry],
     }
     meta_path.write_text(json.dumps(new_meta, indent=2))
 
@@ -212,14 +214,13 @@ def _promote_to_active(
     eval_results: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
-    Under manifest file-lock: flip active/previous pointers and record smoke+eval.
+    Under manifest file-lock: flip active/previous pointers and write v2 HistoryEntry.
     Also updates metadata.json status from 'staging' to 'active'.
     """
     adapter_name = f"{capability}_lora"
     new_version  = new_meta["version"]
     now_iso      = datetime.now(timezone.utc).isoformat()
 
-    # Flip metadata.json status → active
     meta_path = checkpoint_dir / adapter_name / "metadata.json"
     if meta_path.exists():
         try:
@@ -238,62 +239,76 @@ def _promote_to_active(
         except (json.JSONDecodeError, OSError):
             pass
 
+    last_history = (new_meta.get("history") or [{}])[-1]
+    trained_at_dt = datetime.fromisoformat(
+        new_meta.get("updated_at", now_iso).replace("Z", "+00:00")
+    )
+    new_history_entry = HistoryEntry(
+        version=new_version,
+        status="active",
+        trained_at=trained_at_dt,
+        backend=new_meta.get("backend", _resolve_registry_default()),
+        base_model=new_meta.get("base_model", "unknown"),
+        peft_type="lora",
+        target_modules=new_meta.get("target_modules", _ADAPTER_TARGET_MODULES),
+        r=new_meta.get("lora_r", 8),
+        alpha=new_meta.get("lora_alpha", 16),
+        dropout=0.0,
+        recipe={
+            "peft_type": "lora",
+            "r": new_meta.get("lora_r", 8),
+            "alpha": new_meta.get("lora_alpha", 16),
+            "target_modules": new_meta.get("target_modules", _ADAPTER_TARGET_MODULES),
+            "sft_format": "chatml",
+        },
+        dataset_hash=new_meta.get("dataset_hash", "unknown"),
+        tokenizer_hash=new_meta.get("tokenizer_hash", "unknown"),
+        trainer_version=new_meta.get("trainer_version", _compute_trainer_version()),
+        n_samples=last_history.get("n_samples", 0),
+        final_loss=last_history.get("final_loss", 0.0),
+        size_mb=last_history.get("size_mb", 0.0),
+        eval_metrics={k: float(v) for k, v in (eval_results or {}).items() if isinstance(v, (int, float))},
+        smoke=smoke_results or {},
+    )
+
     manifest_path = checkpoint_dir / "manifest.json"
-    with _manifest_file_lock(manifest_path):
-        manifest: Dict[str, Any] = {}
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(manifest_path.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
+    _captured: Dict[str, str] = {}
 
-        existing = manifest.setdefault("adapters", {}).get(adapter_name, {})
-        old_active_version = existing.get("active_version", "")
-        old_active_path    = existing.get("active_path", str(checkpoint_dir / adapter_name))
+    def _mutator(m: Manifest) -> None:
+        existing = m.adapters.get(adapter_name)
+        old_active_version = existing.active_version if existing else ""
+        old_active_path    = existing.active_path if existing else str(checkpoint_dir / adapter_name)
+        _captured["old_active_version"] = old_active_version
 
-        # Mark previous active entries in history as retired
-        history = existing.get("history", [])
-        for entry in history:
-            if entry.get("status") == "active":
-                entry["status"] = "retired"
+        if existing:
+            updated_history = []
+            for h in existing.history:
+                if h.status == "active":
+                    updated_history.append(h.model_copy(update={"status": "retired"}))
+                else:
+                    updated_history.append(h)
+            updated_history.append(new_history_entry)
+        else:
+            updated_history = [new_history_entry]
 
-        # Add new history entry with smoke/eval results
-        new_history_entry: Dict[str, Any] = {
-            "version":    new_version,
-            "status":     "active",
-            "trained_at": new_meta.get("updated_at", now_iso),
-        }
-        if new_meta.get("history"):
-            last = new_meta["history"][-1]
-            new_history_entry["n_samples"]  = last.get("n_samples", 0)
-            new_history_entry["final_loss"] = last.get("final_loss", 0.0)
-            new_history_entry["size_mb"]    = last.get("size_mb", 0.0)
-        if smoke_results:
-            new_history_entry["smoke"] = smoke_results
-        if eval_results:
-            new_history_entry["eval"] = eval_results
-        history.append(new_history_entry)
-
-        previous_path = (
+        prev_path = (
             str(previous_backup_path)
             if previous_backup_path and Path(previous_backup_path).exists()
             else old_active_path
         )
+        m.adapters[adapter_name] = AdapterEntry(
+            schema_version=2,
+            active_version=new_version,
+            active_path=str(checkpoint_dir / adapter_name),
+            previous_version=old_active_version,
+            previous_path=prev_path,
+            backend=new_meta.get("backend", _resolve_registry_default()),
+            updated_at=datetime.now(timezone.utc),
+            history=updated_history,
+        )
 
-        manifest["adapters"][adapter_name] = {
-            "capability":       capability,
-            "backend":          new_meta.get("backend", _resolve_registry_default()),
-            "active_version":   new_version,
-            "active_path":      str(checkpoint_dir / adapter_name),
-            "previous_version": old_active_version,
-            "previous_path":    previous_path,
-            "updated_at":       now_iso,
-            "history":          history,
-        }
-        manifest["updated_at"] = now_iso
-        manifest_path.write_text(json.dumps(manifest, indent=2))
-
-    print(f"  [VERSION] {adapter_name}  {old_active_version} → {new_version}  status=active")
+    write_manifest_locked(manifest_path, _mutator)
+    print(f"  [VERSION] {adapter_name}  {_captured.get('old_active_version','')} → {new_version}  status=active")
 
 
 def _mark_failed(
@@ -323,23 +338,24 @@ def _mark_failed(
             pass
 
     manifest_path = checkpoint_dir / "manifest.json"
-    with _manifest_file_lock(manifest_path):
-        manifest: Dict[str, Any] = {}
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(manifest_path.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
-        adapter_entry = manifest.setdefault("adapters", {}).get(adapter_name)
-        if adapter_entry:
-            for entry in adapter_entry.get("history", []):
-                if entry.get("version") == version:
-                    entry["status"] = "failed"
-                    if smoke_results:
-                        entry["smoke"] = smoke_results
-                    break
-            manifest["updated_at"] = now_iso
-            manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    def _mutator(m: Manifest) -> None:
+        entry = m.adapters.get(adapter_name)
+        if entry is None:
+            return
+        updated = []
+        for h in entry.history:
+            if h.version == version and h.status == "staging":
+                updated.append(h.model_copy(update={
+                    "status": "failed",
+                    "smoke": smoke_results or {},
+                }))
+            else:
+                updated.append(h)
+        m.adapters[adapter_name] = entry.model_copy(update={"history": updated})
+
+    if manifest_path.exists():
+        write_manifest_locked(manifest_path, _mutator)
 
     print(f"  [FAILED] {adapter_name}  v{version}  smoke_pass=False")
 

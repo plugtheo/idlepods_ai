@@ -31,13 +31,18 @@ def inference_client():
 class TestGenerateRoute:
     @pytest.fixture(autouse=True)
     def mock_backend(self):
+        from shared.contracts.models import BackendEntry, ModelsRegistry
+
+        entry = BackendEntry(served_url="http://vllm-primary:8000", model_id="Qwen/Qwen3-14B", backend_type="local_vllm")
+        registry = ModelsRegistry(default_backend="primary", backends={"primary": entry})
+
         mock_be = MagicMock()
         mock_be.generate = AsyncMock(return_value=_make_response())
+        mock_be.health = AsyncMock(return_value={"backend": "local_vllm", "url": "http://vllm-primary:8000", "status": "ok"})
+        mock_be.list_adapters = AsyncMock(return_value=[])
 
-        with patch(
-            "services.inference.app.routes.generate.get_backend",
-            return_value=mock_be,
-        ):
+        with patch("services.inference.app.routes.generate.load_registry", return_value=registry), \
+             patch("services.inference.app.routes.generate.get_backend", return_value=mock_be):
             yield mock_be
 
     def test_health(self, inference_client):
@@ -66,18 +71,18 @@ class TestGenerateRoute:
         )
         assert resp.status_code == 422
 
-    def test_generate_bad_family_returns_400(self, inference_client, mock_backend):
-        mock_backend.generate = AsyncMock(side_effect=ValueError("Unknown model_family 'llama'"))
+    def test_generate_bad_backend_returns_400(self, inference_client, mock_backend):
+        mock_backend.generate = AsyncMock(side_effect=ValueError("Unknown backend 'llama'"))
         resp = inference_client.post(
             "/v1/generate",
             json={
-                "model_family": "llama",
+                "backend": "llama",
                 "role": "coder",
                 "messages": [{"role": "user", "content": "x"}],
             },
         )
         assert resp.status_code == 400
-        assert "Unknown model_family" in resp.json()["detail"]
+        assert "Unknown backend" in resp.json()["detail"]
 
     def test_generate_backend_error_returns_502(self, inference_client, mock_backend):
         mock_backend.generate = AsyncMock(side_effect=Exception("vLLM crashed"))

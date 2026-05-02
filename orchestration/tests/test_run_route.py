@@ -40,6 +40,7 @@ def orchestration_client():
 class TestRunRoute:
     @pytest.fixture(autouse=True)
     def mock_all_clients(self):
+        import services.orchestration.app.routes.run  # ensure module is imported before patching
         with (
             patch(
                 "services.orchestration.app.routes.run.builder.build",
@@ -52,10 +53,6 @@ class TestRunRoute:
             patch(
                 "services.orchestration.app.routes.run.recorder.record",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "services.orchestration.app.routes.run.jsonl_store.count",
-                return_value=0,
             ),
             patch(
                 "services.orchestration.app.routes.run.session_store.get_session",
