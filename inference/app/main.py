@@ -66,9 +66,8 @@ async def lifespan(app: FastAPI):
     _grpc_task.add_done_callback(_on_grpc_task_done)
 
     _log.info(
-        "Inference Service started on HTTP port %d (mode=%s), gRPC port %d",
+        "Inference Service started on HTTP port %d, gRPC port %d",
         settings.port,
-        settings.mode,
         settings.grpc_port,
     )
 

@@ -43,6 +43,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from shared.contracts.agent_prompts import AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE
+from shared.contracts.training import lookup_recipe
 
 # ---------------------------------------------------------------------------
 # Agent capability → (base model id, system description)
@@ -107,14 +108,20 @@ AGENT_SPECS: Dict[str, Tuple[str, str]] = {
     for cap in BOOTSTRAP_CAP_TO_ROLE
 }
 
-# Training hyper-parameters — passed through to LoRATrainer.
-# LEARNING_RATE and batch size are set inside LoRATrainer (SFTTrainer defaults).
+# Training hyper-parameters — defaults only; per-capability values come from recipes.yaml.
 NUM_EPOCHS    = 3
 LEARNING_RATE = 2e-4
 
-# LoRA configuration — r=16 for bigger datasets (was r=8 for the fast online path)
-LORA_R     = 16
-LORA_ALPHA = 32
+
+def _resolve_recipe(capability: str):
+    """Resolve the AdapterRecipe for a bootstrap capability label."""
+    try:
+        from shared.contracts.models import load_registry
+        backend = load_registry().default_backend
+    except Exception:
+        backend = "primary"
+    role = BOOTSTRAP_CAP_TO_ROLE.get(capability, capability)
+    return lookup_recipe(backend, role)
 
 
 # ---------------------------------------------------------------------------
@@ -257,22 +264,24 @@ async def train_capability(
     if backup_path:
         print(f"  [BACKUP] v{old_version} → {backup_path.name}")
 
+    # ── Resolve recipe ───────────────────────────────────────────────────────
+    recipe = _resolve_recipe(capability)
+
     # ── Train via LoRATrainer ────────────────────────────────────────────────
     try:
         trainer = LoRATrainer(base_model=model_id, output_dir=str(save_path))
         result  = await trainer.train(
             dataset_path=dataset_path,
-            num_epochs=NUM_EPOCHS,
-            learning_rate=LEARNING_RATE,
-            lora_rank=LORA_R,
-            lora_alpha=LORA_ALPHA,
+            num_epochs=recipe.num_epochs,
+            learning_rate=recipe.learning_rate,
+            lora_rank=recipe.r,
+            lora_alpha=recipe.alpha,
+            recipe=recipe,
         )
     finally:
         dataset_path.unlink(missing_ok=True)
 
     # ── Post-training: version bump, weight validation, manifest update ───────
-    # _post_train_version raises RuntimeError if no weight file was written,
-    # so a silent save failure surfaces as a loud exception here.
     final_loss  = result.get("final_loss", 0.0)
     note        = "incremental" if has_existing else "fresh"
     new_version = _post_train_version(
@@ -282,10 +291,10 @@ async def train_capability(
         old_version=old_version,
         base_model_id=model_id,
         n_samples=len(pairs),
-        num_epochs=NUM_EPOCHS,
-        learning_rate=LEARNING_RATE,
-        lora_r=LORA_R,
-        lora_alpha=LORA_ALPHA,
+        num_epochs=recipe.num_epochs,
+        learning_rate=recipe.learning_rate,
+        lora_r=recipe.r,
+        lora_alpha=recipe.alpha,
         final_loss=final_loss,
         note=note,
     )
@@ -415,7 +424,9 @@ async def main():
     print("\n" + "="*70)
     print("  AGENT-SPECIFIC LORA TRAINING  (via LoRATrainer)")
     print(f"  Capabilities : {capabilities}")
-    print(f"  LoRA rank    : {LORA_R}  alpha={LORA_ALPHA}  epochs={NUM_EPOCHS}")
+    from shared.contracts.training import load_recipes as _load_recipes
+    _dr = _load_recipes().default
+    print(f"  LoRA rank    : {_dr.r}  alpha={_dr.alpha}  epochs={_dr.num_epochs}  (default recipe; per-capability may differ)")
     print("="*70)
 
     setup_hf_auth()

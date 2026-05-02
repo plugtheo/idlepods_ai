@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared.contracts.models import load_registry
+from shared.contracts.training import lookup_recipe
 
 
 def _default_backend() -> str:
@@ -61,11 +62,25 @@ for d in sorted(base.iterdir()):
 
     info = KNOWN_ADAPTERS.get(name, {"capability": name, "status": "unknown"})
 
+    backend = _default_backend()
+    # Resolve recipe for this adapter's role (skip stale entries that pre-date recipe field).
+    _cap = info["capability"]
+    _role_map = {
+        "coding": "coder", "debugging": "debugger", "review": "reviewer",
+        "planning": "planner", "research": "researcher", "criticism": "critic",
+    }
+    _role = _role_map.get(_cap, _cap)
+    try:
+        _recipe = lookup_recipe(backend, _role)
+        _recipe_dict = _recipe.model_dump()
+    except Exception:
+        _recipe_dict = {}
+
     meta = {
         "name":        name,
         "version":     "1.0.0",
-        "capability":  info["capability"],
-        "backend":     _default_backend(),
+        "capability":  _cap,
+        "backend":     backend,
         "base_model":  cfg.get("base_model_name_or_path", "unknown"),
         "status":      info["status"],
         "note":        NOTES.get(name, ""),
@@ -78,6 +93,7 @@ for d in sorted(base.iterdir()):
                 "version":    "1.0.0",
                 "created_at": "2026-03-27T00:00:00+00:00",
                 "note":       "Initial training run (r=8, warmup config). " + NOTES.get(name, ""),
+                "recipe":     _recipe_dict,
             }
         ],
     }

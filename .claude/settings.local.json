@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Invoke-RestMethod -Method Post -Uri http://localhost:8080/v1/chat -ContentType \"application/json\" -Body '{\"prompt\": \"Write a Python function that reads a file and counts lines.\", \"session_id\": \"e2e-planb-02\"}' | ConvertTo-Json -Depth 5)",
+      "PowerShell(docker exec docker-orchestration-1 *)"
+    ]
+  }
+}

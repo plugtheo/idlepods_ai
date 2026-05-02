@@ -1,0 +1,20 @@
+default:
+  peft_type: lora
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  learning_rate: 2e-4
+  num_epochs: 3
+  max_seq_length: 2048
+  sft_format: openai_messages
+  tool_call_style: openai_native
+
+by_role:
+  coder:    {r: 32, alpha: 64, num_epochs: 4}
+  debugger: {r: 32, alpha: 64, num_epochs: 4}
+  consensus: {peft_type: none}
+
+# Reserved seam: future per-backend overrides go here.
+# by_backend_role:
+#   "secondary:coder": {peft_type: rslora, use_rslora: true}

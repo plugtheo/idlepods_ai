@@ -29,7 +29,7 @@ class InferenceSettings(BaseSettings):
 
     # ── HTTP client settings ──────────────────────────────────────────────
     request_timeout_seconds: float = Field(
-        default=120.0,
+        default=300.0,
         description="HTTP timeout for calls to vLLM servers.",
     )
     http_max_connections: int = Field(

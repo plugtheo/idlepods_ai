@@ -22,8 +22,6 @@ logger = logging.getLogger(__name__)
 # Keys are old model-name strings; values are registry backend names.
 _LEGACY_BACKEND_ALIASES: Dict[str, str] = {
     "qwen":     "primary",
-    "deepseek": "primary",
-    "mistral":  "primary",
 }
 _legacy_warned: set[str] = set()
 

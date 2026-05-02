@@ -26,6 +26,8 @@ class BackendEntry(BaseModel):
     backend_type: Literal["local_vllm", "remote_vllm"] = "local_vllm"
     auth_token: str = ""
     ssl_verify: bool = True
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
     # Reserved for future per-backend pre-tokenizer override — not implemented now.
     tokenizer_pre_tokenizer: Optional[Literal["bytelevel", "metaspace"]] = None
 
@@ -42,9 +44,25 @@ class ModelsRegistry(BaseModel):
             )
 
 
+def _find_models_yaml() -> str:
+    from pathlib import Path
+    candidates = [
+        os.environ.get("MODELS_YAML_PATH", ""),
+        "/config/models.yaml",
+        str(Path(__file__).resolve().parents[2] / "models.yaml"),
+    ]
+    for p in candidates:
+        if p and Path(p).exists():
+            return p
+    raise RuntimeError(
+        f"models.yaml not found. Searched: {[c for c in candidates if c]}. "
+        "Set MODELS_YAML_PATH or place models.yaml at the repo root."
+    )
+
+
 @lru_cache(maxsize=1)
 def load_registry(path: str = "") -> ModelsRegistry:
-    resolved = path or os.environ.get("MODELS_YAML_PATH", "/config/models.yaml")
+    resolved = path if path else _find_models_yaml()
     try:
         with open(resolved) as fh:
             data = yaml.safe_load(fh)

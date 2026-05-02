@@ -339,25 +339,27 @@ class LocalVLLMBackend(InferenceBackend):
                 max_keepalive_connections=settings.http_max_keepalive_connections,
             ),
         )
-        self._registry = _AdapterRegistry(base_url, model_id)
+        self._registry = _AdapterRegistry(self._base_url, self._model_id)
 
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
         effective_model = await _resolve_model(
             self._model_id, request.adapter_name, self._registry, request.role
         )
 
-        messages = [m.model_dump() for m in request.messages]
+        messages = [m.model_dump(exclude_none=True) for m in request.messages]
         using_adapter = effective_model != self._model_id
 
-        logger.debug(
-            "LocalVLLM → %s  model=%s  role=%s  msgs=%d  adapter=%s",
-            self._base_url, effective_model, request.role, len(messages), using_adapter,
+        logger.info(
+            "LocalVLLM → sending  role=%s  model=%s  msgs=%d  max_tokens=%d",
+            request.role, effective_model, len(messages), request.max_tokens,
         )
 
         # Adapter calls: build the canonical prompt string via string concatenation
         # and call /v1/completions.  This guarantees the prompt is byte-for-byte
         # identical to the training format ([SYSTEM]\n…\n\n[USER]\n…\n\n[RESPONSE]\n).
         # Base-model calls keep /v1/chat/completions with the model's native template.
+        finish_reason: str = "stop"
+        raw_tool_calls = None
         try:
             if using_adapter:
                 payload = {
@@ -375,6 +377,7 @@ class LocalVLLMBackend(InferenceBackend):
                 )
                 resp.raise_for_status()
                 data = resp.json()
+                finish_reason = data["choices"][0].get("finish_reason", "stop")
                 content = _fix_bpe_artifacts(data["choices"][0]["text"])
             else:
                 payload = {
@@ -383,7 +386,11 @@ class LocalVLLMBackend(InferenceBackend):
                     "max_tokens":  request.max_tokens,
                     "temperature": request.temperature,
                     "top_p":       request.top_p,
+                    "chat_template_kwargs": {"enable_thinking": request.thinking_enabled},
                 }
+                if request.tools:
+                    payload["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
+                    payload["tool_choice"] = "auto"
                 resp = await self._client.post(
                     f"{self._base_url}/v1/chat/completions",
                     json=payload,
@@ -391,15 +398,19 @@ class LocalVLLMBackend(InferenceBackend):
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                content = _fix_bpe_artifacts(data["choices"][0]["message"]["content"])
+                msg = data["choices"][0]["message"]
+                finish_reason = data["choices"][0].get("finish_reason", "stop")
+                raw_tool_calls = msg.get("tool_calls") or None
+                content = _fix_bpe_artifacts(msg.get("content") or "")
         except Exception as exc:
             raise InferenceError(str(exc)) from exc
 
         tokens_out = data.get("usage", {}).get("completion_tokens", 0)
 
         logger.info(
-            "LocalVLLM ← role=%s  backend=%s  model=%s  tokens=%d",
+            "LocalVLLM ← role=%s  backend=%s  model=%s  tokens=%d  finish_reason=%s  tool_calls=%s",
             request.role, self._backend_name, effective_model, tokens_out,
+            finish_reason, bool(raw_tool_calls),
         )
 
         return GenerateResponse(
@@ -408,6 +419,7 @@ class LocalVLLMBackend(InferenceBackend):
             role=request.role,
             tokens_generated=tokens_out,
             session_id=request.session_id,
+            tool_calls=raw_tool_calls,
         )
 
     async def generate_stream(
@@ -425,7 +437,7 @@ class LocalVLLMBackend(InferenceBackend):
             self._model_id, request.adapter_name, self._registry, request.role
         )
 
-        messages = [m.model_dump() for m in request.messages]
+        messages = [m.model_dump(exclude_none=True) for m in request.messages]
         using_adapter = effective_model != self._model_id
 
         # Adapter calls use /v1/completions with the canonical prompt string so
@@ -452,6 +464,7 @@ class LocalVLLMBackend(InferenceBackend):
                 "temperature": request.temperature,
                 "top_p":       request.top_p,
                 "stream":      True,
+                "chat_template_kwargs": {"enable_thinking": request.thinking_enabled},
             }
             stream_endpoint = f"{self._base_url}/v1/chat/completions"
 

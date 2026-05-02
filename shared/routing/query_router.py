@@ -55,7 +55,7 @@ class RouteDecision:
 
 _INTENT_PATTERNS = [
     (Intent.DEBUGGING, re.compile(r"\b(debug|fix|bug|error|traceback|exception|stacktrace|broken)\b", re.I)),
-    (Intent.CODING,    re.compile(r"\b(implement|code|write|create|build|function|class|script|program)\b", re.I)),
+    (Intent.CODING,    re.compile(r"\b(implement|code|write|create|build|function|class|script|program|tool|invoke)\b", re.I)),
     (Intent.RESEARCH,  re.compile(r"\b(research|investigate|survey|find|what is|explain|describe|overview)\b", re.I)),
     (Intent.ANALYSIS,  re.compile(r"\b(analyse|analyze|review|evaluate|assess|compare|critique)\b", re.I)),
     (Intent.PLANNING,  re.compile(r"\b(plan|design|architect|roadmap|structure|outline|breakdown)\b", re.I)),

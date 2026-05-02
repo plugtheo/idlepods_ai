@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import httpx
 
 from shared.contracts.agent_prompts import AGENT_PROMPTS
+from shared.contracts.training import AdapterRecipe
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +71,28 @@ def _shape_ok(role: str, text: str) -> bool:
     return len(t) > 0
 
 
+def _tool_call_shape_ok(response_json: dict) -> bool:
+    """Return True if the response contains a structurally-valid tool_calls array."""
+    choices = response_json.get("choices", [])
+    if not choices:
+        return False
+    msg = choices[0].get("message", {})
+    tool_calls = msg.get("tool_calls")
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return False
+    first = tool_calls[0]
+    return (
+        isinstance(first.get("id"), str)
+        and isinstance(first.get("function", {}).get("name"), str)
+    )
+
+
 def run_smoke(
     inference_url: str,
     role: str,
     staging_name: str,
     timeout: float = 30.0,
+    recipe: Optional[AdapterRecipe] = None,
 ) -> Dict[str, Any]:
     """
     Synchronous smoke test (runs inside the training subprocess).
@@ -82,8 +100,53 @@ def run_smoke(
     Sends the canonical prompt for *role* to the vLLM server using the staged
     adapter *staging_name* via POST /v1/completions.
     """
+    is_tool_role = recipe is not None and recipe.tool_call_style != "none" and role in ("coder", "debugger")
+
     prompt_text = _SMOKE_PROMPTS.get(role, "Say hello.")
     sys_prompt  = AGENT_PROMPTS.get(role, "You are a helpful AI assistant.")
+
+    if is_tool_role:
+        # Chat-completions endpoint with tools= so vLLM renders the tool-call schema.
+        _read_file_tool = {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read the contents of a file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+        chat_payload = {
+            "model": staging_name,
+            "messages": [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": "Read the file /tmp/main.py and summarise it."},
+            ],
+            "tools": [_read_file_tool],
+            "tool_choice": "auto",
+            "max_tokens": 128,
+            "temperature": 0.0,
+        }
+        try:
+            resp = httpx.post(
+                f"{inference_url}/v1/chat/completions",
+                json=chat_payload,
+                headers={"Content-Type": "application/json"},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            resp_json = resp.json()
+        except Exception as exc:
+            return {"pass": False, "reason": f"request_error: {exc}", "response_len": 0}
+
+        if not _tool_call_shape_ok(resp_json):
+            raw = json.dumps(resp_json.get("choices", [{}])[0])
+            return {"pass": False, "reason": f"tool_call_shape_fail: {raw[:200]}", "response_len": 0}
+        return {"pass": True, "reason": "tool_call_ok", "response_len": len(json.dumps(resp_json))}
+
     prompt = (
         f"[SYSTEM]\n{sys_prompt}\n\n"
         f"[USER]\n{prompt_text}\n\n"

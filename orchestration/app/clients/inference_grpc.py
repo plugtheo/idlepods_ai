@@ -27,6 +27,7 @@ Payload optimizations applied
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import AsyncGenerator
 
@@ -55,6 +56,7 @@ _ROLE_TO_ENUM: dict[str, int] = {
     "system":    0,   # ROLE_SYSTEM
     "user":      1,   # ROLE_USER
     "assistant": 2,   # ROLE_ASSISTANT
+    "tool":      3,   # ROLE_TOOL
 }
 
 # Server-side defaults for optional sampling fields.
@@ -95,16 +97,20 @@ class GrpcInferenceClient:
         self, request: GenerateRequest
     ) -> "inference_pb2.GenerateRequest":
         """Convert the shared Pydantic contract to a proto request message."""
+        def _build_msg_proto(m):
+            kwargs = {"role": _ROLE_TO_ENUM.get(m.role, 1), "content": m.content or ""}
+            if m.tool_calls:
+                kwargs["tool_calls_json"] = json.dumps(m.tool_calls)
+            if m.tool_call_id:
+                kwargs["tool_call_id"] = m.tool_call_id
+            if m.name:
+                kwargs["name"] = m.name
+            return inference_pb2.MessageProto(**kwargs)
+
         proto_req = inference_pb2.GenerateRequest(
             backend=request.backend,
             role=request.role,
-            messages=[
-                inference_pb2.MessageProto(
-                    role=_ROLE_TO_ENUM.get(m.role, 1),  # default ROLE_USER on unknown
-                    content=m.content,
-                )
-                for m in request.messages
-            ],
+            messages=[_build_msg_proto(m) for m in request.messages],
             session_id=request.session_id or "",
         )
 
@@ -118,13 +124,17 @@ class GrpcInferenceClient:
             proto_req.temperature = request.temperature
         if request.top_p != _DEFAULT_TOP_P:
             proto_req.top_p = request.top_p
+        if request.tools:
+            proto_req.tools_json = json.dumps(
+                [t.model_dump(exclude_none=True) for t in request.tools]
+            )
 
         return proto_req
 
     async def _verify_proto_version(self) -> None:
         """Assert the server's proto schema hash matches the compiled stubs."""
         if _PROTO_SCHEMA_HASH is None:
-            logger.warning("Proto _version.py not found — skipping schema compatibility check.")
+            logger.debug("Proto _version.py not found — skipping schema compatibility check.")
             return
         try:
             resp = await self._stub.GetProtoVersion(inference_pb2.ProtoVersionRequest())
@@ -153,12 +163,14 @@ class GrpcInferenceClient:
             self._version_checked = True
         proto_req = self._build_proto_request(request)
         proto_resp = await self._stub.Generate(proto_req)
+        tool_calls = json.loads(proto_resp.tool_calls_json) if proto_resp.tool_calls_json else None
         return GenerateResponse(
             content=proto_resp.content,
             backend=request.backend,             # echo from request, not response
             role=request.role,                   # echo from request, not response
             tokens_generated=proto_resp.tokens_generated,
             session_id=request.session_id,
+            tool_calls=tool_calls,
         )
 
     async def generate_stream(

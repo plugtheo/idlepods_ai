@@ -26,17 +26,26 @@ service InferenceService {
   rpc GetProtoVersion (ProtoVersionRequest) returns (ProtoVersionResponse);
 }
 
-// Encode the three legal role values as an enum (1 byte varint) instead of a
+// Encode the four legal role values as an enum (1 byte varint) instead of a
 // string (4–9 bytes).  With 6–8 turns per request this saves ~50–70 bytes.
 enum MessageRole {
   ROLE_SYSTEM    = 0;
   ROLE_USER      = 1;
   ROLE_ASSISTANT = 2;
+  ROLE_TOOL      = 3;  // tool-result message (OpenAI role="tool")
 }
 
 message MessageProto {
   MessageRole role    = 1;
   string      content = 2;
+  // tool_calls_json: JSON-serialised list of OpenAI tool_call objects.
+  // Non-empty only for assistant messages that emitted tool calls.
+  optional string tool_calls_json = 3;
+  // tool_call_id: the call ID this tool-result message is responding to.
+  // Non-empty only when role == ROLE_TOOL.
+  optional string tool_call_id    = 4;
+  // name: function name for tool-result messages.
+  optional string name            = 5;
 }
 
 message GenerateRequest {
@@ -57,11 +66,18 @@ message GenerateRequest {
   optional double top_p        = 7;  // double (64-bit)
 
   string session_id = 8;  // log-correlation only; empty string = unknown
+
+  // tools_json: JSON-serialised list of OpenAI function tool definitions.
+  // Absent when the role does not use tools (saves wire bytes).
+  optional string tools_json = 9;
 }
 
 message GenerateResponse {
   string content          = 1;
   int32  tokens_generated = 2;
+  // tool_calls_json: JSON-serialised list of tool_call objects emitted by the
+  // model.  Absent when the model produced plain text with no tool calls.
+  optional string tool_calls_json = 3;
   // model_family, role, session_id intentionally omitted: the caller
   // already has them from the request — echoing wastes wire bytes.
 }

@@ -18,6 +18,7 @@ starting the server — the HTTP endpoint continues to operate normally.
 
 from __future__ import annotations
 
+import json
 import logging
 
 from ..config.settings import settings
@@ -50,6 +51,7 @@ _ENUM_TO_ROLE: dict[int, str] = {
     0: "system",
     1: "user",
     2: "assistant",
+    3: "tool",
 }
 
 # Server-side defaults for optional sampling fields — read from InferenceSettings
@@ -65,12 +67,15 @@ _server: "grpc_aio.Server | None" = None
 
 def _build_pydantic_request(request: "inference_pb2.GenerateRequest"):  # type: ignore[name-defined]
     """Convert a proto GenerateRequest to the shared Pydantic contract."""
-    from shared.contracts.inference import GenerateRequest, Message
+    from shared.contracts.inference import GenerateRequest, Message, ToolDefinition
 
     messages = [
         Message(
             role=_ENUM_TO_ROLE.get(m.role, "user"),
-            content=m.content,
+            content=m.content or None,
+            tool_calls=json.loads(m.tool_calls_json) if m.tool_calls_json else None,
+            tool_call_id=m.tool_call_id or None,
+            name=m.name or None,
         )
         for m in request.messages
     ]
@@ -79,6 +84,10 @@ def _build_pydantic_request(request: "inference_pb2.GenerateRequest"):  # type: 
     temperature  = request.temperature if request.HasField("temperature") else _default_temperature()
     top_p        = request.top_p       if request.HasField("top_p")       else _default_top_p()
     adapter_name = request.adapter_name if request.HasField("adapter_name") else None
+    tools = (
+        [ToolDefinition(**t) for t in json.loads(request.tools_json)]
+        if request.HasField("tools_json") else None
+    )
 
     return GenerateRequest(
         backend=request.backend,
@@ -89,6 +98,7 @@ def _build_pydantic_request(request: "inference_pb2.GenerateRequest"):  # type: 
         temperature=temperature,
         top_p=top_p,
         session_id=request.session_id or None,
+        tools=tools,
     )
 
 
@@ -107,10 +117,13 @@ if _GRPC_AVAILABLE:
                 pydantic_req = _build_pydantic_request(request)
                 backend = get_backend(pydantic_req.backend)
                 response = await backend.generate(pydantic_req)
-                return inference_pb2.GenerateResponse(
-                    content=response.content,
-                    tokens_generated=response.tokens_generated,
-                )
+                resp_kwargs = {
+                    "content": response.content,
+                    "tokens_generated": response.tokens_generated,
+                }
+                if response.tool_calls:
+                    resp_kwargs["tool_calls_json"] = json.dumps(response.tool_calls)
+                return inference_pb2.GenerateResponse(**resp_kwargs)
             except Exception as exc:
                 logger.error("gRPC Generate error: %s", exc, exc_info=True)
                 await context.abort(grpc.StatusCode.INTERNAL, str(exc))
