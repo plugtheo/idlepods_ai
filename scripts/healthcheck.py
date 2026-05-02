@@ -412,9 +412,36 @@ if trainer_path.exists():
     _record("trainer", "dataset_hash computed", "dataset_hash" in content)
     _record("trainer", "tokenizer_hash computed", "tokenizer_hash" in content)
     _record("trainer", "trainer_version computed", "trainer_version" in content)
-    _record("trainer", "sft_format: chatml in recipe", '"chatml"' in content or "'chatml'" in content)
+    _record("trainer", "recipe.sft_format read from metadata (no chatml literal)",
+            '"chatml"' not in content and "'chatml'" not in content)
+    _record("trainer", "legacy [RESPONSE] wrap is guarded by sft_format check",
+            "legacy_response_marker" in content)
 else:
     _record("trainer", "lora_trainer.py exists", False, "file missing")
+
+
+# ---------------------------------------------------------------------------
+# 9b. recipes.yaml mounted in compose.yml for all three services (Step 7)
+# ---------------------------------------------------------------------------
+_section("9b. recipes.yaml mounts + RECIPES_YAML_PATH in docker/compose.yml")
+
+_compose_path = PROJECT_ROOT / "docker/compose.yml"
+if _compose_path.exists():
+    _compose_content = _compose_path.read_text(encoding="utf-8")
+    _record("recipes_mount", "recipes.yaml mounted in orchestration",
+            "recipes.yaml:/config/recipes.yaml" in _compose_content)
+    _record("recipes_mount", "recipes.yaml mounted in inference",
+            _compose_content.count("recipes.yaml:/config/recipes.yaml") >= 2)
+    _record("recipes_mount", "recipes.yaml mounted in training",
+            _compose_content.count("recipes.yaml:/config/recipes.yaml") >= 3)
+    _record("recipes_env", "RECIPES_YAML_PATH in orchestration env",
+            _compose_content.count("RECIPES_YAML_PATH=/config/recipes.yaml") >= 1)
+    _record("recipes_env", "RECIPES_YAML_PATH in inference env",
+            _compose_content.count("RECIPES_YAML_PATH=/config/recipes.yaml") >= 2)
+    _record("recipes_env", "RECIPES_YAML_PATH in training env",
+            _compose_content.count("RECIPES_YAML_PATH=/config/recipes.yaml") >= 3)
+else:
+    _record("recipes_mount", "docker/compose.yml exists", False, "file missing")
 
 
 # ---------------------------------------------------------------------------

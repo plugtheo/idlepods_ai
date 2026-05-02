@@ -64,7 +64,7 @@ def _find_models_yaml() -> str:
 def load_registry(path: str = "") -> ModelsRegistry:
     resolved = path if path else _find_models_yaml()
     try:
-        with open(resolved) as fh:
+        with open(resolved, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
     except FileNotFoundError:
         raise RuntimeError(f"models.yaml not found at '{resolved}'")

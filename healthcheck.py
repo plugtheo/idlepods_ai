@@ -98,7 +98,7 @@ check(4, 'role_model_family fully renamed', c4)
 # 5. models.yaml exists and has required fields
 def c5():
     import yaml
-    d = yaml.safe_load(open('models.yaml'))
+    d = yaml.safe_load(open('models.yaml', encoding='utf-8'))
     assert 'default_backend' in d
     assert 'primary' in d['backends']
     p = d['backends']['primary']

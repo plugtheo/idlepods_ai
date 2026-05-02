@@ -114,3 +114,39 @@ async def save_snippets(task_id: str, snippets: list[dict[str, Any]], ttl: int) 
     except Exception as exc:
         logger.error("save_snippets(%s) failed: %s", task_id, exc)
         _redis_ok = False
+
+
+_task_state_warned: set[str] = set()
+
+_DEFAULT_TASK_STATE_TTL = 7 * 86400  # 7 days
+
+
+async def set_plan(task_id: str, plan: Any, ttl_s: int = _DEFAULT_TASK_STATE_TTL) -> None:
+    """Persist plan state for task_id. plan is a Plan object or JSON-serialisable dict."""
+    global _redis_ok
+    try:
+        if hasattr(plan, "model_dump"):
+            payload = plan.model_dump(mode="json")
+        else:
+            payload = plan
+        await _get_client().setex(f"task_state:{task_id}", ttl_s, json.dumps(payload))
+        _redis_ok = True
+    except Exception as exc:
+        logger.error("set_plan(%s) failed: %s", task_id, exc)
+        _redis_ok = False
+
+
+async def get_plan(task_id: str) -> Any | None:
+    """Return stored Plan dict for task_id, or None on miss/error."""
+    global _redis_ok
+    try:
+        raw = await _get_client().get(f"task_state:{task_id}")
+        _redis_ok = True
+        if raw:
+            return json.loads(raw)
+    except Exception as exc:
+        if task_id not in _task_state_warned:
+            logger.warning("task_state degraded for %s: %s", task_id, exc)
+            _task_state_warned.add(task_id)
+        _redis_ok = False
+    return None

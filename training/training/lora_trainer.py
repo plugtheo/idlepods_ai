@@ -241,6 +241,8 @@ def _promote_to_active(
             pass
 
     last_history = (new_meta.get("history") or [{}])[-1]
+    _recipe_from_meta = last_history.get("recipe", {})
+    _sft_format = _recipe_from_meta.get("sft_format", "openai_messages")
     trained_at_dt = datetime.fromisoformat(
         new_meta.get("updated_at", now_iso).replace("Z", "+00:00")
     )
@@ -250,17 +252,17 @@ def _promote_to_active(
         trained_at=trained_at_dt,
         backend=new_meta.get("backend", _resolve_registry_default()),
         base_model=new_meta.get("base_model", "unknown"),
-        peft_type="lora",
+        peft_type=_recipe_from_meta.get("peft_type", "lora"),
         target_modules=new_meta.get("target_modules", _ADAPTER_TARGET_MODULES),
         r=new_meta.get("lora_r", 8),
         alpha=new_meta.get("lora_alpha", 16),
         dropout=0.0,
         recipe={
-            "peft_type": "lora",
+            "peft_type": _recipe_from_meta.get("peft_type", "lora"),
             "r": new_meta.get("lora_r", 8),
             "alpha": new_meta.get("lora_alpha", 16),
             "target_modules": new_meta.get("target_modules", _ADAPTER_TARGET_MODULES),
-            "sft_format": "chatml",
+            "sft_format": _sft_format,
         },
         dataset_hash=new_meta.get("dataset_hash", "unknown"),
         tokenizer_hash=new_meta.get("tokenizer_hash", "unknown"),
@@ -399,6 +401,28 @@ def _post_train_version(
     previous_backup = guessed_backup if guessed_backup.exists() else None
     _promote_to_active(checkpoint_dir, capability, new_meta, previous_backup_path=previous_backup)
     return new_meta["version"]
+
+
+def apply_recipe(model, recipe: "AdapterRecipe"):
+    """Apply LoRA/RS-LoRA/DoRA/QLoRA PEFT config to model using Unsloth."""
+    from unsloth import FastLanguageModel
+    available = {name.split(".")[-1] for name, _ in model.named_modules()}
+    missing = [m for m in recipe.target_modules if m not in available]
+    if missing:
+        raise ValueError(
+            f"target_modules {missing} not found in model. Available: {sorted(available)}"
+        )
+    return FastLanguageModel.get_peft_model(
+        model,
+        r=recipe.r,
+        lora_alpha=recipe.alpha,
+        target_modules=recipe.target_modules,
+        lora_dropout=recipe.dropout,
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        use_rslora=recipe.use_rslora,
+        use_dora=recipe.use_dora,
+    )
 
 
 class AgentOutputDataset:
@@ -601,32 +625,18 @@ class LoRATrainer:
 
         print(f"[TRAINER] Loaded {len(dataset)} training samples")
 
-        # TRL v0.24+ prompt-completion format: the dataset must have "prompt"
-        # and "completion" fields.  SFTTrainer tokenizes them separately and
-        # computes loss only on the completion tokens (no explicit data collator
-        # needed — completion masking is built into the trainer).
-        #
-        # CRITICAL: the prompt format MUST be byte-for-byte identical to what
-        # _build_adapter_prompt() sends at inference time.  Inference uses:
-        #   [SYSTEM]\n{system_prompt}\n\n[USER]\n{instruction}\n\n[RESPONSE]\n
-        # Training therefore must use the exact same structure.  Using a bare
-        # instruction without [SYSTEM]/[USER] shifts all RoPE positions by ~50
-        # tokens relative to inference, corrupting the adapter's attention
-        # patterns and causing systematic whitespace suppression.
-        #
-        # If the instruction already starts with "[SYSTEM]" (bootstrap or
-        # experience training paths), just append "\n\n[RESPONSE]\n".
+        _use_legacy = recipe is None or getattr(recipe, "sft_format", "openai_messages") == "legacy_response_marker"
         for record in dataset:
-            if "prompt" not in record:
+            if "messages" in record:
+                pass  # TRL ≥ 0.24 SFTTrainer handles conversational records natively via apply_chat_template
+            elif "prompt" in record and "completion" in record:
+                pass  # already in prompt/completion format
+            elif _use_legacy:
+                # Legacy [SYSTEM]/[USER]/[RESPONSE] wrapping — only when sft_format=legacy_response_marker
                 instruction = record.get("instruction", "")
                 if instruction.startswith("[SYSTEM]"):
-                    # Already wrapped (bootstrap path via train_gpu_simple.py)
-                    # — just append the [RESPONSE] delimiter.
                     record["prompt"] = instruction + "\n\n[RESPONSE]\n"
                 else:
-                    # Curated dataset path (e.g. coding_dataset.jsonl from
-                    # CodeAlpaca): wrap with the canonical system prompt for
-                    # this capability so training matches inference format.
                     capability = record.get("capability", "")
                     role = _CAP_TO_ROLE.get(capability, "")
                     sys_prompt = _AGENT_PROMPTS.get(role, "You are an expert AI assistant.")
@@ -635,8 +645,8 @@ class LoRATrainer:
                         f"[USER]\n{instruction}\n\n"
                         f"[RESPONSE]\n"
                     )
-            if "completion" not in record:
-                record["completion"] = record.get("response", "")
+                if "completion" not in record:
+                    record["completion"] = record.get("response", "")
         
         if self.HAS_UNSLOTH:
             return await self._train_unsloth(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe)
@@ -697,7 +707,7 @@ class LoRATrainer:
             # [SYSTEM]/[USER]/[RESPONSE] structure before this method is called.
             # Only fill in 'completion' for any records that still need it.
             for record in dataset:
-                if "completion" not in record:
+                if "messages" not in record and "completion" not in record:
                     record["completion"] = record.get("response", "")
 
             sft_config = SFTConfig(

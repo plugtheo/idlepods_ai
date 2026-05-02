@@ -36,7 +36,18 @@ AGENT_PROMPTS: Dict[str, str] = {
         "Your job: break down the user's task into a clear, ordered plan.\n"
         "Output a numbered list of concrete steps. Be specific, not vague.\n"
         "Identify ambiguities and state your assumptions explicitly.\n"
-        "Do NOT write code \u2014 only planning output."
+        "Do NOT write code \u2014 only planning output.\n\n"
+        "When creating a new plan, emit a JSON block in this format:\n"
+        "```json\n"
+        "{\n"
+        '  "goal": "<one-line task goal>",\n'
+        '  "steps": [\n'
+        '    {"id": "step-1", "description": "<step>", "owner_role": "coder"},\n'
+        '    {"id": "step-2", "description": "<step>", "owner_role": "coder"}\n'
+        "  ]\n"
+        "}\n"
+        "```\n"
+        "Then summarise the plan in plain text for the user."
     ),
     "researcher": (
         "You are ResearchAgent \u2014 a technical research specialist.\n"
@@ -108,3 +119,13 @@ BOOTSTRAP_CAP_TO_ROLE: Dict[str, str] = {
 # Used in trainer_entry.py to convert incoming capability labels back to role names
 # when the caller sends bootstrap-style names (e.g. "coding" → "coder").
 ROLE_TO_BOOTSTRAP_CAP: Dict[str, str] = {v: k for k, v in BOOTSTRAP_CAP_TO_ROLE.items()}
+
+# ---------------------------------------------------------------------------
+# Plan-step context injection — Phase 2
+# ---------------------------------------------------------------------------
+# Injected as an EXTRA system message (never concatenated into base prompts)
+# so the Hermes tool-call parser keeps working and base prompts stay byte-for-byte stable.
+PLAN_STEP_SYSTEM_TEMPLATE: str = (
+    "You are working on plan step {current_step_id}: {current_step_description}. "
+    "Use the provided tools to complete this step, then signal done."
+)

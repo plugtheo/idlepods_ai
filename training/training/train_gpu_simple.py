@@ -44,6 +44,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from shared.contracts.agent_prompts import AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE
 from shared.contracts.training import lookup_recipe
+from shared.contracts.experience import AgentContribution
+from orchestration.app.experience.sft_builder import build_sft_pair
 
 # ---------------------------------------------------------------------------
 # Agent capability → (base model id, system description)
@@ -128,28 +130,10 @@ def _resolve_recipe(capability: str):
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_sft_pairs(capability: str, system_prompt: str) -> List[Dict[str, str]]:
+def load_sft_pairs(capability: str, system_prompt: str, recipe) -> List[Dict]:
     """
-    Load instruction/response pairs from the pre-generated JSONL and wrap them
-    in [SYSTEM]/[USER] headers so every pair matches the format that
-    _build_adapter_prompt() applies at inference time and that trainer_entry.py
-    uses when loading curated samples for the online training path.
-
-    Format written to each pair's 'instruction' field:
-        [SYSTEM]
-        {system_prompt}
-
-        [USER]
-        {bare_instruction}
-
-    The system_prompt MUST be the exact string from AGENT_SPECS[capability][1],
-    which mirrors AGENT_PROMPTS in orchestration/app/config/settings.py.
-    Using the identical prompt at training and inference ensures the adapter
-    activates correctly when the same [SYSTEM] block is sent by the orchestrator.
-
-    lora_trainer.LoRATrainer.train() then appends "\n\n[RESPONSE]\n" + response
-    when building the final 'text' field for SFTTrainer, so
-    DataCollatorForCompletionOnlyLM masks only the instruction tokens.
+    Load instruction/response pairs from the pre-generated JSONL and build
+    SFT records shaped by recipe.sft_format via build_sft_pair.
 
     Falls back to triggering generate_datasets() if the JSONL is absent.
     """
@@ -162,7 +146,8 @@ def load_sft_pairs(capability: str, system_prompt: str) -> List[Dict[str, str]]:
     if not jsonl_path.exists():
         raise FileNotFoundError(f"Dataset not found even after generation: {jsonl_path}")
 
-    pairs: List[Dict[str, str]] = []
+    role_name = BOOTSTRAP_CAP_TO_ROLE.get(capability, capability)
+    pairs: List[Dict] = []
     with open(jsonl_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -175,13 +160,17 @@ def load_sft_pairs(capability: str, system_prompt: str) -> List[Dict[str, str]]:
             instruction = rec.get("instruction", "").strip()
             response    = rec.get("response", "").strip()
             if instruction and response:
-                pairs.append({
-                    "instruction": (
-                        f"[SYSTEM]\n{system_prompt}\n\n"
-                        f"[USER]\n{instruction}"
-                    ),
-                    "response": response,
-                })
+                contrib = AgentContribution(
+                    role=role_name,
+                    output=response,
+                    quality_score=1.0,
+                    iteration=1,
+                )
+                sft_pair = build_sft_pair(
+                    contrib, recipe, role_name,
+                    system_prompt=system_prompt, user_prompt=instruction,
+                )
+                pairs.append(sft_pair)
     return pairs
 
 
@@ -244,7 +233,7 @@ async def train_capability(
         has_existing = False
 
     # ── Prepare dataset JSONL ────────────────────────────────────────────────
-    pairs = load_sft_pairs(capability, system_prompt)
+    pairs = load_sft_pairs(capability, system_prompt, recipe)
     if not pairs:
         raise ValueError(f"No training pairs loaded for capability '{capability}'")
     print(f"  Pairs loaded : {len(pairs):,}")

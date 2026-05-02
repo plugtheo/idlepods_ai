@@ -88,6 +88,22 @@ def _tool_call_shape_ok(response_json: dict) -> bool:
     )
 
 
+_MINIMAL_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Run a shell command",
+            "parameters": {
+                "type": "object",
+                "properties": {"cmd": {"type": "string"}},
+                "required": ["cmd"],
+            },
+        },
+    }
+]
+
+
 def run_smoke(
     inference_url: str,
     role: str,
@@ -98,42 +114,73 @@ def run_smoke(
     """
     Synchronous smoke test (runs inside the training subprocess).
 
-    Sends the canonical chat-completion prompt for *role* to the vLLM server
-    using the staged adapter *staging_name* via POST /v1/chat/completions.
-    Uses ChatML messages format — same format the adapter was trained on.
+    When recipe.tool_call_style == "openai_native": POST /v1/chat/completions
+    with tools= and validate that tool_calls are present in the response.
+    When recipe.tool_call_style == "none" (or no recipe): POST /v1/completions
+    and validate the text response.
     """
     user_prompt = _SMOKE_PROMPTS.get(role, "Say hello.")
     sys_prompt  = AGENT_PROMPTS.get(role, "You are a helpful AI assistant.")
 
-    payload = {
-        "model": staging_name,
-        "messages": [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "max_tokens": 128,
-        "temperature": 0.0,
-    }
+    use_tool_path = recipe is not None and recipe.tool_call_style != "none"
 
-    try:
-        resp = httpx.post(
-            f"{inference_url}/v1/chat/completions",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        text = resp.json()["choices"][0]["message"]["content"]
-    except Exception as exc:
-        return {"pass": False, "reason": f"request_error: {exc}", "response_len": 0}
+    if use_tool_path:
+        payload = {
+            "model": staging_name,
+            "messages": [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_tokens": 128,
+            "temperature": 0.0,
+            "tools": _MINIMAL_TOOL_SCHEMAS,
+            "tool_choice": "auto",
+        }
+        try:
+            resp = httpx.post(
+                f"{inference_url}/v1/chat/completions",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            resp_json = resp.json()
+        except Exception as exc:
+            return {"pass": False, "reason": f"request_error: {exc}", "response_len": 0}
 
-    if not text or not text.strip():
-        return {"pass": False, "reason": "empty_response", "response_len": 0}
-    if _has_bpe_artifacts(text):
-        return {"pass": False, "reason": "bpe_artifacts", "response_len": len(text)}
-    if not _is_clean_output(text):
-        return {"pass": False, "reason": "contaminated_output", "response_len": len(text)}
-    if not _shape_ok(role, text):
-        return {"pass": False, "reason": f"shape_fail role={role}", "response_len": len(text)}
+        if not _tool_call_shape_ok(resp_json):
+            return {"pass": False, "reason": "tool_call_shape_fail", "response_len": 0}
+        return {"pass": True, "reason": "tool_call_ok", "response_len": 0}
+    else:
+        payload = {
+            "model": staging_name,
+            "prompt": (
+                f"[SYSTEM]\n{sys_prompt}\n\n"
+                f"[USER]\n{user_prompt}\n\n"
+                f"[RESPONSE]\n"
+            ),
+            "max_tokens": 128,
+            "temperature": 0.0,
+        }
+        try:
+            resp = httpx.post(
+                f"{inference_url}/v1/completions",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["text"]
+        except Exception as exc:
+            return {"pass": False, "reason": f"request_error: {exc}", "response_len": 0}
 
-    return {"pass": True, "reason": "ok", "response_len": len(text)}
+        if not text or not text.strip():
+            return {"pass": False, "reason": "empty_response", "response_len": 0}
+        if _has_bpe_artifacts(text):
+            return {"pass": False, "reason": "bpe_artifacts", "response_len": len(text)}
+        if not _is_clean_output(text):
+            return {"pass": False, "reason": "contaminated_output", "response_len": len(text)}
+        if not _shape_ok(role, text):
+            return {"pass": False, "reason": f"shape_fail role={role}", "response_len": len(text)}
+
+        return {"pass": True, "reason": "ok", "response_len": len(text)}

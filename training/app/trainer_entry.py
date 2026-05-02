@@ -63,7 +63,10 @@ _ROOT = Path(__file__).resolve().parents[3]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from training.lora_trainer import (
+from shared.contracts.experience import AgentContribution
+from orchestration.app.experience.sft_builder import build_sft_pair
+
+from training.training.lora_trainer import (
     LoRATrainer,
     _pre_train_backup,
     _post_train_version,
@@ -71,7 +74,7 @@ from training.lora_trainer import (
     _promote_to_active,
     _mark_failed,
 )
-from training.smoke_gate import run_smoke
+from training.training.smoke_gate import run_smoke
 from shared.contracts.training import AdapterRecipe, lookup_recipe
 
 # System prompts — imported from the single source of truth so that training and
@@ -147,54 +150,19 @@ def _is_clean_output(text: str) -> bool:
     return True
 
 
-def _format_messages_as_prompt(messages: List[Dict[str, Any]]) -> str:
-    """
-    Render a chat message list into ChatML format for SFTTrainer.
-
-    The response boundary token is <|im_start|>assistant\n — DataCollatorForCompletionOnlyLM
-    uses this as the masking boundary so only the assistant response is trained on.
-    """
-    parts: List[str] = []
-    for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content") or ""
-        tool_calls = msg.get("tool_calls")
-        if role == "system":
-            parts.append(f"<|im_start|>system\n{content}<|im_end|>")
-        elif role == "user":
-            parts.append(f"<|im_start|>user\n{content}<|im_end|>")
-        elif role == "assistant":
-            if tool_calls:
-                parts.append(f"<|im_start|>assistant\n{json.dumps(tool_calls)}<|im_end|>")
-            else:
-                parts.append(f"<|im_start|>assistant\n{content}<|im_end|>")
-        elif role == "tool":
-            parts.append(f"<|im_start|>tool\n{content}<|im_end|>")
-    return "\n".join(parts)
-
-
 def _load_sft_pairs(
     data_path: str,
     capability: str,
+    recipe: "AdapterRecipe",
     min_score: float = MIN_QUALITY_SCORE,
-) -> List[Dict[str, str]]:
+) -> List[Dict]:
     """
-    Read ExperienceEvent JSONL and produce SFT (instruction, response) pairs.
+    Read ExperienceEvent JSONL and produce SFT pairs shaped by recipe.sft_format.
 
-    Strategy (per record):
-    1. Skip records below min_score.
-    2. For each contribution that belongs to `capability` and has `messages`
-       + `full_output`, emit one pair:
-         instruction = formatted messages (system + context + prior history + user)
-         response    = full_output (complete raw LLM response)
-    3. Fall back to a single top-level pair (prompt → final_output) for older
-       records written before per-contribution messages were captured.
-
-    This means one JSONL record can yield multiple training pairs — one per
-    agent step — which is correct: each agent is a separate role that we want
-    to fine-tune independently.
+    For openai_messages: {"messages": [...], "score": float}
+    For legacy_response_marker: {"prompt": ..., "completion": ..., "score": float}
     """
-    pairs: List[Dict[str, str]] = []
+    pairs: List[Dict] = []
     skipped_score = 0
     skipped_no_data = 0
 
@@ -209,7 +177,6 @@ def _load_sft_pairs(
                 print(f"[trainer-entry] Skipping malformed JSONL line: {exc}", flush=True)
                 continue
 
-            # Field names: JSONL uses "final_score", not "evaluation"
             score = float(record.get("final_score", 0.0))
             if score < min_score:
                 skipped_score += 1
@@ -217,7 +184,6 @@ def _load_sft_pairs(
 
             added = 0
             for contribution in record.get("contributions", []):
-                # Only train on contributions from the requested capability role
                 if contribution.get("role", "") != capability:
                     continue
 
@@ -231,30 +197,32 @@ def _load_sft_pairs(
                             flush=True,
                         )
                         continue
-                    # Append tool_turns (assistant tool-call + tool-result exchanges) to the
-                    # instruction so the SFT pair captures the full ReAct context.
-                    # DataCollatorForCompletionOnlyLM masks tool-result turns automatically
-                    # since only <|im_start|>assistant\n is the training target boundary.
                     tool_turns = contribution.get("tool_turns") or []
-                    instruction_messages = list(messages) + tool_turns
-                    pairs.append({
-                        "instruction": _format_messages_as_prompt(instruction_messages),
-                        "response": full_output,
-                        "score": score,
-                    })
+                    contrib = AgentContribution(
+                        role=capability,
+                        output=full_output,
+                        quality_score=score,
+                        iteration=contribution.get("iteration", 1),
+                        messages=list(messages) + tool_turns,
+                    )
+                    sft_pair = build_sft_pair(contrib, recipe, capability)
+                    pairs.append({**sft_pair, "score": score})
                     added += 1
 
             if added == 0:
-                # Older record without per-contribution messages — use top-level fields.
-                # "prompt" and "final_output" are the correct JSONL field names.
                 prompt = record.get("prompt", "")
                 final_output = record.get("final_output", "")
                 if prompt and final_output:
-                    pairs.append({
-                        "instruction": _make_fallback_prompt(prompt, capability),
-                        "response": final_output,
-                        "score": score,
-                    })
+                    sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
+                    contrib = AgentContribution(
+                        role=capability,
+                        output=final_output,
+                        quality_score=score,
+                        iteration=1,
+                    )
+                    sft_pair = build_sft_pair(contrib, recipe, capability,
+                                             system_prompt=sys_prompt, user_prompt=prompt)
+                    pairs.append({**sft_pair, "score": score})
                 else:
                     skipped_no_data += 1
 
@@ -267,16 +235,7 @@ def _load_sft_pairs(
     return pairs
 
 
-def _make_fallback_prompt(prompt: str, capability: str) -> str:
-    """
-    Build a minimal ChatML system+user prompt for old records that lack
-    per-contribution messages.
-    """
-    sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
-    return f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>"
-
-
-def _load_curated_pairs(capability: str, data_root: Path, max_samples: int) -> List[Dict[str, str]]:
+def _load_curated_pairs(capability: str, data_root: Path, max_samples: int, recipe: "AdapterRecipe") -> List[Dict]:
     """
     Load pre-curated (instruction, response) pairs from the training_data_curated
     directory.  These are high-quality public-dataset samples that bootstrap
@@ -305,12 +264,16 @@ def _load_curated_pairs(capability: str, data_root: Path, max_samples: int) -> L
             instruction = rec.get("instruction", "")
             response = rec.get("response", "")
             if instruction and response:
-                # Wrap the curated instruction in ChatML so it matches the format
-                # of experience-derived training pairs built by _format_messages_as_prompt.
-                # The masking boundary is <|im_start|>assistant\n.
                 sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
-                formatted_instruction = f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{instruction}<|im_end|>"
-                pairs.append({"instruction": formatted_instruction, "response": response, "score": 1.0})
+                contrib = AgentContribution(
+                    role=capability,
+                    output=response,
+                    quality_score=1.0,
+                    iteration=1,
+                )
+                sft_pair = build_sft_pair(contrib, recipe, capability,
+                                         system_prompt=sys_prompt, user_prompt=instruction)
+                pairs.append({**sft_pair, "score": 1.0})
 
     if len(pairs) > max_samples:
         import random
@@ -397,6 +360,7 @@ def main() -> None:
     pairs = _load_sft_pairs(
         data_path=args.data_path,
         capability=role_name,
+        recipe=recipe,
         min_score=MIN_QUALITY_SCORE,
     )
 
@@ -406,7 +370,7 @@ def main() -> None:
     data_root = Path(args.output_dir).parent  # /data/lora_checkpoints → /data
     curated_budget = MAX_TRAINING_SAMPLES - len(pairs)
     if curated_budget > 0:
-        curated = _load_curated_pairs(role_name, data_root, curated_budget)
+        curated = _load_curated_pairs(role_name, data_root, curated_budget, recipe)
         if curated:
             import random
             combined = pairs + curated

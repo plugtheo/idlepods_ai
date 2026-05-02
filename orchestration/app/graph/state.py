@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, TypedDict
 
+# Plan is imported lazily where used to avoid circular imports at module load.
+
 
 class AgentState(TypedDict, total=False):
     # ── Request identity ──────────────────────────────────────────────────
@@ -116,3 +118,13 @@ class AgentState(TypedDict, total=False):
 
     tool_originating_role: str
     """Role that emitted the pending tool call; used to route back after tool_executor."""
+
+    # ── Plan tracking (Phase 2) ───────────────────────────────────────────────
+    plan: Optional[Dict[str, Any]]
+    """Serialised Plan dict (model_dump) for the current task; None when no plan loaded."""
+
+    plan_changed: bool
+    """Set True by any node that mutates plan; finalize writes back on convergence."""
+
+    current_step_id: Optional[str]
+    """The step id the planner selected for this turn; injected into tool-role system msgs."""

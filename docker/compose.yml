@@ -83,6 +83,7 @@ services:
     environment:
       - INFERENCE__GRPC_PORT=50051
       - MODELS_YAML_PATH=/config/models.yaml
+      - RECIPES_YAML_PATH=/config/recipes.yaml
     networks:
       - idledev
     ports:
@@ -94,6 +95,7 @@ services:
     restart: unless-stopped
     volumes:
       - ../models.yaml:/config/models.yaml:ro
+      - ../recipes.yaml:/config/recipes.yaml:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')"]
       interval: 15s
@@ -168,6 +170,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./compose.yml:/compose/compose.yml:ro
       - ../models.yaml:/config/models.yaml:ro
+      - ../recipes.yaml:/config/recipes.yaml:ro
     environment:
       - TRAINING__JSONL_PATH=/data/experiences.jsonl
       - TRAINING__OUTPUT_DIR=/data/lora_checkpoints
@@ -179,6 +182,7 @@ services:
       - TRAINING__COMPOSE_FILE=/compose/compose.yml
       - TRAINING__INFERENCE_URL=http://inference:8010
       - MODELS_YAML_PATH=/config/models.yaml
+      - RECIPES_YAML_PATH=/config/recipes.yaml
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
     networks:
@@ -223,6 +227,7 @@ services:
     volumes:
       - experiences:/data        # JSONL at /data/experiences.jsonl + vector_store at /data/vector_store
       - ../models.yaml:/config/models.yaml:ro
+      - ../recipes.yaml:/config/recipes.yaml:ro
     environment:
       - ORCHESTRATION__INFERENCE_URL=http://inference:8010
       - ORCHESTRATION__DEFAULT_MAX_ITERATIONS=${ORCHESTRATION__DEFAULT_MAX_ITERATIONS:-2}
@@ -234,6 +239,7 @@ services:
       - ORCHESTRATION__CHROMADB_PATH=/data/vector_store
       - ORCHESTRATION__MODEL_CONTEXT_LEN=${VLLM_MAX_MODEL_LEN:-40960}
       - MODELS_YAML_PATH=/config/models.yaml
+      - RECIPES_YAML_PATH=/config/recipes.yaml
       # Uncomment to switch ChromaDB to server mode (also uncomment chromadb service above):
       # - ORCHESTRATION__CHROMADB_HOST=chromadb
       # - ORCHESTRATION__CHROMADB_PORT=8000

@@ -1,8 +1,9 @@
 default:
-  peft_type: lora
-  r: 16
-  alpha: 32
-  dropout: 0.0
+  peft_type: rslora
+  use_rslora: true
+  r: 32
+  alpha: 64
+  dropout: 0.05
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
   learning_rate: 2e-4
   num_epochs: 3
@@ -15,6 +16,8 @@ by_role:
   debugger: {r: 32, alpha: 64, num_epochs: 4}
   consensus: {peft_type: none}
 
-# Reserved seam: future per-backend overrides go here.
+# Per-backend role overrides: future model-specific tuning goes here.
+# Key format: "backend_name:role_name"
+# Example:
 # by_backend_role:
-#   "secondary:coder": {peft_type: rslora, use_rslora: true}
+#   "primary:coder": {peft_type: rslora, use_rslora: true, r: 48, alpha: 96}

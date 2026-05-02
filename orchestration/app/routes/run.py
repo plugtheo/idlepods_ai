@@ -41,6 +41,9 @@ from ..config.settings import settings
 from ..graph import nodes as _nodes_module
 from ..graph.nodes import AGENT_FRIENDLY
 from ..graph.state import AgentState
+from ..plans.reader import read_plan
+from ..plans.writer import write_plan_atomic, validate_transition
+from ..plans.schema import Plan
 from ..utils.scoring import score_per_entry
 
 logger = logging.getLogger(__name__)
@@ -122,6 +125,29 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
         session_id[:8], convergence_threshold, request.convergence_threshold,
     )
 
+    # ── Plan loading ─────────────────────────────────────────────────────────
+    plan_ephemeral = (task_id == session_id)
+    plan_dict: dict | None = None
+    plan_path_str = getattr(request, "plan_path", None) or "plans/current-task.md"
+
+    if not plan_ephemeral:
+        raw_plan = await session_store.get_plan(task_id)
+        if raw_plan:
+            plan_dict = raw_plan
+        else:
+            try:
+                plan_obj = read_plan(plan_path_str)
+                plan_dict = plan_obj.model_dump(mode="json") if plan_obj else None
+            except Exception as exc:
+                logger.warning("[%s] plan file unreadable (%s) — proceeding without plan.", session_id[:8], exc)
+    else:
+        logger.debug("[%s] plan ephemeral — task_id not supplied", session_id[:8])
+        try:
+            plan_obj = read_plan(plan_path_str)
+            plan_dict = plan_obj.model_dump(mode="json") if plan_obj else None
+        except Exception:
+            plan_dict = None
+
     initial_state: AgentState = {
         "session_id": session_id,
         "task_id": task_id,
@@ -146,12 +172,17 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
         "quality_converged": False,
         "final_output": "",
         "final_score": 0.0,
+        "plan": plan_dict,
+        "plan_changed": False,
+        "current_step_id": None,
     }
 
     from ..graph.pipeline import _recursion_limit
     rec_limit = _recursion_limit(max_iterations, len(agent_chain))
 
-    return session_id, context_intent, context_complexity, agent_chain, initial_state, rec_limit, redis_healthy
+    return (session_id, context_intent, context_complexity, agent_chain,
+            initial_state, rec_limit, redis_healthy,
+            plan_ephemeral, plan_path_str)
 
 
 def _trim_conversation_history(history: list, max_tokens: int) -> list:
@@ -208,6 +239,60 @@ def _build_contributions(history: list) -> List[AgentContribution]:
     return contributions
 
 
+def _maybe_writeback_plan(
+    final_state: AgentState,
+    initial_state: AgentState,
+    plan_ephemeral: bool,
+    plan_path_str: str,
+    session_id: str,
+    converged: bool,
+) -> None:
+    """On convergence, persist plan to Redis (if non-ephemeral) and write back to markdown."""
+    if not final_state.get("plan_changed"):
+        return
+    plan_dict = final_state.get("plan")
+    if not plan_dict:
+        return
+
+    task_id = initial_state.get("task_id", session_id)
+
+    if not plan_ephemeral:
+        ttl = getattr(settings, "task_state_ttl_s", 7 * 86400)
+        asyncio.create_task(session_store.set_plan(task_id, plan_dict, ttl))
+
+    if converged or not plan_ephemeral:
+        try:
+            from pathlib import Path as _P
+            from datetime import datetime as _dt, timezone as _tz
+
+            plan_obj = Plan.model_validate(plan_dict)
+            plan_path = _P(plan_path_str)
+
+            # Validate transitions before writing back
+            initial_plan_dict = initial_state.get("plan")
+            if initial_plan_dict:
+                try:
+                    old_plan = Plan.model_validate(initial_plan_dict)
+                    validate_transition(old_plan, plan_obj)
+                except ValueError as exc:
+                    logger.warning("[%s] Plan transition validation failed: %s", session_id[:8], exc)
+                    return
+
+            write_plan_atomic(plan_path, plan_obj)
+
+            # Archive snapshot
+            archive_dir = _P("plans/archive")
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            stamp = _dt.now(_tz.utc).strftime("%Y%m%d-%H%M%S")
+            from ..plans.writer import render_plan
+            (archive_dir / f"{task_id}-{stamp}.md").write_text(
+                render_plan(plan_obj), encoding="utf-8"
+            )
+            logger.info("[%s] Plan archived to plans/archive/%s-%s.md", session_id[:8], task_id, stamp)
+        except Exception as exc:
+            logger.warning("[%s] Plan writeback failed: %s", session_id[:8], exc)
+
+
 # ── HTTP endpoints ─────────────────────────────────────────────────────────
 
 
@@ -226,9 +311,9 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
     4. Fires-and-forgets the experience event to the Experience Service.
     5. Returns the final result to the Gateway.
     """
-    session_id, context_intent, context_complexity, agent_chain, initial_state, rec_limit, redis_healthy = (
-        await _prepare_pipeline_run(request)
-    )
+    (session_id, context_intent, context_complexity, agent_chain,
+     initial_state, rec_limit, redis_healthy,
+     plan_ephemeral, plan_path_str) = await _prepare_pipeline_run(request)
 
     try:
         final_state: AgentState = await _get_pipeline().ainvoke(
@@ -252,6 +337,11 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
     asyncio.create_task(session_store.save_session(
         initial_state["task_id"], combined, settings.redis_session_ttl_s
     ))
+
+    # ── Plan writeback on convergence ─────────────────────────────────────
+    _maybe_writeback_plan(
+        final_state, initial_state, plan_ephemeral, plan_path_str, session_id, converged
+    )
 
     agent_steps = [
         AgentStep(
@@ -340,9 +430,9 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
     clients render output character-by-character, then have the full content
     available in ``agent_complete`` once the agent finishes.
     """
-    session_id, context_intent, context_complexity, agent_chain, initial_state, rec_limit, redis_healthy = (
-        await _prepare_pipeline_run(request)
-    )
+    (session_id, context_intent, context_complexity, agent_chain,
+     initial_state, rec_limit, redis_healthy,
+     plan_ephemeral, plan_path_str) = await _prepare_pipeline_run(request)
 
     async def _event_stream():
         # Single shared queue for ALL events:
@@ -395,6 +485,17 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                                 "content": delta.get("last_output", ""),
                                 "iteration": iteration,
                             })
+
+                            # Emit task_state when plan changed
+                            if delta.get("plan_changed") and delta.get("plan"):
+                                steps = delta["plan"].get("steps", [])
+                                completed = sum(1 for s in steps if s["status"] == "done")
+                                await q.put({
+                                    "type": "task_state",
+                                    "task_id": initial_state.get("task_id", session_id),
+                                    "completed_steps": completed,
+                                    "total_steps": len(steps),
+                                })
 
                         elif node_name == "update_loop":
                             iteration = accumulated.get("current_iteration", last_iteration_seen)
@@ -461,6 +562,12 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                             scorer_rule_version=SCORER_RULE_VERSION,
                         )
                         inflight.register(asyncio.create_task(recorder.record(event)), event)
+
+                    # Plan writeback on convergence
+                    _maybe_writeback_plan(
+                        accumulated, initial_state, plan_ephemeral,
+                        plan_path_str, session_id, converged,
+                    )
 
                 _nodes_module.unregister_token_queue(session_id)
                 await q.put(None)  # sentinel — tells the generator to stop

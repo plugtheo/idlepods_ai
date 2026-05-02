@@ -101,6 +101,33 @@ def _fix_bpe_artifacts(text: str) -> str:
 logger = logging.getLogger(__name__)
 
 _adapter_fallback_counts: dict[str, int] = {}
+_adapter_tool_call_style_cache: dict[str, str] = {}
+
+
+def _load_tool_call_styles_from_manifest() -> None:
+    """Populate _adapter_tool_call_style_cache from the LoRA adapter manifest."""
+    try:
+        from ..config.settings import settings
+        import json as _json
+        manifest_path = Path(getattr(settings, "lora_manifest_path", "/data/lora_checkpoints/manifest.json"))
+        if not manifest_path.exists():
+            return
+        raw = _json.loads(manifest_path.read_text())
+        for adapter_name, entry in raw.get("adapters", {}).items():
+            history = entry.get("history", [])
+            if history:
+                last = history[-1]
+                style = last.get("recipe", {}).get("tool_call_style", "openai_native")
+                _adapter_tool_call_style_cache[adapter_name] = style
+    except Exception as exc:
+        logger.warning("Failed to load tool_call_styles from manifest: %s", exc)
+
+
+def _get_adapter_tool_call_style(adapter_name: str) -> str:
+    """Return the tool_call_style for adapter_name (default: openai_native)."""
+    if adapter_name not in _adapter_tool_call_style_cache:
+        _load_tool_call_styles_from_manifest()
+    return _adapter_tool_call_style_cache.get(adapter_name, "openai_native")
 
 
 def get_fallback_counts() -> dict[str, int]:
@@ -354,31 +381,56 @@ class LocalVLLMBackend(InferenceBackend):
             request.role, effective_model, len(messages), request.max_tokens,
         )
 
-        # Adapter calls: build the canonical prompt string via string concatenation
-        # and call /v1/completions.  This guarantees the prompt is byte-for-byte
-        # identical to the training format ([SYSTEM]\n…\n\n[USER]\n…\n\n[RESPONSE]\n).
-        # Base-model calls keep /v1/chat/completions with the model's native template.
         finish_reason: str = "stop"
         raw_tool_calls = None
         try:
             if using_adapter:
-                payload = {
-                    "model":       effective_model,
-                    "prompt":      _build_adapter_prompt(messages),
-                    "max_tokens":  request.max_tokens,
-                    "temperature": request.temperature,
-                    "top_p":       request.top_p,
-                    "stop":        _ADAPTER_STOP_TOKENS,
-                }
-                resp = await self._client.post(
-                    f"{self._base_url}/v1/completions",
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
+                tool_call_style = _get_adapter_tool_call_style(effective_model)
+                use_legacy_path = (tool_call_style == "none")
+                logger.info(
+                    "LocalVLLM adapter_dispatch adapter=%s tool_call_style=%s legacy=%s",
+                    effective_model, tool_call_style, use_legacy_path,
                 )
-                resp.raise_for_status()
-                data = resp.json()
-                finish_reason = data["choices"][0].get("finish_reason", "stop")
-                content = _fix_bpe_artifacts(data["choices"][0]["text"])
+                if use_legacy_path:
+                    payload = {
+                        "model":       effective_model,
+                        "prompt":      _build_adapter_prompt(messages),
+                        "max_tokens":  request.max_tokens,
+                        "temperature": request.temperature,
+                        "top_p":       request.top_p,
+                        "stop":        _ADAPTER_STOP_TOKENS,
+                    }
+                    resp = await self._client.post(
+                        f"{self._base_url}/v1/completions",
+                        json=payload,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    finish_reason = data["choices"][0].get("finish_reason", "stop")
+                    content = _fix_bpe_artifacts(data["choices"][0]["text"])
+                else:
+                    payload = {
+                        "model":       effective_model,
+                        "messages":    messages,
+                        "max_tokens":  request.max_tokens,
+                        "temperature": request.temperature,
+                        "top_p":       request.top_p,
+                    }
+                    if request.tools:
+                        payload["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
+                        payload["tool_choice"] = "auto"
+                    resp = await self._client.post(
+                        f"{self._base_url}/v1/chat/completions",
+                        json=payload,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    msg = data["choices"][0]["message"]
+                    finish_reason = data["choices"][0].get("finish_reason", "stop")
+                    raw_tool_calls = msg.get("tool_calls") or None
+                    content = _fix_bpe_artifacts(msg.get("content") or "")
             else:
                 payload = {
                     "model":       effective_model,
@@ -440,22 +492,37 @@ class LocalVLLMBackend(InferenceBackend):
         messages = [m.model_dump(exclude_none=True) for m in request.messages]
         using_adapter = effective_model != self._model_id
 
-        # Adapter calls use /v1/completions with the canonical prompt string so
-        # the input matches the training format byte-for-byte.  Base-model fallback
-        # (no adapter for this role yet) keeps /v1/chat/completions with the
-        # model's native chat template.  Once every role has a trained adapter
-        # this else-branch can be removed to unify on /v1/completions.
         if using_adapter:
-            stream_payload: dict = {
-                "model":       effective_model,
-                "prompt":      _build_adapter_prompt(messages),
-                "max_tokens":  request.max_tokens,
-                "temperature": request.temperature,
-                "top_p":       request.top_p,
-                "stop":        _ADAPTER_STOP_TOKENS,
-                "stream":      True,
-            }
-            stream_endpoint = f"{self._base_url}/v1/completions"
+            tool_call_style = _get_adapter_tool_call_style(effective_model)
+            use_legacy_path = (tool_call_style == "none")
+            logger.info(
+                "LocalVLLM stream adapter_dispatch adapter=%s tool_call_style=%s legacy=%s",
+                effective_model, tool_call_style, use_legacy_path,
+            )
+            if use_legacy_path:
+                stream_payload: dict = {
+                    "model":       effective_model,
+                    "prompt":      _build_adapter_prompt(messages),
+                    "max_tokens":  request.max_tokens,
+                    "temperature": request.temperature,
+                    "top_p":       request.top_p,
+                    "stop":        _ADAPTER_STOP_TOKENS,
+                    "stream":      True,
+                }
+                stream_endpoint = f"{self._base_url}/v1/completions"
+            else:
+                stream_payload = {
+                    "model":       effective_model,
+                    "messages":    messages,
+                    "max_tokens":  request.max_tokens,
+                    "temperature": request.temperature,
+                    "top_p":       request.top_p,
+                    "stream":      True,
+                }
+                if request.tools:
+                    stream_payload["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
+                    stream_payload["tool_choice"] = "auto"
+                stream_endpoint = f"{self._base_url}/v1/chat/completions"
         else:
             stream_payload = {
                 "model":       effective_model,

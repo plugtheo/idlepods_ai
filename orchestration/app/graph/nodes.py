@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional
 
 from shared.contracts.inference import GenerateRequest, Message
 from shared.contracts.models import load_registry
+from shared.contracts.agent_prompts import PLAN_STEP_SYSTEM_TEMPLATE
 from ..clients.inference import get_inference_client
 from ..config.settings import AGENT_PROMPTS, settings
 from ..tools.runner import build_tool_schemas, execute_tool_call
@@ -206,6 +207,23 @@ def _build_messages(
     repo_used          = 0
 
     messages: List[Message] = [system_msg]
+
+    # ── Plan-step context (extra system message — never concatenated into base prompt) ──
+    current_step_id = state.get("current_step_id")
+    if current_step_id and role in ("coder", "debugger"):
+        plan_dict = state.get("plan") or {}
+        step_desc = next(
+            (s["description"] for s in plan_dict.get("steps", []) if s["id"] == current_step_id),
+            "",
+        )
+        if step_desc:
+            messages.append(Message(
+                role="system",
+                content=PLAN_STEP_SYSTEM_TEMPLATE.format(
+                    current_step_id=current_step_id,
+                    current_step_description=step_desc,
+                ),
+            ))
 
     # ── Few-shot block ────────────────────────────────────────────────────
     if few_shots and fewshot_budget_cap > 0:
@@ -460,7 +478,74 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
 
 
 async def planner_node(state: AgentState) -> dict:
-    return await _run_agent_node("planner", state)
+    plan_dict = state.get("plan")
+
+    if plan_dict:
+        # Plan already exists — find the next pending step and mark in_progress.
+        steps = plan_dict.get("steps", [])
+        next_step = next((s for s in steps if s["status"] == "pending"), None)
+        if next_step is None:
+            # All steps done or blocked — let the pipeline continue.
+            return await _run_agent_node("planner", state)
+
+        import copy
+        from datetime import datetime, timezone as _tz
+        updated = copy.deepcopy(plan_dict)
+        for s in updated["steps"]:
+            if s["id"] == next_step["id"]:
+                s["status"] = "in_progress"
+                break
+        updated["updated_at"] = datetime.now(_tz.utc).isoformat()
+        step_id = next_step["id"]
+        desc = next_step["description"]
+        return {
+            "plan": updated,
+            "plan_changed": True,
+            "current_step_id": step_id,
+            "last_output": f"[planner] advancing to {step_id}: {desc}",
+            "agent_chain_index": state.get("agent_chain_index", 0) + 1,
+        }
+
+    # No plan yet — run LLM to produce one, then try to parse it.
+    delta = await _run_agent_node("planner", state)
+    output = delta.get("last_output", "")
+    parsed = _try_parse_plan_output(output)
+    if parsed:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            from ..plans.schema import Plan
+            now_iso = _dt.now(_tz.utc).isoformat()
+            parsed.setdefault("created_at", now_iso)
+            parsed.setdefault("updated_at", now_iso)
+            plan = Plan.model_validate(parsed)
+            delta["plan"] = plan.model_dump(mode="json")
+            delta["plan_changed"] = True
+        except Exception as exc:
+            logger.warning("planner: plan parse succeeded but validation failed: %s", exc)
+    return delta
+
+
+def _try_parse_plan_output(output: str) -> dict | None:
+    """Opportunistic JSON plan extraction from planner output. Returns None on failure."""
+    import json as _json
+    import re as _re
+
+    # Try ```json ... ``` fence first
+    m = _re.search(r"```json\s*(.*?)\s*```", output, _re.DOTALL)
+    if m:
+        try:
+            return _json.loads(m.group(1))
+        except _json.JSONDecodeError:
+            pass
+
+    # Try bare object with "goal" and "steps" keys
+    m = _re.search(r"\{[^{}]*\"goal\"[^{}]*\"steps\".*\}", output, _re.DOTALL)
+    if m:
+        try:
+            return _json.loads(m.group(0))
+        except _json.JSONDecodeError:
+            pass
+    return None
 
 
 async def researcher_node(state: AgentState) -> dict:
@@ -468,11 +553,47 @@ async def researcher_node(state: AgentState) -> dict:
 
 
 async def coder_node(state: AgentState) -> dict:
-    return await _run_agent_node("coder", state)
+    delta = await _run_agent_node("coder", state)
+    return _maybe_update_plan_step(state, delta)
 
 
 async def debugger_node(state: AgentState) -> dict:
-    return await _run_agent_node("debugger", state)
+    delta = await _run_agent_node("debugger", state)
+    return _maybe_update_plan_step(state, delta)
+
+
+def _maybe_update_plan_step(state: AgentState, delta: dict) -> dict:
+    """Opportunistically mark the current plan step done/blocked based on output."""
+    import copy as _copy
+    import re as _re
+    from datetime import datetime, timezone as _tz
+
+    step_id = state.get("current_step_id")
+    plan_dict = state.get("plan")
+    if not step_id or not plan_dict:
+        return delta
+
+    output = delta.get("last_output", "")
+    blocked_m = _re.search(r"\[BLOCKED:([^\]]*)\]", output)
+
+    updated = _copy.deepcopy(plan_dict)
+    changed = False
+    for step in updated.get("steps", []):
+        if step["id"] == step_id:
+            if blocked_m:
+                step["status"] = "blocked"
+                step["evidence"] = blocked_m.group(1).strip()
+                changed = True
+            elif step["status"] == "in_progress":
+                step["status"] = "done"
+                changed = True
+            break
+
+    if changed:
+        updated["updated_at"] = datetime.now(_tz.utc).isoformat()
+        delta["plan"] = updated
+        delta["plan_changed"] = True
+    return delta
 
 
 async def reviewer_node(state: AgentState) -> dict:
@@ -511,8 +632,21 @@ async def review_critic_node(state: AgentState) -> dict:
 async def consensus_node(state: AgentState) -> dict:
     """Final synthesis node — produces the definitive answer for the user."""
     delta = await _run_agent_node("consensus", state)
-    # The consensus output is the final answer
     consensus_output = delta.get("last_output", state.get("best_output", ""))
+
+    # Append remaining-work section when plan steps are still pending/blocked.
+    plan_dict = state.get("plan")
+    if plan_dict:
+        remaining = [
+            s for s in plan_dict.get("steps", [])
+            if s["status"] in ("pending", "blocked")
+        ]
+        if remaining:
+            lines = ["\n\n---\n**Remaining work:**"]
+            for s in remaining:
+                lines.append(f"- [{s['status']}] {s['id']}: {s['description']}")
+            consensus_output = consensus_output + "\n".join(lines)
+
     delta["final_output"] = consensus_output
     delta["final_score"] = state.get("best_score", 0.0)
     return delta
