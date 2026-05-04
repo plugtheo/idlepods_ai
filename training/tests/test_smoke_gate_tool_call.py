@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from shared.contracts.training import AdapterRecipe
-from training.training.smoke_gate import run_smoke, _tool_call_shape_ok
+from training.bootstrap.smoke_gate import run_smoke, _tool_call_shape_ok
 
 
 def _make_recipe(tool_call_style="openai_native"):

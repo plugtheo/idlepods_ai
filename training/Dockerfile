@@ -28,8 +28,11 @@ RUN echo 'GROUP ( AS_NEEDED ( libcuda.so.1 ) )' > \
 
 COPY shared/ /app/shared/
 COPY training/app/ /app/services/training/app/
-# Include the monolith trainer so trainer_entry.py can import it
-COPY training/training/ /app/training/
+# training/__init__.py makes `training` a proper package so
+# `from training.bootstrap.lora_trainer import` resolves in the container.
+COPY training/__init__.py /app/training/__init__.py
+# Bootstrap scripts (train_gpu_simple.py, lora_trainer.py, etc.)
+COPY training/bootstrap/ /app/training/bootstrap/
 COPY training/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

@@ -33,19 +33,20 @@ from typing import Any, Dict, List, Tuple
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
+# Repo root must be on sys.path before lora_trainer is imported because
+# lora_trainer.py imports shared.* at module level.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 # lora_trainer.py and generate_data.py live in the same directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from generate_data import generate_datasets, TARGET_DIR as DATA_DIR
 from lora_trainer import LoRATrainer, _pre_train_backup, _post_train_version
-
-# Add repo root to sys.path so shared/ is importable (mirrors the Docker PYTHONPATH=/app).
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 from shared.contracts.agent_prompts import AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE
 from shared.contracts.training import lookup_recipe
 from shared.contracts.experience import AgentContribution
-from orchestration.app.experience.sft_builder import build_sft_pair
+from shared.contracts.sft_builder import build_sft_pair
 
 # ---------------------------------------------------------------------------
 # Agent capability → (base model id, system description)
@@ -54,7 +55,11 @@ from orchestration.app.experience.sft_builder import build_sft_pair
 def _resolve_base_model_id() -> str:
     from shared.contracts.models import load_registry
     registry = load_registry()
-    return registry.backends[registry.default_backend].model_id
+    backend = registry.backends[registry.default_backend]
+    # Prefer training_model_id (non-quantized base) over model_id (AWQ/quantized inference model).
+    # Unsloth applies its own 4-bit quantization; training on an already-quantized model
+    # produces incorrect adapter weights.
+    return backend.training_model_id or backend.model_id
 
 
 def _resolve_local_model_path(model_id: str) -> str:
@@ -232,6 +237,9 @@ async def train_capability(
         shutil.rmtree(save_path)
         has_existing = False
 
+    # ── Resolve recipe ───────────────────────────────────────────────────────
+    recipe = _resolve_recipe(capability)
+
     # ── Prepare dataset JSONL ────────────────────────────────────────────────
     pairs = load_sft_pairs(capability, system_prompt, recipe)
     if not pairs:
@@ -252,9 +260,6 @@ async def train_capability(
     old_version, backup_path = _pre_train_backup(save_path, capability)
     if backup_path:
         print(f"  [BACKUP] v{old_version} → {backup_path.name}")
-
-    # ── Resolve recipe ───────────────────────────────────────────────────────
-    recipe = _resolve_recipe(capability)
 
     # ── Train via LoRATrainer ────────────────────────────────────────────────
     try:

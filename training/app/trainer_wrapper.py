@@ -56,7 +56,8 @@ def _base_model_for(role: str) -> str:
     from shared.contracts.models import load_registry
     try:
         registry = load_registry(settings.models_yaml_path)
-        return registry.backends[registry.default_backend].model_id
+        backend = registry.backends[registry.default_backend]
+        return backend.training_model_id or backend.model_id
     except Exception as exc:
         raise RuntimeError(f"Cannot resolve base model from registry: {exc}") from exc
 

@@ -8,12 +8,7 @@
     - Do NOT perform any full file reads automatically. If deeper analysis is required, list candidate files and ask the user for explicit permission.
     - Do not modify any files.
     Tasks:
-    - Replace static --lora-modules with runtime adapter lifecycle registry + dynamic load + smoke gate (after trainer writes checkpoint: run smoke test with canonical prompts per role, validate structure/no artifacts, only then dynamic load + registry update, keep previous adapter until verified)
-    - Build adapter version registry with rollback (persistent manifest with checkpoint path, timestamp, smoke results, eval scores, active/retired status)
-    Instructions:
-    - Begin with lightweight searches ONLY (grep, symbol, tree).
-    - Identify the smallest set of potentially relevant files from these searches.
-    - If lightweight results are insufficient to fully understand control flow, mutex logic, queuing, or state management for accurate diagnosis, list the specific additional files (in priority order, max 5) you believe need full reads.
+    - 
     - Output exactly:
       - Bullet list of action plan + critical observations/risks (based only on lightweight searches)
       - Files identified so far (no edits)

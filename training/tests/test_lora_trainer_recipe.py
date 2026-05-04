@@ -58,9 +58,9 @@ def test_apply_recipe_calls_get_peft_model(peft_type, use_rslora, use_dora):
     model = _make_mock_model()
 
     # Force re-import after injecting mock.
-    if "training.training.lora_trainer" in sys.modules:
-        del sys.modules["training.training.lora_trainer"]
-    from training.training.lora_trainer import apply_recipe
+    if "training.bootstrap.lora_trainer" in sys.modules:
+        del sys.modules["training.bootstrap.lora_trainer"]
+    from training.bootstrap.lora_trainer import apply_recipe
     result = apply_recipe(model, recipe)
 
     mock_flm.get_peft_model.assert_called_once()
@@ -75,9 +75,9 @@ def test_apply_recipe_calls_get_peft_model(peft_type, use_rslora, use_dora):
 
 def test_apply_recipe_fails_on_missing_target_module():
     _inject_unsloth()
-    if "training.training.lora_trainer" in sys.modules:
-        del sys.modules["training.training.lora_trainer"]
-    from training.training.lora_trainer import apply_recipe
+    if "training.bootstrap.lora_trainer" in sys.modules:
+        del sys.modules["training.bootstrap.lora_trainer"]
+    from training.bootstrap.lora_trainer import apply_recipe
 
     recipe = _make_recipe(target_modules=["nonexistent_proj"])
     model = _make_mock_model(modules=["q_proj", "k_proj"])

@@ -661,13 +661,45 @@ def load_debugging(target: int = _CAP_MAX.get("debugging", MAX_SAMPLES)) -> List
     samples: List[Dict] = []
 
     # --- m-a-p/CodeFeedback-Filtered-Instruction  (MIT, real error diagnosis & fixing) ---
+    # No keyword gate here — this dataset is already curated for bug-fix tasks.
+    # Applying DEBUG_KEYWORDS on top discards the majority of valid samples because
+    # real fix instructions say "Fix this" / "Why does this crash" rather than
+    # containing explicit keywords like "traceback" or "segfault".
     try:
         ds = load_dataset("m-a-p/CodeFeedback-Filtered-Instruction",
                           split="train", trust_remote_code=True)
         added = 0
         for row in ds:
-            # CodeFeedback schema: {"query": ..., "answer": ...}
             r = _norm(row, inst_key="query", resp_key="answer")
+            if r:
+                r = _normalize_text(r)
+                if (_has_code(r["response"])
+                        and _has_min_code_lines(r["response"])
+                        and _is_clean(r)):
+                    wrapped = _wrap_debugger_format(r["instruction"], r["response"])
+                    if not wrapped:
+                        continue
+                    r["response"] = wrapped
+                    r.update(source="CodeFeedback-Filtered-Instruction", capability="debugging")
+                    samples.append(r)
+                    added += 1
+                    if added >= 6_000:
+                        break
+        print(f"  CodeFeedback-Filtered-Instruction: +{added} → {len(samples)} total")
+    except Exception as e:
+        print(f"  [WARN] CodeFeedback-Filtered-Instruction: {e}")
+
+    # --- nampdn-ai/stack-exchange-instruction  (CC-BY-SA-4.0, real SO bug-fix Q&A) ---
+    # Human-authored: real developers asking about real crashes, errors, and broken code.
+    # Keyword-filtered to debugging domain since this is a general SO dump.
+    try:
+        ds = load_dataset("nampdn-ai/stack-exchange-instruction",
+                          split="train", trust_remote_code=True)
+        added = 0
+        for row in ds:
+            r = _norm(row, inst_key="question", resp_key="response")
+            if not r:
+                r = _norm(row, inst_key="instruction", resp_key="response")
             if r:
                 r = _normalize_text(r)
                 if (_keyword_match(r["instruction"], DEBUG_KEYWORDS)
@@ -675,17 +707,17 @@ def load_debugging(target: int = _CAP_MAX.get("debugging", MAX_SAMPLES)) -> List
                         and _has_min_code_lines(r["response"])
                         and _is_clean(r)):
                     wrapped = _wrap_debugger_format(r["instruction"], r["response"])
-                    if not wrapped:  # reject if no ISSUE line or no code
+                    if not wrapped:
                         continue
                     r["response"] = wrapped
-                    r.update(source="CodeFeedback-Filtered-Instruction", capability="debugging")
+                    r.update(source="stack-exchange-instruction", capability="debugging")
                     samples.append(r)
                     added += 1
-                    if added >= 5_000:
+                    if added >= 3_000:
                         break
-        print(f"  CodeFeedback-Filtered-Instruction: +{added} → {len(samples)} total")
+        print(f"  stack-exchange-instruction (debug slice): +{added} → {len(samples)} total")
     except Exception as e:
-        print(f"  [WARN] CodeFeedback-Filtered-Instruction: {e}")
+        print(f"  [WARN] stack-exchange-instruction debug: {e}")
 
     # --- code_instructions_122k — debug/fix subset ---
     try:
@@ -707,7 +739,7 @@ def load_debugging(target: int = _CAP_MAX.get("debugging", MAX_SAMPLES)) -> List
                     r.update(source="code_instructions_122k", capability="debugging")
                     samples.append(r)
                     added += 1
-                    if added >= 5_000:
+                    if added >= 3_000:
                         break
         print(f"  code_instructions_122k (debug slice): +{added} → {len(samples)} total")
     except Exception as e:
@@ -782,6 +814,9 @@ def load_review(target: int = MAX_SAMPLES) -> List[Dict]:
         print(f"  [WARN] Magicoder-Evol-Instruct-110K review: {e}")
 
     # --- CodeFeedback-Filtered-Instruction  (MIT, code feedback/improvement slice) ---
+    # No keyword gate — CodeFeedback is already a code-quality feedback dataset.
+    # REVIEW_KEYWORDS on top discards most samples because instructions phrase
+    # feedback requests as "Improve this" or "What's wrong" not "review" or "refactor".
     try:
         ds = load_dataset("m-a-p/CodeFeedback-Filtered-Instruction",
                           split="train", trust_remote_code=True)
@@ -790,15 +825,15 @@ def load_review(target: int = MAX_SAMPLES) -> List[Dict]:
             r = _norm(row, inst_key="query", resp_key="answer")
             if r:
                 r = _normalize_text(r)
-                if _keyword_match(r["instruction"], REVIEW_KEYWORDS) and _is_clean(r):
+                if _is_clean(r):
                     wrapped = _wrap_reviewer_format(r["response"])
-                    if not wrapped:    # H4: reject samples that fail format gate
+                    if not wrapped:
                         continue
                     r["response"] = wrapped
                     r.update(source="CodeFeedback-Filtered-Instruction", capability="review")
                     samples.append(r)
                     added += 1
-                    if added >= 4_000:
+                    if added >= 5_000:
                         break
         print(f"  CodeFeedback-Filtered-Instruction (review slice): +{added} → {len(samples)} total")
     except Exception as e:

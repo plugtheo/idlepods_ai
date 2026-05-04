@@ -3,7 +3,7 @@ import pytest
 
 from shared.contracts.experience import AgentContribution
 from shared.contracts.training import AdapterRecipe
-from orchestration.app.experience.sft_builder import build_sft_pair
+from shared.contracts.sft_builder import build_sft_pair
 
 
 def _make_contribution(**kwargs) -> AgentContribution:

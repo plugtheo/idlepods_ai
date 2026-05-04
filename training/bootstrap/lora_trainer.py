@@ -590,13 +590,25 @@ class LoRATrainer:
         self.HAS_UNSLOTH = self._check_unsloth()
     
     def _check_unsloth(self) -> bool:
-        """Check if Unsloth is available"""
         try:
-            import unsloth
+            import unsloth  # noqa: F401
             print("[TRAINER] [OK] Unsloth available (2-5x faster LoRA training)")
             return True
-        except (ImportError, NotImplementedError):
-            print("[TRAINER] [INFO] Unsloth not available, using CPU training mode")
+        except (ImportError, NotImplementedError, Exception):
+            print("[TRAINER] [INFO] Unsloth not available — will use HF PEFT fallback")
+            return False
+
+    def _check_peft_gpu(self) -> bool:
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return False
+            import transformers  # noqa: F401
+            import peft  # noqa: F401
+            import trl  # noqa: F401
+            print("[TRAINER] [OK] HF PEFT+TRL available — GPU training without Unsloth")
+            return True
+        except ImportError:
             return False
     
     async def train(self,
@@ -656,6 +668,8 @@ class LoRATrainer:
         
         if self.HAS_UNSLOTH:
             return await self._train_unsloth(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe)
+        elif self._check_peft_gpu():
+            return await self._train_peft(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe)
         else:
             return await self._train_mock(dataset, num_epochs)
 
@@ -808,7 +822,123 @@ class LoRATrainer:
             # Service can record the failure accurately.
             raise
     
-    async def _train_mock(self, 
+    async def _train_peft(self,
+                          dataset: List[Dict],
+                          num_epochs: int,
+                          learning_rate: float,
+                          lora_rank: int,
+                          lora_alpha: int,
+                          recipe: Optional[AdapterRecipe] = None) -> Dict[str, Any]:
+        """Real GPU training via HuggingFace PEFT + TRL (no Unsloth dependency).
+
+        Used when Unsloth is unavailable (e.g. Windows triton incompatibility).
+        Slower than Unsloth (~2x) but produces identical adapter weights.
+        """
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        from trl import SFTTrainer, SFTConfig
+        from datasets import Dataset as HFDataset
+
+        print("\n[TRAINER] HF PEFT training (GPU, no Unsloth)...")
+
+        _lora_rank  = recipe.r      if recipe else lora_rank
+        _lora_alpha = recipe.alpha  if recipe else lora_alpha
+        _dropout    = recipe.dropout if recipe else 0.05
+        _modules    = recipe.target_modules if recipe else _ADAPTER_TARGET_MODULES
+
+        bnb_cfg = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+
+        print(f"[TRAINER] Loading base model: {self.base_model}")
+        model = AutoModelForCausalLM.from_pretrained(
+            self.base_model,
+            quantization_config=bnb_cfg,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(self.base_model, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        model = prepare_model_for_kbit_training(model)
+        lora_cfg = LoraConfig(
+            r=_lora_rank,
+            lora_alpha=_lora_alpha,
+            target_modules=_modules,
+            lora_dropout=_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            use_rslora=getattr(recipe, "use_rslora", False) if recipe else False,
+        )
+        model = get_peft_model(model, lora_cfg)
+        model.print_trainable_parameters()
+
+        train_dataset = HFDataset.from_list(dataset)
+
+        sft_config = SFTConfig(
+            per_device_train_batch_size=2,
+            gradient_accumulation_steps=4,
+            warmup_steps=100,
+            num_train_epochs=num_epochs,
+            learning_rate=learning_rate,
+            fp16=False,
+            bf16=True,
+            logging_steps=10,
+            optim="adamw_8bit",
+            weight_decay=0.01,
+            lr_scheduler_type="linear",
+            output_dir=str(self.output_dir / "checkpoint"),
+            max_seq_length=self.max_seq_length,
+            completion_only_loss=True,
+            save_strategy="no",
+            packing=False,
+            report_to="none",
+        )
+
+        trainer = SFTTrainer(
+            model=model,
+            processing_class=tokenizer,
+            train_dataset=train_dataset,
+            args=sft_config,
+        )
+
+        print("[TRAINER] Starting HF PEFT training...")
+        trainer.train()
+
+        model.save_pretrained(str(self.output_dir))
+        tokenizer.save_pretrained(str(self.output_dir))
+
+        weight_file = self.output_dir / "adapter_model.safetensors"
+        if not weight_file.exists():
+            weight_file = self.output_dir / "adapter_model.bin"
+        size_mb = round(weight_file.stat().st_size / 1e6, 2) if weight_file.exists() else 0.0
+
+        final_loss = 0.0
+        if hasattr(trainer, "state") and trainer.state.log_history:
+            for entry in reversed(trainer.state.log_history):
+                if "loss" in entry:
+                    final_loss = float(entry["loss"])
+                    break
+
+        self.adapter_id = self.output_dir.name
+        print(f"[TRAINER] HF PEFT training complete — loss={final_loss:.4f}  size={size_mb:.1f}MB")
+        return {
+            "status":     "success",
+            "adapter_id": self.adapter_id,
+            "method":     "hf_peft",
+            "epochs":     num_epochs,
+            "samples":    len(dataset),
+            "lora_rank":  _lora_rank,
+            "size_mb":    size_mb,
+            "final_loss": round(final_loss, 6),
+        }
+
+    async def _train_mock(self,
                          dataset: List[Dict],
                          num_epochs: int) -> Dict[str, Any]:
         """

@@ -43,7 +43,7 @@ def _reload_trainer():
     for mod in list(sys.modules.keys()):
         if "lora_trainer" in mod:
             del sys.modules[mod]
-    from training.training.lora_trainer import LoRATrainer
+    from training.bootstrap.lora_trainer import LoRATrainer
     return LoRATrainer
 
 
@@ -119,7 +119,7 @@ def test_promote_to_active_uses_recipe_sft_format(tmp_path):
     import json as _json
     from datetime import datetime, timezone
 
-    from training.training.lora_trainer import _promote_to_active, _ADAPTER_TARGET_MODULES
+    from training.bootstrap.lora_trainer import _promote_to_active, _ADAPTER_TARGET_MODULES
 
     adapter_name = "coding_lora"
     checkpoint_dir = tmp_path

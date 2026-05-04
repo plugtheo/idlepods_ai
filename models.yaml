@@ -3,6 +3,7 @@ backends:
   primary:
     served_url: http://vllm-primary:8000
     model_id: Qwen/Qwen3-8B-AWQ
+    training_model_id: Qwen/Qwen3-8B   # base model for LoRA training (Unsloth applies its own 4-bit)
     max_model_len: 40960
     quantization: awq_marlin
     chat_template_supports_tools: true

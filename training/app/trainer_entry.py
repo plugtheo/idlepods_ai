@@ -64,9 +64,9 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from shared.contracts.experience import AgentContribution
-from orchestration.app.experience.sft_builder import build_sft_pair
+from shared.contracts.sft_builder import build_sft_pair
 
-from training.training.lora_trainer import (
+from training.bootstrap.lora_trainer import (
     LoRATrainer,
     _pre_train_backup,
     _post_train_version,
@@ -74,7 +74,7 @@ from training.training.lora_trainer import (
     _promote_to_active,
     _mark_failed,
 )
-from training.training.smoke_gate import run_smoke
+from training.bootstrap.smoke_gate import run_smoke
 from shared.contracts.training import AdapterRecipe, lookup_recipe
 
 # System prompts — imported from the single source of truth so that training and

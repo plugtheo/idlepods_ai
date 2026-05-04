@@ -19,6 +19,7 @@ __all__ = ["BackendEntry", "ModelsRegistry", "load_registry", "get_backend_entry
 class BackendEntry(BaseModel):
     served_url: str
     model_id: str
+    training_model_id: Optional[str] = None  # base model for LoRA training; falls back to model_id
     max_model_len: int = 4096
     quantization: Optional[str] = None
     chat_template_supports_tools: bool = True
