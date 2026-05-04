@@ -48,12 +48,17 @@ class AdapterRecipe(BaseModel):
     ])
     use_rslora: bool = False
     use_dora: bool = False
+    resume_from_prev_adapter: bool = False
+    # Optional path to a synthetic-data JSONL for this role.  Mixed in with
+    # experience + curated pairs in trainer_entry.py.  Future synthesis pipeline
+    # writes here; missing/empty path is a no-op so this is safe to ship now.
+    synthetic_dataset_path: Optional[str] = None
     loftq_config: Optional[Dict[str, Any]] = None
     load_in_4bit: bool = False
     learning_rate: float = 2e-4
     num_epochs: int = 3
     max_seq_length: int = 2048
-    sft_format: Literal["openai_messages", "legacy_response_marker"] = "openai_messages"
+    sft_format: Literal["openai_messages"] = "openai_messages"
     tool_call_style: Literal["openai_native", "hermes", "none"] = "openai_native"
     tokenizer_pre_tokenizer: Optional[Literal["bytelevel", "metaspace"]] = None
 

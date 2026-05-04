@@ -261,6 +261,17 @@ async def train_capability(
     if backup_path:
         print(f"  [BACKUP] v{old_version} → {backup_path.name}")
 
+    # Warm-start: re-load prior adapter weights as the LoRA starting point so
+    # bootstrap re-runs (without --fresh) refine the existing adapter instead
+    # of training from scratch.  Opt-in via recipes.yaml: resume_from_prev_adapter: true
+    resume_from_checkpoint = (
+        str(backup_path)
+        if (getattr(recipe, "resume_from_prev_adapter", False) and backup_path)
+        else None
+    )
+    if resume_from_checkpoint:
+        print(f"  [WARM-START] Resuming from {backup_path.name}")
+
     # ── Train via LoRATrainer ────────────────────────────────────────────────
     try:
         trainer = LoRATrainer(base_model=model_id, output_dir=str(save_path))
@@ -271,6 +282,7 @@ async def train_capability(
             lora_rank=recipe.r,
             lora_alpha=recipe.alpha,
             recipe=recipe,
+            resume_from_checkpoint=resume_from_checkpoint,
         )
     finally:
         dataset_path.unlink(missing_ok=True)

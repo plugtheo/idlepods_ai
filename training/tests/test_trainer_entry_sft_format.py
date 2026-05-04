@@ -67,24 +67,6 @@ def test_openai_messages_emits_messages_key(tmp_path):
     assert roles[-1] == "assistant"
 
 
-def test_legacy_response_marker_emits_prompt_completion(tmp_path):
-    record = _make_experience_record()
-    data_file = tmp_path / "data.jsonl"
-    _write_jsonl(data_file, [record])
-    recipe = _make_recipe(sft_format="legacy_response_marker")
-
-    pairs = _call_load_sft_pairs(data_file, "coder", recipe)
-
-    assert len(pairs) >= 1
-    pair = pairs[0]
-    assert "prompt" in pair and "completion" in pair, \
-        "legacy_response_marker must have 'prompt' and 'completion' keys"
-    assert "messages" not in pair
-    assert "[SYSTEM]" in pair["prompt"]
-    assert "[RESPONSE]" in pair["prompt"]
-    assert pair["completion"] == "def hello(): return 'hi'"
-
-
 def test_fallback_record_openai_messages(tmp_path):
     """Records without per-contribution messages fall back to top-level prompt/output."""
     record = {

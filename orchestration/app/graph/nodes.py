@@ -383,6 +383,7 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
 
     request = GenerateRequest(**request_kwargs)
 
+    failed = False
     response = None
     try:
         client = get_inference_client()
@@ -418,6 +419,7 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
     except Exception as exc:
         logger.error("[%s] Inference failed for role=%s: %s", session_id[:8], role, exc)
         output = f"[{role} agent unavailable: {exc}]"
+        failed = True
 
     # Post-generation validator: prevent downstream agents seeing garbage output.
     # full_output retains the original so the convergence scorer still operates
@@ -426,9 +428,12 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
     # turn legitimately has empty/short content (the payload lives in tool_calls,
     # not text), so prose-oriented checks like short_text don't apply.
     has_tool_calls = response is not None and response.tool_calls
+    validator_failed = False
+    display_output = output
+    
     if has_tool_calls:
         display_output = output
-    else:
+    if not failed and not has_tool_calls:
         _valid, _reasons = validate_output(output, role)
         if not _valid:
             logger.warning(
@@ -436,6 +441,7 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
                 session_id[:8], current_iteration, role, _reasons,
             )
             display_output = f"[VALIDATOR_FAIL:{';'.join(_reasons)}]"
+            validator_failed = True
         else:
             display_output = output
 
@@ -452,6 +458,8 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
         "messages": [m.model_dump() for m in messages],  # full prompt sent to LLM — SFT training pair
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
         "used_base_fallback": getattr(response, "used_base_fallback", False),
+        "failed": failed,
+        "validator_failed": validator_failed,
     }
 
     updated_history = list(state.get("iteration_history", [])) + [history_entry]

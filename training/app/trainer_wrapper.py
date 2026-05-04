@@ -63,13 +63,8 @@ def _base_model_for(role: str) -> str:
 
 
 def _run_local(records: list[dict]) -> None:
-    training_records = to_training_records(records)
-    if not training_records:
-        log.info("No quality-filtered records — skipping local training")
-        return
-
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as tmp:
-        for rec in training_records:
+        for rec in records:
             tmp.write(json.dumps(rec) + "\n")
         tmp_path = tmp.name
 

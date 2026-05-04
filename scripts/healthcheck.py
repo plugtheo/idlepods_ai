@@ -414,8 +414,6 @@ if trainer_path.exists():
     _record("trainer", "trainer_version computed", "trainer_version" in content)
     _record("trainer", "recipe.sft_format read from metadata (no chatml literal)",
             '"chatml"' not in content and "'chatml'" not in content)
-    _record("trainer", "legacy [RESPONSE] wrap is guarded by sft_format check",
-            "legacy_response_marker" in content)
 else:
     _record("trainer", "lora_trainer.py exists", False, "file missing")
 

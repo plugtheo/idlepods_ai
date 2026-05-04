@@ -22,13 +22,12 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import List
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from shared.contracts.context import BuiltContext
-from shared.contracts.experience import AgentContribution, ExperienceEvent, SCORER_RULE_VERSION
+from shared.contracts.experience import ExperienceEvent, SCORER_RULE_VERSION
 from shared.contracts.orchestration import (
     AgentStep,
     OrchestrationRequest,
@@ -199,46 +198,6 @@ def _trim_conversation_history(history: list, max_tokens: int) -> list:
     return list(reversed(result))
 
 
-def _build_contributions(history: list) -> List[AgentContribution]:
-    """
-    Build a list of AgentContribution objects from the pipeline history.
-
-    role='tool' entries are execution scaffolding — they are skipped here and
-    instead surfaced via tool_turns on the preceding agent contribution.
-    """
-    contributions = []
-    for i, h in enumerate(history):
-        role = h.get("role", "")
-        if role == "tool":
-            continue
-
-        tool_turns = None
-        if "tool_calls" in h:
-            tool_turns = [{"role": "assistant", "tool_calls": h["tool_calls"], "content": None}]
-            j = i + 1
-            while j < len(history) and history[j].get("role") == "tool":
-                t = history[j]
-                tool_turns.append({
-                    "role": "tool",
-                    "tool_call_id": t.get("tool_call_id", ""),
-                    "name": t.get("name", ""),
-                    "content": t.get("output", ""),
-                })
-                j += 1
-
-        contributions.append(
-            AgentContribution(
-                role=role,
-                output=str(h.get("full_output") or h.get("output", "")),
-                quality_score=score_per_entry(h),
-                iteration=h.get("iteration", 1),
-                messages=h.get("messages"),
-                tool_turns=tool_turns,
-            )
-        )
-    return contributions
-
-
 def _maybe_writeback_plan(
     final_state: AgentState,
     initial_state: AgentState,
@@ -377,7 +336,7 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
             prompt=request.prompt,
             final_output=final_output,
             agent_chain=agent_chain,
-            contributions=_build_contributions(history),
+            contributions=recorder._build_contributions(history),
             final_score=best_score,
             iterations=iterations_ran,
             converged=converged,
@@ -551,7 +510,7 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                             prompt=request.prompt,
                             final_output=final_output,
                             agent_chain=agent_chain,
-                            contributions=_build_contributions(history),
+                            contributions=recorder._build_contributions(history),
                             final_score=best_score,
                             iterations=iterations_ran,
                             converged=converged,

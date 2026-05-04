@@ -14,99 +14,58 @@ Invariants:
 - ChromaDB upsert failure is logged as a warning; JSONL write still completed.
 """
 
-from __future__ import annotations
-
 import logging
-
-from typing import Any, Dict, List
+from typing import List
 
 from shared.contracts.experience import AgentContribution, ExperienceEvent
 from . import jsonl_store, vector_store
+from ..utils.scoring import score_per_entry
 
 logger = logging.getLogger(__name__)
 
 
-def _infer_capability(agent_chain: list[str]) -> str:
-    """Map the dominant agent in the chain to a capability label string."""
-    priority = [
-        ("coder",      "coding"),
-        ("debugger",   "debugging"),
-        ("researcher", "research"),
-        ("planner",    "planning"),
-        ("reviewer",   "review"),
-        ("critic",     "criticism"),
-    ]
-    for role, capability in priority:
-        if role in agent_chain:
-            return capability
-    return "general"
-
-
-def _build_contributions(
-    iteration_history: List[Dict[str, Any]],
-    role: str,
-    quality_score: float,
-    iteration: int,
-    messages: List[Dict[str, Any]],
-) -> List[AgentContribution]:
+def _build_contributions(history: list) -> List[AgentContribution]:
     """
-    Walk iteration_history and group consecutive (assistant-with-tool_calls,
-    tool-result*) rows into AgentContribution objects.
+    Build a list of AgentContribution objects from the pipeline history.
 
-    The final assistant turn (no tool_calls) becomes the `output` field.
-    Pure role='tool' rows that are not paired are skipped defensively.
-    role='tool_result' rows are skipped for backward-compat with Plan 1 history.
+    role='tool' entries are execution scaffolding — they are skipped here and
+    instead surfaced via tool_turns on the preceding agent contribution.
     """
-    tool_calls_buf: List[Dict[str, Any]] = []
-    tool_results_buf: List[Dict[str, Any]] = []
-    contributions: List[AgentContribution] = []
-
-    output_text = ""
-    final_tool_calls: List[Dict[str, Any]] = []
-    final_tool_results: List[Dict[str, Any]] = []
-
-    for entry in iteration_history:
-        entry_role = entry.get("role", "")
-        if entry_role == "tool_result":
+    contributions = []
+    for i, h in enumerate(history):
+        if h.get("failed") or h.get("validator_failed"):
             continue
-        if entry_role == "assistant":
-            tc = entry.get("tool_calls")
-            if tc:
-                if tool_calls_buf:
-                    final_tool_calls.extend(tool_calls_buf)
-                    final_tool_results.extend(tool_results_buf)
-                tool_calls_buf = list(tc)
-                tool_results_buf = []
-            else:
-                final_tool_calls.extend(tool_calls_buf)
-                final_tool_results.extend(tool_results_buf)
-                tool_calls_buf = []
-                tool_results_buf = []
-                output_text = entry.get("content") or ""
-        elif entry_role == "tool":
-            if tool_calls_buf:
-                tool_results_buf.append({
-                    "tool_call_id": entry.get("tool_call_id", ""),
-                    "content": entry.get("content", ""),
+        role = h.get("role", "")
+        if role == "tool":
+            continue
+
+        tool_calls = h.get("tool_calls")
+        tool_results = []
+
+        if tool_calls:
+            j = i + 1
+            while j < len(history) and history[j].get("role") == "tool":
+                t = history[j]
+                tool_results.append({
+                    "tool_call_id": t.get("tool_call_id", ""),
+                    "name": t.get("name", ""),
+                    "content": t.get("output", ""),
                 })
+                j += 1
 
-    used_base_fallback = any(
-        e.get("used_base_fallback", False)
-        for e in iteration_history
-        if e.get("role") == role
-    )
-    contributions.append(AgentContribution(
-        role=role,
-        output=output_text,
-        quality_score=quality_score,
-        iteration=iteration,
-        messages=messages or None,
-        tool_calls=final_tool_calls or None,
-        tool_results=final_tool_results or None,
-        used_base_fallback=used_base_fallback,
-    ))
+        contributions.append(
+            AgentContribution(
+                role=role,
+                output=str(h.get("full_output") or h.get("output", "")),
+                quality_score=score_per_entry(h),
+                iteration=h.get("iteration", 1),
+                messages=h.get("messages"),
+                tool_calls=tool_calls,
+                tool_results=tool_results,
+                used_base_fallback=h.get("used_base_fallback", False),
+            )
+        )
     return contributions
-
 
 async def record(event: ExperienceEvent) -> None:
     """Persist the experience event to JSONL and ChromaDB."""

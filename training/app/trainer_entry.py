@@ -160,7 +160,6 @@ def _load_sft_pairs(
     Read ExperienceEvent JSONL and produce SFT pairs shaped by recipe.sft_format.
 
     For openai_messages: {"messages": [...], "score": float}
-    For legacy_response_marker: {"prompt": ..., "completion": ..., "score": float}
     """
     pairs: List[Dict] = []
     skipped_score = 0
@@ -205,27 +204,30 @@ def _load_sft_pairs(
                         quality_score=score,
                         iteration=contribution.get("iteration", 1),
                         messages=list(messages) + tool_turns,
+                        tool_calls=contribution.get("tool_calls") or None,
+                        tool_results=contribution.get("tool_results") or None,
                     )
                     sft_pair = build_sft_pair(contrib, recipe, capability)
-                    pairs.append({**sft_pair, "score": score})
+                    # build_sft_pair may return a single dict or a list of dicts (tool-call + full)
+                    if isinstance(sft_pair, list):
+                        for rec in sft_pair:
+                            pairs.append({**rec, "score": score})
+                    else:
+                        pairs.append({**sft_pair, "score": score})
+
                     added += 1
 
             if added == 0:
-                prompt = record.get("prompt", "")
-                final_output = record.get("final_output", "")
-                if prompt and final_output:
-                    sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
-                    contrib = AgentContribution(
-                        role=capability,
-                        output=final_output,
-                        quality_score=score,
-                        iteration=1,
-                    )
-                    sft_pair = build_sft_pair(contrib, recipe, capability,
-                                             system_prompt=sys_prompt, user_prompt=prompt)
-                    pairs.append({**sft_pair, "score": score})
-                else:
-                    skipped_no_data += 1
+                skipped_no_data += 1
+                if record.get("contributions"):
+                    # Optional debug log for auditing; keep it lightweight.
+                    pass
+
+    if skipped_no_data > 0:
+        print(
+            f"[trainer-entry][debug] {skipped_no_data} records had contributions but none for role={capability}",
+            flush=True,
+        )
 
     print(
         f"seed_data_status role={capability} experience_count={len(pairs)} data_path={data_path}",
@@ -260,7 +262,7 @@ def _load_curated_pairs(capability: str, data_root: Path, max_samples: int, reci
         return []
 
     pairs: List[Dict[str, str]] = []
-    with open(curated_path, "r") as fh:
+    with open(curated_path, "r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -294,14 +296,72 @@ def _load_curated_pairs(capability: str, data_root: Path, max_samples: int, reci
     return pairs
 
 
+def _load_synthetic_pairs(capability: str, recipe: "AdapterRecipe", max_samples: int) -> List[Dict]:
+    """
+    Load synthetic SFT pairs from `recipe.synthetic_dataset_path` if configured.
+
+    The future synthesis pipeline writes to that path; until it lands the path
+    is unset / file is absent, and this returns []. Same JSONL schema as
+    curated: {"instruction": ..., "response": ...}.
+    """
+    raw_path = getattr(recipe, "synthetic_dataset_path", None)
+    if not raw_path:
+        print(
+            f"seed_data_status role={capability} synthetic_count=0 path=<unset>",
+            flush=True,
+        )
+        return []
+    path = Path(raw_path)
+    if not path.exists():
+        print(
+            f"seed_data_status role={capability} synthetic_count=0 path={path} exists=False",
+            flush=True,
+        )
+        return []
+
+    pairs: List[Dict] = []
+    with open(path, "r") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            instruction = rec.get("instruction", "")
+            response = rec.get("response", "")
+            if instruction and response:
+                sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
+                contrib = AgentContribution(
+                    role=capability,
+                    output=response,
+                    quality_score=1.0,
+                    iteration=1,
+                )
+                sft_pair = build_sft_pair(contrib, recipe, capability,
+                                         system_prompt=sys_prompt, user_prompt=instruction)
+                pairs.append({**sft_pair, "score": 1.0})
+
+    if len(pairs) > max_samples:
+        import random
+        pairs = random.sample(pairs, max_samples)
+
+    print(
+        f"seed_data_status role={capability} synthetic_count={len(pairs)} path={path} exists=True",
+        flush=True,
+    )
+    return pairs
+
+
 def _save_sft_pairs(pairs: List[Dict[str, str]], output_dir: Path) -> Path:
     """Write SFT pairs to a JSONL file that LoRATrainer.train() will read."""
     from datetime import datetime
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"sft_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         for pair in pairs:
-            f.write(json.dumps(pair) + "\n")
+            f.write(json.dumps(pair, ensure_ascii=False) + "\n")
     print(f"[trainer-entry] SFT dataset saved: {out_path}  ({len(pairs)} pairs)", flush=True)
     return out_path
 
@@ -421,6 +481,21 @@ def main() -> None:
                 flush=True,
             )
 
+    # Synthetic data: opt-in third source via recipe.synthetic_dataset_path.
+    # No-op until the synthesis pipeline writes to the configured path.
+    synthetic_budget = MAX_TRAINING_SAMPLES - len(pairs)
+    if synthetic_budget > 0:
+        synthetic = _load_synthetic_pairs(role_name, recipe, synthetic_budget)
+        if synthetic:
+            import random
+            combined = pairs + synthetic
+            random.shuffle(combined)
+            pairs = combined[:MAX_TRAINING_SAMPLES]
+            print(
+                f"[trainer-entry] +synthetic: {len(synthetic)} added, total now {len(pairs)}",
+                flush=True,
+            )
+
     if not pairs:
         print(
             f"[trainer-entry] No usable SFT pairs after merging curated + experience data "
@@ -455,6 +530,14 @@ def main() -> None:
     if backup_path:
         print(f"[trainer-entry] Backed up v{old_version} → {backup_path}", flush=True)
 
+    # Warm-start: re-load the previous adapter weights as the LoRA starting
+    # point so retraining is incremental refinement, not from-scratch.  Only
+    # active when the recipe opts in AND a backup exists.
+    resume_from_checkpoint: Optional[str] = None
+    if recipe.resume_from_prev_adapter and backup_path:
+        resume_from_checkpoint = str(backup_path)
+        print(f"[trainer-entry] Warm-start enabled: resuming from {backup_path}", flush=True)
+
     # Train — LoRATrainer.train() is async; run it in a new event loop.
     # The adapter is saved directly to adapter_output_dir so vLLM picks it up
     # without any path translation (e.g. /data/lora_checkpoints/coding_lora/).
@@ -471,6 +554,7 @@ def main() -> None:
             lora_rank=recipe.r,
             lora_alpha=recipe.alpha,
             recipe=recipe,
+            resume_from_checkpoint=resume_from_checkpoint,
         ))
     finally:
         # Always clean up the temp dataset file, even if training fails.

@@ -138,26 +138,3 @@ def check_diversity(records: List[dict]) -> Tuple[bool, str]:
 def _fingerprint(prompt: str) -> str:
     normalised = "".join(prompt.lower().split())
     return normalised[:PROMPT_FINGERPRINT_MAX_CHARS]
-
-
-def to_training_records(records: List[dict]) -> List[dict]:
-    """
-    Return ExperienceEvent records that meet the minimum quality score.
-
-    Records are partitioned by scorer_rule_version.  Only the current-cohort
-    (version matching SCORER_RULE_VERSION) is returned; legacy records are
-    excluded and logged so the training batch reflects a consistent scoring
-    rule set.  Records with no version field are treated as legacy.
-    """
-    current_cohort = [r for r in records if r.get("scorer_rule_version") == SCORER_RULE_VERSION]
-    legacy_count = len(records) - len(current_cohort)
-    if legacy_count:
-        logger.warning(
-            "Excluded %d legacy experience record(s) with scorer_rule_version != %r from training batch",
-            legacy_count,
-            SCORER_RULE_VERSION,
-        )
-    return [
-        r for r in current_cohort
-        if float(r.get("final_score", 0.0)) >= settings.min_quality_score
-    ]

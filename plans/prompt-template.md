@@ -8,7 +8,11 @@
     - Do NOT perform any full file reads automatically. If deeper analysis is required, list candidate files and ask the user for explicit permission.
     - Do not modify any files.
     Tasks:
-    - 
+    - Ensure Plans A, B, C, and D have been completed without any gaps.
+    - Ensure training is implemented properly so that on initial bootstrap - the training loads curated dataset for initial adapters, curated dataset is correct and suitable for each agents, trained properly for correct output per base model (input/output/tools/etc), and creates adapters in versions for proper rollback and newer version reads.
+    - Ensure retrainining does not corrupt the new adapter from incorrect formatting of data, needs to use existing adapter somehow (explain briefly) with added experience data + synthetic data (not in yet - but soon; needs flexibility now) - to produce better adapters. Need a way for end users to verify that the retrained adapter or newer adapter is better than previous with visuals (one of core values of this project).
+    - Ensure full end to end prompting works properly (sessions - conversations/coding/research), tool calling for coding tasks or conversations/research (like read/writing files, or searching the web, asking for local perms, etc.).
+
     - Output exactly:
       - Bullet list of action plan + critical observations/risks (based only on lightweight searches)
       - Files identified so far (no edits)

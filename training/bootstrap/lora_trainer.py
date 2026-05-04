@@ -617,7 +617,8 @@ class LoRATrainer:
                    learning_rate: float = 2e-4,
                    lora_rank: int = 16,
                    lora_alpha: int = 32,
-                   recipe: Optional[AdapterRecipe] = None) -> Dict[str, Any]:
+                   recipe: Optional[AdapterRecipe] = None,
+                   resume_from_checkpoint: Optional[str] = None) -> Dict[str, Any]:
         """
         Train LoRA adapter on dataset.
 
@@ -636,40 +637,26 @@ class LoRATrainer:
         
         # Load dataset
         dataset = []
-        with open(dataset_path, 'r') as f:
+        
+        with open(dataset_path, 'r', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
-                    dataset.append(json.loads(line))
+                    record = json.loads(line)
+                    # Only keep records that are in a supported format
+                    if "messages" in record:
+                        # Chat format: nothing to do
+                        dataset.append(record)
+                    elif "prompt" in record and "completion" in record:
+                        # Prompt/completion format: nothing to do
+                        dataset.append(record)
+                    # else: skip records that don't match any known format
 
         print(f"[TRAINER] Loaded {len(dataset)} training samples")
-
-        _use_legacy = recipe is None or getattr(recipe, "sft_format", "openai_messages") == "legacy_response_marker"
-        for record in dataset:
-            if "messages" in record:
-                pass  # TRL ≥ 0.24 SFTTrainer handles conversational records natively via apply_chat_template
-            elif "prompt" in record and "completion" in record:
-                pass  # already in prompt/completion format
-            elif _use_legacy:
-                # Legacy [SYSTEM]/[USER]/[RESPONSE] wrapping — only when sft_format=legacy_response_marker
-                instruction = record.get("instruction", "")
-                if instruction.startswith("[SYSTEM]"):
-                    record["prompt"] = instruction + "\n\n[RESPONSE]\n"
-                else:
-                    capability = record.get("capability", "")
-                    role = _CAP_TO_ROLE.get(capability, "")
-                    sys_prompt = _AGENT_PROMPTS.get(role, "You are an expert AI assistant.")
-                    record["prompt"] = (
-                        f"[SYSTEM]\n{sys_prompt}\n\n"
-                        f"[USER]\n{instruction}\n\n"
-                        f"[RESPONSE]\n"
-                    )
-                if "completion" not in record:
-                    record["completion"] = record.get("response", "")
         
         if self.HAS_UNSLOTH:
-            return await self._train_unsloth(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe)
+            return await self._train_unsloth(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe, resume_from_checkpoint=resume_from_checkpoint)
         elif self._check_peft_gpu():
-            return await self._train_peft(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe)
+            return await self._train_peft(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe, resume_from_checkpoint=resume_from_checkpoint)
         else:
             return await self._train_mock(dataset, num_epochs)
 
@@ -679,7 +666,8 @@ class LoRATrainer:
                              learning_rate: float,
                              lora_rank: int,
                              lora_alpha: int,
-                             recipe: Optional[AdapterRecipe] = None) -> Dict[str, Any]:
+                             recipe: Optional[AdapterRecipe] = None,
+                             resume_from_checkpoint: Optional[str] = None) -> Dict[str, Any]:
         """Train with actual Unsloth (requires GPU)"""
         try:
             from unsloth import FastLanguageModel
@@ -713,24 +701,34 @@ class LoRATrainer:
             
             print("[TRAINER] Preparing training data...")
 
-            # Completion-only masking via TRL v0.24 prompt-completion format:
-            # The dataset has "prompt" and "completion" fields.  SFTTrainer
-            # tokenizes them separately and creates a completion mask so loss
-            # is only computed on the completion tokens.
-            # This replaces the removed DataCollatorForCompletionOnlyLM.
-            #
-            # The "prompt" field ends with "\n\n[RESPONSE]\n" so the model
-            # learns to generate immediately after that delimiter — matching
-            # the exact prompt format used at inference time.
-            #
-            # Prompts are already formatted by train() with the correct
-            # [SYSTEM]/[USER]/[RESPONSE] structure before this method is called.
-            # Only fill in 'completion' for any records that still need it.
+            # Pre-render every record to a single "text" column so SFTTrainer
+            # has an unambiguous shape and Unsloth's compiled wrapper does not
+            # raise "must specify a formatting_func".
+            # - openai_messages records → tokenizer.apply_chat_template(messages)
+            # - legacy prompt+completion records → simple concat
+            # completion_only_loss CANNOT be used with text-only datasets.
+            _has_messages_records = any("messages" in r for r in dataset)
+            text_records: List[Dict[str, str]] = []
             for record in dataset:
-                if "messages" not in record and "completion" not in record:
-                    record["completion"] = record.get("response", "")
+                if "messages" in record:
+                    # preserve messages so trainer sees conversational schema
+                    txt = tokenizer.apply_chat_template(record["messages"], tokenize=False)
+                    text_records.append({
+                        "messages": record["messages"],
+                        "text": txt,
+                        "instruction": record.get("instruction",""),
+                        "response": record.get("response","")
+                    })
+                elif "prompt" in record and "completion" in record:
+                    txt = record["prompt"] + record["completion"]
+                    text_records.append({"text": txt})
+                else:
+                    instr = record.get("instruction", "")
+                    resp  = record.get("response", record.get("completion", ""))
+                    if instr or resp:
+                        text_records.append({"text": instr + "\n\n" + resp})
 
-            sft_config = SFTConfig(
+            sft_config_kwargs = dict(
                 per_device_train_batch_size=2,
                 gradient_accumulation_steps=4,
                 warmup_steps=100,
@@ -744,9 +742,7 @@ class LoRATrainer:
                 lr_scheduler_type="linear",
                 output_dir=str(self.output_dir / "checkpoint"),
                 max_seq_length=self.max_seq_length,
-                # Completion-only loss: only backpropagate on the completion
-                # tokens. The prompt (instruction + [RESPONSE]\n) is masked.
-                completion_only_loss=True,
+                dataset_text_field="text",
                 # Never write HF checkpoints during training — we do a single
                 # explicit save after training completes.  Without this,
                 # SFTTrainer dumps ~200 MB checkpoint dirs every 500 steps
@@ -759,23 +755,41 @@ class LoRATrainer:
                 # containers and causes hangs if wandb credentials are absent.
                 report_to="none",
             )
-            
-            # Convert to HuggingFace Dataset for SFTTrainer compatibility
-            try:
-                from datasets import Dataset as HFDataset
-                train_dataset = HFDataset.from_list(dataset)
-            except ImportError:
-                train_dataset = dataset
+            # assistant_only_loss: only backprop on assistant tokens (using the
+            # chat template's {% generation %} markers).  Best for chat-format
+            # SFT.  Falls back to full-text loss if the TRL/template version
+            # doesn't accept it.
+            if _has_messages_records:
+                try:
+                    sft_config = SFTConfig(**sft_config_kwargs, assistant_only_loss=True)
+                except TypeError:
+                    sft_config = SFTConfig(**sft_config_kwargs)
+            else:
+                sft_config = SFTConfig(**sft_config_kwargs)
+
+            from datasets import Dataset as HFDataset
+            train_dataset = HFDataset.from_list(text_records)
+
+            def _formatting_func(example):
+                # SFTTrainer may call this with either a single example (dict of
+                # scalars) or a batch (dict of lists).  Handle both.
+                t = example["text"]
+                return t if isinstance(t, list) else [t]
 
             trainer = SFTTrainer(
                 model=model,
                 processing_class=tokenizer,
                 train_dataset=train_dataset,
                 args=sft_config,
+                formatting_func=_formatting_func,
             )
-            
+
             print("[TRAINER] Starting Unsloth training...")
-            trainer.train()
+            if resume_from_checkpoint:
+                print(f"[TRAINER] Warm-starting from prior adapter: {resume_from_checkpoint}")
+                trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+            else:
+                trainer.train()
 
             self.adapter_id = self.output_dir.name
             model.save_pretrained(str(self.output_dir))
@@ -828,7 +842,8 @@ class LoRATrainer:
                           learning_rate: float,
                           lora_rank: int,
                           lora_alpha: int,
-                          recipe: Optional[AdapterRecipe] = None) -> Dict[str, Any]:
+                          recipe: Optional[AdapterRecipe] = None,
+                          resume_from_checkpoint: Optional[str] = None) -> Dict[str, Any]:
         """Real GPU training via HuggingFace PEFT + TRL (no Unsloth dependency).
 
         Used when Unsloth is unavailable (e.g. Windows triton incompatibility).
@@ -878,9 +893,24 @@ class LoRATrainer:
         model = get_peft_model(model, lora_cfg)
         model.print_trainable_parameters()
 
-        train_dataset = HFDataset.from_list(dataset)
+        # Same shape-normalisation as _train_unsloth: pre-render to "text"
+        # column so SFTTrainer accepts both messages and prompt+completion records.
+        _has_messages_records = any("messages" in r for r in dataset)
+        text_records: List[Dict[str, str]] = []
+        for record in dataset:
+            if "messages" in record:
+                txt = tokenizer.apply_chat_template(record["messages"], tokenize=False)
+            elif "prompt" in record and "completion" in record:
+                txt = record["prompt"] + record["completion"]
+            else:
+                instr = record.get("instruction", "")
+                resp  = record.get("response", record.get("completion", ""))
+                txt = (instr + "\n\n" + resp) if (instr or resp) else ""
+            if txt:
+                text_records.append({"text": txt})
+        train_dataset = HFDataset.from_list(text_records)
 
-        sft_config = SFTConfig(
+        sft_config_kwargs = dict(
             per_device_train_batch_size=2,
             gradient_accumulation_steps=4,
             warmup_steps=100,
@@ -894,21 +924,37 @@ class LoRATrainer:
             lr_scheduler_type="linear",
             output_dir=str(self.output_dir / "checkpoint"),
             max_seq_length=self.max_seq_length,
-            completion_only_loss=True,
+            dataset_text_field="text",
             save_strategy="no",
             packing=False,
             report_to="none",
         )
+        if _has_messages_records:
+            try:
+                sft_config = SFTConfig(**sft_config_kwargs, assistant_only_loss=True)
+            except TypeError:
+                sft_config = SFTConfig(**sft_config_kwargs)
+        else:
+            sft_config = SFTConfig(**sft_config_kwargs)
+
+        def _formatting_func(example):
+            t = example["text"]
+            return t if isinstance(t, list) else [t]
 
         trainer = SFTTrainer(
             model=model,
             processing_class=tokenizer,
             train_dataset=train_dataset,
             args=sft_config,
+            formatting_func=_formatting_func,
         )
 
         print("[TRAINER] Starting HF PEFT training...")
-        trainer.train()
+        if resume_from_checkpoint:
+            print(f"[TRAINER] Warm-starting from prior adapter: {resume_from_checkpoint}")
+            trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+        else:
+            trainer.train()
 
         model.save_pretrained(str(self.output_dir))
         tokenizer.save_pretrained(str(self.output_dir))

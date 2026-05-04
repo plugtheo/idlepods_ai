@@ -348,6 +348,14 @@ def _estimate_quality_score(text: str) -> float:
         return 0.65
     return round(min(0.92, max(0.30, 0.35 + (pos / total) * 0.60)), 2)
 
+def _wrap_assistant_only_loss_format(item: Dict) -> Dict:
+    """Wrap an assistant-only loss item in the required format."""
+    return {
+        "messages": [
+            {"role": "user", "content": item["instruction"]},
+            {"role": "assistant", "content": item["response"]}
+        ]
+    }
 
 def _wrap_reviewer_format(text: str) -> str:
     """Ensure reviewer response has SCORE:/STRENGTHS:/ISSUES:/SUGGESTIONS: structure.
@@ -525,7 +533,7 @@ def load_coding(target: int = _CAP_MAX.get("coding", MAX_SAMPLES)) -> List[Dict]
     # are derived from actual GitHub code rather than GPT-4 generation chains.
     try:
         ds = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="instruction", resp_key="response")
@@ -547,7 +555,7 @@ def load_coding(target: int = _CAP_MAX.get("coding", MAX_SAMPLES)) -> List[Dict]
     # --- ise-uiuc/Magicoder-Evol-Instruct-110K  (MIT, 110k, 30+ languages) ---
     try:
         ds = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="instruction", resp_key="response")
@@ -572,7 +580,7 @@ def load_coding(target: int = _CAP_MAX.get("coding", MAX_SAMPLES)) -> List[Dict]
     # Filtered to programming-related tags by keyword matching on the instruction.
     try:
         ds = load_dataset("nampdn-ai/stack-exchange-instruction",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="question", resp_key="response")
@@ -599,7 +607,7 @@ def load_coding(target: int = _CAP_MAX.get("coding", MAX_SAMPLES)) -> List[Dict]
     # style inconsistent with real instruction-following training distribution.
     try:
         ds = load_dataset("iamtarun/python_code_instructions_18k_alpaca",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="instruction", resp_key="output")
@@ -620,7 +628,7 @@ def load_coding(target: int = _CAP_MAX.get("coding", MAX_SAMPLES)) -> List[Dict]
 
     # --- sahil2801/CodeAlpaca-20k  (Apache-2.0, multi-language supplement) ---
     try:
-        ds = load_dataset("sahil2801/CodeAlpaca-20k", split="train", trust_remote_code=True)
+        ds = load_dataset("sahil2801/CodeAlpaca-20k", split="train")
         added = 0
         for row in ds:
             inst = _fix_bpe_artifacts(str(row.get("instruction", "")).strip())
@@ -667,7 +675,7 @@ def load_debugging(target: int = _CAP_MAX.get("debugging", MAX_SAMPLES)) -> List
     # containing explicit keywords like "traceback" or "segfault".
     try:
         ds = load_dataset("m-a-p/CodeFeedback-Filtered-Instruction",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="query", resp_key="answer")
@@ -694,7 +702,7 @@ def load_debugging(target: int = _CAP_MAX.get("debugging", MAX_SAMPLES)) -> List
     # Keyword-filtered to debugging domain since this is a general SO dump.
     try:
         ds = load_dataset("nampdn-ai/stack-exchange-instruction",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="question", resp_key="response")
@@ -722,7 +730,7 @@ def load_debugging(target: int = _CAP_MAX.get("debugging", MAX_SAMPLES)) -> List
     # --- code_instructions_122k — debug/fix subset ---
     try:
         ds = load_dataset("TokenBender/code_instructions_122k_alpaca_style",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="instruction", resp_key="output")
@@ -747,7 +755,7 @@ def load_debugging(target: int = _CAP_MAX.get("debugging", MAX_SAMPLES)) -> List
 
     # --- CodeAlpaca-20k — fix/debug subset ---
     try:
-        ds = load_dataset("sahil2801/CodeAlpaca-20k", split="train", trust_remote_code=True)
+        ds = load_dataset("sahil2801/CodeAlpaca-20k", split="train")
         added = 0
         for row in ds:
             inst = _fix_bpe_artifacts(str(row.get("instruction", "")).strip())
@@ -793,7 +801,7 @@ def load_review(target: int = MAX_SAMPLES) -> List[Dict]:
     # --- Magicoder-Evol-Instruct-110K  (MIT, refactor/review keyword slice) ---
     try:
         ds = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="instruction", resp_key="response")
@@ -819,7 +827,7 @@ def load_review(target: int = MAX_SAMPLES) -> List[Dict]:
     # feedback requests as "Improve this" or "What's wrong" not "review" or "refactor".
     try:
         ds = load_dataset("m-a-p/CodeFeedback-Filtered-Instruction",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="query", resp_key="answer")
@@ -842,7 +850,7 @@ def load_review(target: int = MAX_SAMPLES) -> List[Dict]:
     # --- code_instructions_122k  (Apache-2.0, review/refactor subset) ---
     try:
         ds = load_dataset("TokenBender/code_instructions_122k_alpaca_style",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="instruction", resp_key="output")
@@ -883,7 +891,7 @@ def load_planning(target: int = MAX_SAMPLES) -> List[Dict]:
 
     # --- teknium/OpenHermes-2.5 ---
     try:
-        ds = load_dataset("teknium/OpenHermes-2.5", split="train", trust_remote_code=True)
+        ds = load_dataset("teknium/OpenHermes-2.5", split="train")
         added = 0
         for row in ds:
             r = _norm_chat(row) or _norm(row, inst_key="instruction", resp_key="output")
@@ -902,7 +910,7 @@ def load_planning(target: int = MAX_SAMPLES) -> List[Dict]:
     # --- WizardLM/WizardLM_evol_instruct_70k ---
     try:
         ds = load_dataset("WizardLM/WizardLM_evol_instruct_70k",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="instruction", resp_key="output")
@@ -921,7 +929,7 @@ def load_planning(target: int = MAX_SAMPLES) -> List[Dict]:
     # --- CodeFeedback-Filtered-Instruction  (MIT, architecture/design tasks) ---
     try:
         ds = load_dataset("m-a-p/CodeFeedback-Filtered-Instruction",
-                          split="train", trust_remote_code=True)
+                          split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="query", resp_key="answer")
@@ -959,7 +967,7 @@ def load_research(target: int = MAX_SAMPLES) -> List[Dict]:
     # --- HuggingFaceH4/ultrachat_200k ---
     try:
         ds = load_dataset("HuggingFaceH4/ultrachat_200k",
-                          split="train_sft", trust_remote_code=True)
+                          split="train_sft")
         added = 0
         for row in ds:
             r = _norm_chat(row)
@@ -977,7 +985,7 @@ def load_research(target: int = MAX_SAMPLES) -> List[Dict]:
 
     # --- OpenHermes-2.5 research/explain subset ---
     try:
-        ds = load_dataset("teknium/OpenHermes-2.5", split="train", trust_remote_code=True)
+        ds = load_dataset("teknium/OpenHermes-2.5", split="train")
         added = 0
         for row in ds:
             r = _norm_chat(row) or _norm(row, inst_key="instruction", resp_key="output")
@@ -995,7 +1003,7 @@ def load_research(target: int = MAX_SAMPLES) -> List[Dict]:
 
     # --- tatsu-lab/alpaca  (Apache-2.0, explain/compare supplement) ---
     try:
-        ds = load_dataset("tatsu-lab/alpaca", split="train", trust_remote_code=True)
+        ds = load_dataset("tatsu-lab/alpaca", split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="instruction", resp_key="output")
@@ -1034,7 +1042,7 @@ def load_criticism(target: int = MAX_SAMPLES) -> List[Dict]:
 
     # --- Anthropic/hh-rlhf  (MIT — extract last Human/Assistant turn from chosen) ---
     try:
-        ds = load_dataset("Anthropic/hh-rlhf", split="train", trust_remote_code=True)
+        ds = load_dataset("Anthropic/hh-rlhf", split="train")
         added = 0
         for row in ds:
             chosen = str(row.get("chosen", "")).strip()
@@ -1089,7 +1097,7 @@ def load_criticism(target: int = MAX_SAMPLES) -> List[Dict]:
 
     # --- OpenHermes-2.5 critique/evaluation subset ---
     try:
-        ds = load_dataset("teknium/OpenHermes-2.5", split="train", trust_remote_code=True)
+        ds = load_dataset("teknium/OpenHermes-2.5", split="train")
         added = 0
         for row in ds:
             r = _norm_chat(row) or _norm(row, inst_key="instruction", resp_key="output")
@@ -1111,7 +1119,7 @@ def load_criticism(target: int = MAX_SAMPLES) -> List[Dict]:
 
     # --- tatsu-lab/alpaca  (Apache-2.0, evaluation/opinion supplement) ---
     try:
-        ds = load_dataset("tatsu-lab/alpaca", split="train", trust_remote_code=True)
+        ds = load_dataset("tatsu-lab/alpaca", split="train")
         added = 0
         for row in ds:
             r = _norm(row, inst_key="instruction", resp_key="output")
@@ -1135,7 +1143,7 @@ def load_criticism(target: int = MAX_SAMPLES) -> List[Dict]:
     if len(samples) < MIN_SAMPLES:
         try:
             ds = load_dataset("WizardLM/WizardLM_evol_instruct_70k",
-                              split="train", trust_remote_code=True)
+                              split="train")
             added = 0
             for row in ds:
                 r = _norm(row, inst_key="instruction", resp_key="output")
@@ -1170,7 +1178,7 @@ def save_jsonl(data: List[Dict], capability: str) -> Path:
     out = TARGET_DIR / f"{capability}_dataset.jsonl"
     with open(out, "w", encoding="utf-8") as f:
         for item in data:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            f.write(json.dumps(_wrap_assistant_only_loss_format(item), ensure_ascii=False) + "\n")
     size_mb = out.stat().st_size / 1e6
     print(f"  → Saved {len(data):,} samples to {out}  ({size_mb:.1f} MB)")
 

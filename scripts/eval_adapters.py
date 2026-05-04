@@ -1125,6 +1125,19 @@ examples:
         help="Name of a previous adapter already loaded in vLLM to compare against",
     )
     parser.add_argument(
+        "--prev-adapter-path", metavar="PATH",
+        help=(
+            "Filesystem path to a previous adapter directory.  The script will "
+            "POST to the inference service /adapters/load endpoint to load it "
+            "under a generated name and use it as --prev-adapter automatically. "
+            "Example: --prev-adapter-path /data/lora_checkpoints/coding_lora_v1_0_0"
+        ),
+    )
+    parser.add_argument(
+        "--inference-url", default="http://localhost:8010", metavar="URL",
+        help="Inference service URL for adapter load (default: http://localhost:8010)",
+    )
+    parser.add_argument(
         "--vllm-url", default="http://localhost:8000", metavar="URL",
         help="vLLM endpoint for the primary backend (default: http://localhost:8000)",
     )
@@ -1176,6 +1189,35 @@ def main() -> None:
     if args.prev_adapter:
         print(f"Prev adapter: {args.prev_adapter}")
     print()
+
+    # ── Auto-load prev adapter from path ─────────────────────────────────────
+    # When --prev-adapter-path is given, POST to inference /adapters/load so
+    # callers don't have to manually pre-load the previous version into vLLM.
+    if args.prev_adapter_path:
+        prev_path = Path(args.prev_adapter_path)
+        if not prev_path.exists():
+            print(f"Error: --prev-adapter-path does not exist: {prev_path}", file=sys.stderr)
+            sys.exit(1)
+        # Generate a unique name from the directory leaf (e.g. coding_lora_v1_0_0).
+        generated_name = f"{prev_path.name}__eval"
+        load_url = f"{args.inference_url.rstrip('/')}/adapters/load"
+        print(f"Loading prev adapter into vLLM as '{generated_name}' …")
+        try:
+            resp = requests.post(
+                load_url,
+                json={
+                    "backend": _default_backend_name(),
+                    "lora_name": generated_name,
+                    "lora_path": str(prev_path),
+                },
+                timeout=60,
+            )
+            resp.raise_for_status()
+            args.prev_adapter = generated_name
+            print(f"  loaded: {generated_name}\n")
+        except Exception as exc:
+            print(f"Error: /adapters/load failed: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     # ── Discover base model names ────────────────────────────────────────────
     print("Discovering base model names from vLLM servers…")

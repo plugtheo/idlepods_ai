@@ -25,13 +25,6 @@ def _openai_recipe() -> AdapterRecipe:
     )
 
 
-def _legacy_recipe() -> AdapterRecipe:
-    return AdapterRecipe(
-        target_modules=["q_proj"],
-        sft_format="legacy_response_marker",
-    )
-
-
 def test_openai_messages_no_tool_calls():
     contrib = _make_contribution()
     result = build_sft_pair(contrib, _openai_recipe(), "coder",
@@ -88,13 +81,3 @@ def test_three_turn_tool_history_shape():
     assert msgs[3]["role"] == "tool"
     assert msgs[4]["role"] == "assistant"
     assert msgs[4]["content"] == "Here are the files: main.py"
-
-
-def test_legacy_marker_format():
-    contrib = _make_contribution()
-    result = build_sft_pair(contrib, _legacy_recipe(), "coder",
-                            system_prompt="sys", user_prompt="user")
-    assert "prompt" in result and "completion" in result
-    assert result["prompt"].startswith("[SYSTEM]\nsys")
-    assert "[RESPONSE]" in result["prompt"]
-    assert result["completion"] == "def add(a, b): return a + b"
