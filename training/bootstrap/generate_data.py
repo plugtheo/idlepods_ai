@@ -1193,7 +1193,10 @@ def save_jsonl(data: List[Dict], capability: str) -> Path:
                 continue
             try:
                 rec = json.loads(line)
-                if not rec.get("instruction") or not rec.get("response"):
+                msgs = rec.get("messages") or []
+                if not (isinstance(msgs, list) and len(msgs) >= 2
+                        and any(m.get("role") == "user" and m.get("content") for m in msgs)
+                        and any(m.get("role") == "assistant" and m.get("content") for m in msgs)):
                     bad_lines += 1
             except json.JSONDecodeError:
                 bad_lines += 1

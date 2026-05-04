@@ -162,19 +162,21 @@ def load_sft_pairs(capability: str, system_prompt: str, recipe) -> List[Dict]:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            instruction = rec.get("instruction", "").strip()
-            response    = rec.get("response", "").strip()
-            if instruction and response:
+            messages = rec.get("messages") or []
+            response = next(
+                (m.get("content", "") for m in reversed(messages) if m.get("role") == "assistant"),
+                "",
+            )
+            if messages and response:
+                full_messages = [{"role": "system", "content": system_prompt}] + messages
                 contrib = AgentContribution(
                     role=role_name,
                     output=response,
                     quality_score=1.0,
                     iteration=1,
+                    messages=full_messages,
                 )
-                sft_pair = build_sft_pair(
-                    contrib, recipe, role_name,
-                    system_prompt=system_prompt, user_prompt=instruction,
-                )
+                sft_pair = build_sft_pair(contrib, recipe, role_name)
                 pairs.append(sft_pair)
     return pairs
 

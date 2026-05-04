@@ -43,7 +43,7 @@ Next request uses improved model
 | [gateway](gateway/) | 8080 | Entry point — auth, routing |
 | [orchestration](orchestration/) | 8001 | LangGraph agent pipeline + context (in-process) + experience (in-process) |
 | [inference](inference/) | 8010 / 50051 | LLM backend — single Qwen/Qwen3-14B vLLM server with 6 LoRA adapters |
-| [training](training/) | 8013 | LoRA fine-tuning via Unsloth |
+| [training](training/) | — | LoRA fine-tuning via Unsloth |
 | [shared](shared/) | — | Pydantic contracts, QueryRouter, gRPC stubs |
 
 Agent roles: `planner researcher coder debugger reviewer critic consensus`  
@@ -99,7 +99,7 @@ Thinking mode is disabled at inference time via `chat_template_kwargs={"enable_t
 
 ## Architecture decisions
 
-**Single Qwen/Qwen3-14B vLLM server** — all six agent roles (planner, researcher, coder, debugger, reviewer, critic) share one server. Per-role specialisation is handled by LoRA adapters selected per request. GPU memory utilisation 0.90 on RTX 3090; `--max-model-len 4096` prevents OOM locally.
+**Single Qwen/Qwen3-8B vLLM server** — all six agent roles (planner, researcher, coder, debugger, reviewer, critic) share one server. Per-role specialisation is handled by LoRA adapters selected per request.
 
 **Native OpenAI function calling** — the coder and debugger agents use `--enable-auto-tool-choice --tool-call-parser hermes` on the vLLM server. Tool calls arrive as structured JSON (`response.tool_calls`); the `<<TOOL>><<END>>` regex-parse approach is retired. Supported tools: `read_file`, `write_file`, `list_files`, `run_command` (pytest/ruff/mypy allowlist).
 
@@ -107,7 +107,7 @@ Thinking mode is disabled at inference time via `chat_template_kwargs={"enable_t
 
 **Fire-and-forget for experience recording and training notification** — decouples the user-facing response time from downstream storage and training evaluation latency.
 
-**Context and Experience services are in-process** — no separate context or experience containers; both run as async tasks inside the orchestration process.
+**Context and Experience services are in-process** — no separate context or experience containers; both run as async tasks inside the orchestration process. ** Need to consider alternatives for better reliability.
 
 ## Limitations
 
@@ -116,13 +116,3 @@ Local inference requires a GPU (min 3090 or better for standard to optimal perfo
 Limited to domain specific tasks (using LoRA mainly for Coding, Critic, Debugger, Researcher). Need to consider alternatives like rsLoRA in the future for better stability.
 
 Limited to local inference for full self training pipeline but scalable for self hosted vllm servers to serve baseline models.
-
-## Roadmap
-
-Possibly merge current adapter to baseline and use rsLoRA.
-
-Implement multi-turn conversation with persistence layer with Redis or local vector db.
-
-Pre-seed experience dataset with synthetic data for useful few-shot context from day one.
-
----

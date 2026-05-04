@@ -271,18 +271,22 @@ def _load_curated_pairs(capability: str, data_root: Path, max_samples: int, reci
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            instruction = rec.get("instruction", "")
-            response = rec.get("response", "")
-            if instruction and response:
+            messages = rec.get("messages") or []
+            response = next(
+                (m.get("content", "") for m in reversed(messages) if m.get("role") == "assistant"),
+                "",
+            )
+            if messages and response:
                 sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
+                full_messages = [{"role": "system", "content": sys_prompt}] + messages
                 contrib = AgentContribution(
                     role=capability,
                     output=response,
                     quality_score=1.0,
                     iteration=1,
+                    messages=full_messages,
                 )
-                sft_pair = build_sft_pair(contrib, recipe, capability,
-                                         system_prompt=sys_prompt, user_prompt=instruction)
+                sft_pair = build_sft_pair(contrib, recipe, capability)
                 pairs.append({**sft_pair, "score": 1.0})
 
     if len(pairs) > max_samples:
@@ -329,18 +333,22 @@ def _load_synthetic_pairs(capability: str, recipe: "AdapterRecipe", max_samples:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            instruction = rec.get("instruction", "")
-            response = rec.get("response", "")
-            if instruction and response:
+            messages = rec.get("messages") or []
+            response = next(
+                (m.get("content", "") for m in reversed(messages) if m.get("role") == "assistant"),
+                "",
+            )
+            if messages and response:
                 sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
+                full_messages = [{"role": "system", "content": sys_prompt}] + messages
                 contrib = AgentContribution(
                     role=capability,
                     output=response,
                     quality_score=1.0,
                     iteration=1,
+                    messages=full_messages,
                 )
-                sft_pair = build_sft_pair(contrib, recipe, capability,
-                                         system_prompt=sys_prompt, user_prompt=instruction)
+                sft_pair = build_sft_pair(contrib, recipe, capability)
                 pairs.append({**sft_pair, "score": 1.0})
 
     if len(pairs) > max_samples:
