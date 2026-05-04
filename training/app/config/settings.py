@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class TrainingSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="TRAINING__", env_nested_delimiter="__", env_file=".env")
+    model_config = SettingsConfigDict(env_prefix="TRAINING__", env_nested_delimiter="__", env_file=".env", extra="ignore")
 
     # Shared data paths (same volumes as Experience Service)
     jsonl_path: str = Field(
@@ -67,9 +67,17 @@ class TrainingSettings(BaseSettings):
         default="",
         description="Remote training endpoint (used only when training_target='remote').",
     )
-    training_exclusive_mode: Literal["BLOCK", "ALLOW"] = Field(
-        default="BLOCK",
-        description="BLOCK = stop vLLM during training (free GPU); ALLOW = run concurrently.",
+    training_timeout_seconds: int = Field(
+        default=3600,
+        description="Maximum seconds a single trainer_entry subprocess may run before being terminated.",
+    )
+    heartbeat_path: str = Field(
+        default="/data/scheduler.heartbeat",
+        description="Path where the scheduler writes a UTC timestamp every 15 s for external watchdog.",
+    )
+    jsonl_retention_days: int = Field(
+        default=30,
+        description="Informational: shards older than this should be pruned by scripts/prune_experiences.py (never automatic).",
     )
     scheduler_interval_hours: int = Field(
         default=4,
@@ -87,13 +95,13 @@ class TrainingSettings(BaseSettings):
         default="/data/training.lock",
         description="Filesystem lock to prevent concurrent training jobs (scheduler-side only).",
     )
-    vllm_services: list[str] = Field(
-        default_factory=lambda: ["vllm-primary"],
-        description="Compose service names of local vLLM instances to stop/start in BLOCK mode.",
+    redis_url: str = Field(
+        default="redis://redis:6379",
+        description="Redis URL for storing training cursors (cursor:<role> keys).",
     )
     compose_file: str = Field(
         default="/compose/compose.yml",
-        description="Path to compose.yml inside the wrapper/scheduler container (for docker compose stop/start).",
+        description="Path to compose.yml used by the scheduler to launch the training container.",
     )
 
 

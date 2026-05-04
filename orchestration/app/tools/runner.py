@@ -1,13 +1,14 @@
 """
 orchestration/app/tools/runner.py
 ===================================
-Minimal sandboxed tool runner for the coder agent's native tool-call loop.
+Sandboxed tool runner for any tool-using agent role (coder, researcher, etc.).
 
 Supported tools
 ---------------
 read_file(path, start?, end?)   — return lines from a file
 write_file(path, content)       — write (overwrite) a file
 list_files(glob)                — return matching paths
+run_command(command)            — run an allowed command
 
 Safety
 ------
@@ -19,12 +20,12 @@ Wire format
 The model emits native OpenAI tool calls:
     {"id": "call_xyz", "function": {"name": "read_file", "arguments": "{\"path\": \"src/foo.py\"}"}}
 
-build_tool_schemas() returns the OpenAI function schemas to pass in the request.
-execute_tool_call() accepts one OpenAI tool_call object and returns {tool, output, error, id}.
+build_tool_schemas(allowlist) returns the OpenAI function schemas filtered by the
+per-role allowlist from settings.role_tools_enabled.  New tools (e.g. researcher's
+browser tools) register here by adding an entry to _TOOL_REGISTRY and
+_TOOL_SCHEMAS — no graph or pipeline change needed.
 
-Extending
----------
-To add run_command: append an entry to _TOOL_REGISTRY and build_tool_schemas() — no graph change needed.
+execute_tool_call() accepts one OpenAI tool_call object and returns {tool, output, error, id}.
 """
 
 from __future__ import annotations
@@ -124,70 +125,77 @@ _TOOL_REGISTRY: Dict[str, Any] = {
     "run_command": run_command,
 }
 
+_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    "read_file": {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read lines from a repo-relative file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path":  {"type": "string", "description": "Repo-relative file path."},
+                    "start": {"type": "integer", "description": "Start line index (0-based, optional)."},
+                    "end":   {"type": "integer", "description": "End line index (exclusive, optional)."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    "write_file": {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write (overwrite) a repo-relative file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path":    {"type": "string", "description": "Repo-relative file path."},
+                    "content": {"type": "string", "description": "Full file content to write."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    "list_files": {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "List repo-relative file paths matching a glob pattern.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "glob": {"type": "string", "description": "Glob pattern (e.g. 'src/**/*.py')."},
+                },
+                "required": ["glob"],
+            },
+        },
+    },
+    "run_command": {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Run an allowed command (pytest, ruff, mypy) and return combined stdout/stderr.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Full command string, e.g. 'pytest src/tests/ -x'"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+}
 
-def build_tool_schemas() -> List[Dict[str, Any]]:
-    """Return OpenAI function schemas for all registered tools."""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read lines from a repo-relative file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path":  {"type": "string", "description": "Repo-relative file path."},
-                        "start": {"type": "integer", "description": "Start line index (0-based, optional)."},
-                        "end":   {"type": "integer", "description": "End line index (exclusive, optional)."},
-                    },
-                    "required": ["path"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "Write (overwrite) a repo-relative file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path":    {"type": "string", "description": "Repo-relative file path."},
-                        "content": {"type": "string", "description": "Full file content to write."},
-                    },
-                    "required": ["path", "content"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_files",
-                "description": "List repo-relative file paths matching a glob pattern.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "glob": {"type": "string", "description": "Glob pattern (e.g. 'src/**/*.py')."},
-                    },
-                    "required": ["glob"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_command",
-                "description": "Run an allowed command (pytest, ruff, mypy) and return combined stdout/stderr.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string", "description": "Full command string, e.g. 'pytest src/tests/ -x'"},
-                    },
-                    "required": ["command"],
-                },
-            },
-        },
-    ]
+
+def build_tool_schemas(allowlist: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Return OpenAI function schemas for registered tools, filtered by *allowlist*.
+
+    When *allowlist* is provided, only tools whose names appear in it are returned.
+    New tools register by adding entries to both _TOOL_REGISTRY and _TOOL_SCHEMAS.
+    """
+    names = list(_TOOL_SCHEMAS.keys()) if allowlist is None else [n for n in allowlist if n in _TOOL_SCHEMAS]
+    return [_TOOL_SCHEMAS[n] for n in names]
 
 
 def execute_tool_call(call: Dict[str, Any]) -> Dict[str, Any]:

@@ -1,9 +1,20 @@
 """
 Experience reader
 ==================
-Reads the shared JSONL file that the Experience Service writes.
+Reads the shared JSONL shards that the Experience Service writes.
 The Training Service mounts the same ``/data`` volume so this is a
 direct local file read — no HTTP call needed.
+
+Shard layout
+------------
+Daily shards:  ``experiences-YYYYMMDD.jsonl`` in the same directory as
+``settings.jsonl_path``.  The legacy ``experiences.jsonl`` is readable until
+manually pruned.  Both are walked in chronological order.
+
+Cursor support
+--------------
+``iter_after(cursor)`` skips records up to the stored ``{shard, offset}``
+position so the scheduler can replay only unprocessed records.
 """
 
 from __future__ import annotations
@@ -11,31 +22,83 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import Generator, List, Optional, Tuple
+
+import filelock
 
 from shared.contracts.experience import SCORER_RULE_VERSION
 from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-PROMPT_FINGERPRINT_MAX_CHARS = 120  # normalised prompt characters kept for deduplication fingerprint
+PROMPT_FINGERPRINT_MAX_CHARS = 120
+
+
+def _jsonl_dir() -> Path:
+    return Path(settings.jsonl_path).parent
+
+
+def _iter_shards() -> List[Path]:
+    """Return all experience JSONL paths in chronological order."""
+    base = _jsonl_dir()
+    dated = sorted(base.glob("experiences-*.jsonl"))
+    legacy = Path(settings.jsonl_path)
+    out: List[Path] = []
+    if legacy.exists() and legacy not in dated:
+        out.append(legacy)
+    out.extend(dated)
+    return out
+
+
+def iter_records() -> Generator[Tuple[Path, int, dict], None, None]:
+    """Yield ``(shard_path, line_offset, record)`` for every record across all shards."""
+    for shard in _iter_shards():
+        lock = filelock.FileLock(str(shard) + ".lock", timeout=10)
+        with lock.acquire(poll_interval=0.1):
+            try:
+                lines = shard.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+        for offset, raw in enumerate(lines):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            yield shard, offset, record
+
+
+def iter_after(cursor: Optional[dict]) -> Generator[Tuple[Path, int, dict], None, None]:
+    """Yield records that come after *cursor* (``{shard, offset}`` dict or ``None``)."""
+    if cursor is None:
+        yield from iter_records()
+        return
+    cursor_shard = Path(cursor["shard"])
+    cursor_offset = int(cursor["offset"])
+    shards = _iter_shards()
+    try:
+        cursor_shard_idx = shards.index(cursor_shard)
+    except ValueError:
+        # cursor shard no longer present — replay everything
+        yield from iter_records()
+        return
+    for shard, offset, record in iter_records():
+        try:
+            shard_idx = shards.index(shard)
+        except ValueError:
+            continue
+        if shard_idx < cursor_shard_idx:
+            continue
+        if shard_idx == cursor_shard_idx and offset <= cursor_offset:
+            continue
+        yield shard, offset, record
 
 
 def load_experiences() -> List[dict]:
-    """Return all experience records from the JSONL file."""
-    path = Path(settings.jsonl_path)
-    if not path.exists():
-        return []
-    records = []
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    return records
+    """Return all experience records from all shards."""
+    return [record for _, _, record in iter_records()]
 
 
 def check_diversity(records: List[dict]) -> Tuple[bool, str]:
@@ -73,7 +136,6 @@ def check_diversity(records: List[dict]) -> Tuple[bool, str]:
 
 
 def _fingerprint(prompt: str) -> str:
-    """Compact, case-insensitive prompt fingerprint for deduplication."""
     normalised = "".join(prompt.lower().split())
     return normalised[:PROMPT_FINGERPRINT_MAX_CHARS]
 
@@ -86,10 +148,6 @@ def to_training_records(records: List[dict]) -> List[dict]:
     (version matching SCORER_RULE_VERSION) is returned; legacy records are
     excluded and logged so the training batch reflects a consistent scoring
     rule set.  Records with no version field are treated as legacy.
-
-    The full records are passed to the training subprocess so that
-    trainer_entry._load_sft_pairs() can extract per-contribution SFT pairs
-    using the messages and full_output fields.
     """
     current_cohort = [r for r in records if r.get("scorer_rule_version") == SCORER_RULE_VERSION]
     legacy_count = len(records) - len(current_cohort)

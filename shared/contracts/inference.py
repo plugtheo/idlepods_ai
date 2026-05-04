@@ -116,3 +116,7 @@ class GenerateResponse(BaseModel):
         default=None,
         description="OpenAI-format tool calls emitted by the model, if any.",
     )
+    used_base_fallback: bool = Field(
+        default=False,
+        description="True when the base model served this response because the requested adapter was unavailable.",
+    )

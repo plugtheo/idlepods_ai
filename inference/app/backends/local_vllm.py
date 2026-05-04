@@ -31,7 +31,9 @@ import asyncio
 import json
 import logging
 import time
-from typing import AsyncGenerator, Optional
+from collections import deque
+from pathlib import Path
+from typing import AsyncGenerator, Deque, Dict, Optional
 
 import httpx
 
@@ -100,7 +102,7 @@ def _fix_bpe_artifacts(text: str) -> str:
 
 logger = logging.getLogger(__name__)
 
-_adapter_fallback_counts: dict[str, int] = {}
+_adapter_fallback_counts: Dict[str, Deque[float]] = {}
 _adapter_tool_call_style_cache: dict[str, str] = {}
 
 
@@ -131,7 +133,7 @@ def _get_adapter_tool_call_style(adapter_name: str) -> str:
 
 
 def get_fallback_counts() -> dict[str, int]:
-    return dict(_adapter_fallback_counts)
+    return {k: len(v) for k, v in _adapter_fallback_counts.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -323,26 +325,53 @@ async def _resolve_model(
     adapter_name: Optional[str],
     registry: _AdapterRegistry,
     role: str,
-) -> str:
+    base_url: str,
+) -> tuple[str, bool]:
     """
-    Return the model string to send to vLLM.
+    Return ``(model_string, used_base_fallback)`` for the vLLM request.
 
-    - No adapter requested  → base model ID
-    - Adapter requested + available in vLLM  → "{model_id}/{adapter_name}"
-    - Adapter requested but NOT yet registered  → base model ID (fallback, warning logged)
+    - No adapter requested  → base model ID, fallback=False
+    - Adapter available     → adapter name, fallback=False
+    - Adapter not registered → base model ID, fallback=True (auto-rollback if threshold hit)
     """
     if not adapter_name:
-        return model_id
+        return model_id, False
 
     if await registry.adapter_available(adapter_name):
-        return adapter_name  # vLLM uses the bare adapter name as the model field
+        return adapter_name, False
 
-    _adapter_fallback_counts[role] = _adapter_fallback_counts.get(role, 0) + 1
+    now = time.time()
+    window = settings.adapter_fallback_window_seconds
+    threshold = settings.adapter_fallback_rollback_threshold
+
+    dq = _adapter_fallback_counts.setdefault(role, deque())
+    dq.append(now)
+    # prune events outside the window
+    while dq and dq[0] < now - window:
+        dq.popleft()
+
+    count = len(dq)
     logger.warning(
-        "adapter_fallback adapter=%s role=%s reason=not_registered base_model=%s count=%d",
-        adapter_name, role, model_id, _adapter_fallback_counts[role],
+        "adapter_fallback adapter=%s role=%s reason=not_registered base_model=%s count_in_window=%d",
+        adapter_name, role, model_id, count,
     )
-    return model_id
+
+    if count >= threshold:
+        dq.clear()
+        logger.error(
+            "adapter_auto_rollback adapter=%s role=%s threshold=%d window=%ds",
+            adapter_name, role, threshold, window,
+        )
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as _c:
+                await _c.post(
+                    f"{base_url}/adapters/rollback",
+                    json={"adapter_name": adapter_name, "reason": "auto_fallback_threshold"},
+                )
+        except Exception as exc:
+            logger.warning("auto-rollback POST failed: %s", exc)
+
+    return model_id, True
 
 
 class LocalVLLMBackend(InferenceBackend):
@@ -369,8 +398,8 @@ class LocalVLLMBackend(InferenceBackend):
         self._registry = _AdapterRegistry(self._base_url, self._model_id)
 
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
-        effective_model = await _resolve_model(
-            self._model_id, request.adapter_name, self._registry, request.role
+        effective_model, used_base_fallback = await _resolve_model(
+            self._model_id, request.adapter_name, self._registry, request.role, self._base_url
         )
 
         messages = [m.model_dump(exclude_none=True) for m in request.messages]
@@ -472,6 +501,7 @@ class LocalVLLMBackend(InferenceBackend):
             tokens_generated=tokens_out,
             session_id=request.session_id,
             tool_calls=raw_tool_calls,
+            used_base_fallback=used_base_fallback,
         )
 
     async def generate_stream(
@@ -485,8 +515,8 @@ class LocalVLLMBackend(InferenceBackend):
             choices[0].delta.content  -- the new token fragment
         The stream ends with ``data: [DONE]``.
         """
-        effective_model = await _resolve_model(
-            self._model_id, request.adapter_name, self._registry, request.role
+        effective_model, _used_base_fallback = await _resolve_model(
+            self._model_id, request.adapter_name, self._registry, request.role, self._base_url
         )
 
         messages = [m.model_dump(exclude_none=True) for m in request.messages]

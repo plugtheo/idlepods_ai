@@ -35,22 +35,37 @@
 
 ## Execution
     HARD GATE: You may ONLY read or modify files explicitly listed in @plans/current-task.md. Never touch any other file. If you need anything outside the allowed list, stop immediately and ask.
-
-    CONTEXT ENFORCEMENT: Full roadmap context is in @plans/current-roadmap.md. You have read it. Always obey its cross-cutting principles: plug-and-play via models.yaml (no hardcoded "qwen", "deepseek", or "mistral" anywhere), native OpenAI tool calling is primary, explicit tool_executor node + sandboxed runner must be preserved, simple ReAct + human-in-the-loop core is mandatory.
+    Every Read call MUST specify `offset` + `limit`. Target only the lines you need (function bodies, import blocks, the specific section under change).
+    Never re-read a file or section already read in this run. Retain it in working memory.
+    Use Grep (not Read) to locate symbols, call sites, and string literals.
+    Use Glob for file discovery.
+    Make file changes silently — no diffs, no code blocks, no before/after dumps in your output.
 
     Core Rules:
-    - Ultra-concise. Short bullets only.
+    - Ultra-concise. Short bullets only — one bullet per step. No prose, no headers, no commentary between bullets.
     - Never restate the plan or roadmap.
     - Use ONLY content from allowed files.
-    - MAXIMUM TOKEN EFFICIENCY: On every read, ALWAYS use offset + limit to fetch ONLY the exact lines/sections needed. Never read an entire file unless user explicitly approves it.
+    - MAXIMUM TOKEN EFFICIENCY: On every read, ALWAYS use offset + limit to fetch ONLY the exact lines/sections needed. Never read an entire file unless the user explicitly approves it.
     - CRITICAL RULE: Never re-read any file (or any section of a file) that has already been read during this execution run. Retain all previously read information in context. Re-reading is strictly forbidden.
+    - Tests written as part of a step must pass before the step is reported complete. If a test fails, fix the underlying step rather than weakening the assertion.
 
-    Task: Execute the exact plan in @plans/current-task.md. Follow its steps in strict sequential order with zero deviation or extra scope.
+    Task:
+        - Execute the exact plan in @plans/current-task.md. Follow its steps in strict sequential order with zero deviation or extra scope.
+        - Plan E is now the stability + safety pass *and* the adapter-training-readiness gate. On Plan E completion the codebase MUST be in a state where rank-stabilised LoRA training can be started immediately with zero further code changes. The plan's steps 12–17 enforce this; treat them as load-bearing, not optional.
+        - Adapter-training readiness — non-negotiable assertions to verify as you complete each related step:
+            • rsLoRA / DoRA / QLoRA flexibility: `AdapterRecipe.peft_type` is the ONLY switch; selecting one is a `recipes.yaml` edit. The trainer logs `apply_recipe peft_type=... use_rslora=... ...` once per call. The startup gate (step 14) refuses `peft_type ∉ {lora,rslora,dora,qlora}` for any role except `consensus`, and refuses inconsistent flags (e.g. `peft_type=rslora` with `use_rslora=False`).
+            • Tool-calling scope is config-driven via `settings.role_tools_enabled: Dict[str, List[str]]`. After Plan E, the literal `{"coder"}` MUST NOT appear in `nodes.py`, `pipeline.py`, `runner.py`, or `recorder.py` for routing/scope decisions — assert via a grep guard in the new test. Researcher / debugger / any future agent gains tool calling by adding tool names to `role_tools_enabled[<role>]` plus registering the tool in `runner.py:_TOOL_REGISTRY`. No graph or pipeline change required.
+            • Per-role tool allowlist is honoured end-to-end: `build_tool_schemas(allowlist=...)` filters `_TOOL_REGISTRY` by name, called from `nodes.py` with `settings.role_tools_enabled.get(role)`.
+            • Initial seed-data observability: `_load_curated_pairs` and the experience-pair load both emit a structured `seed_data_status` log with `role`, `curated_count` / `experience_count`, `path`, `exists`. No automatic data download from inside the trainer subprocess.
+            • Recipe defaults: `recipes.yaml` keeps rsLoRA as default (r=32, alpha=64). Per-role and per-backend overrides remain a YAML edit.
+            • Tool-call SFT is role-agnostic: `_load_sft_pairs` already iterates contributions by role and reads `tool_turns` without a coder-only branch. Verify and add the explanatory comment from step 16; do not introduce any role check.
+            • Adapter-name decoupling: `_CAPABILITY_TO_ADAPTER` and `_CAPABILITY_TO_CURATED` are the only role↔filename maps. Onboarding a new role follows the four-step procedure documented in the new `recipes.yaml` comment block (step 17).
 
     Instructions:
     - Make all file changes silently (no diffs, no patches, no code blocks, no before/after).
     - For any read, always specify offset + limit.
     - Output exactly one bullet per completed step: "• Step N: [one-line description of what changed and why]".
+    - For steps 14, 15, and the grep guard in step 12's test, also include the literal log-line / assertion shape in the bullet so it is obvious from the output that the readiness gate fired (still one line per step).
     - No reasoning, explanations, or commentary beyond those bullets.
 
     Begin.

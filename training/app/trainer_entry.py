@@ -197,6 +197,7 @@ def _load_sft_pairs(
                             flush=True,
                         )
                         continue
+                    # role-agnostic: any role with tool_turns produces tool-call SFT pairs
                     tool_turns = contribution.get("tool_turns") or []
                     contrib = AgentContribution(
                         role=capability,
@@ -227,6 +228,10 @@ def _load_sft_pairs(
                     skipped_no_data += 1
 
     print(
+        f"seed_data_status role={capability} experience_count={len(pairs)} data_path={data_path}",
+        flush=True,
+    )
+    print(
         f"[trainer-entry] Loaded {len(pairs)} SFT pairs "
         f"(skipped {skipped_score} below score threshold, "
         f"{skipped_no_data} with no usable data)",
@@ -248,7 +253,10 @@ def _load_curated_pairs(capability: str, data_root: Path, max_samples: int, reci
         return []
     curated_path = data_root / "training_data_curated" / filename
     if not curated_path.exists():
-        print(f"[trainer-entry] Curated data not found at {curated_path} — skipping", flush=True)
+        print(
+            f"seed_data_status role={capability} curated_count=0 path={curated_path} exists=False",
+            flush=True,
+        )
         return []
 
     pairs: List[Dict[str, str]] = []
@@ -279,7 +287,10 @@ def _load_curated_pairs(capability: str, data_root: Path, max_samples: int, reci
         import random
         pairs = random.sample(pairs, max_samples)
 
-    print(f"[trainer-entry] Loaded {len(pairs)} curated pairs for capability '{capability}'", flush=True)
+    print(
+        f"seed_data_status role={capability} curated_count={len(pairs)} path={curated_path} exists=True",
+        flush=True,
+    )
     return pairs
 
 
@@ -342,6 +353,34 @@ def main() -> None:
         backend = "primary"
     _recipe_role = args.recipe_name if args.recipe_name else role_name
     recipe: AdapterRecipe = lookup_recipe(backend, _recipe_role)
+
+    # ── PEFT-type readiness gate ─────────────────────────────────────────────
+    _VALID_PEFT_TYPES = {"lora", "rslora", "dora", "qlora"}
+    if role_name != "consensus":
+        if recipe.peft_type not in _VALID_PEFT_TYPES:
+            print(
+                f"peft_type_invalid role={role_name} peft_type={recipe.peft_type} "
+                f"use_rslora={getattr(recipe, 'use_rslora', False)} "
+                f"use_dora={getattr(recipe, 'use_dora', False)}",
+                file=sys.stderr, flush=True,
+            )
+            sys.exit(1)
+        if recipe.peft_type == "rslora" and not getattr(recipe, "use_rslora", False):
+            print(
+                f"peft_type_invalid role={role_name} peft_type=rslora use_rslora=False "
+                f"(inconsistent flags — set use_rslora=true in recipes.yaml)",
+                file=sys.stderr, flush=True,
+            )
+            sys.exit(1)
+        if recipe.peft_type == "dora" and not getattr(recipe, "use_dora", False):
+            print(
+                f"peft_type_invalid role={role_name} peft_type=dora use_dora=False "
+                f"(inconsistent flags — set use_dora=true in recipes.yaml)",
+                file=sys.stderr, flush=True,
+            )
+            sys.exit(1)
+    # ─────────────────────────────────────────────────────────────────────────
+
     print(
         f"[trainer-entry] recipe: peft_type={recipe.peft_type}  r={recipe.r}  "
         f"alpha={recipe.alpha}  sft_format={recipe.sft_format}",

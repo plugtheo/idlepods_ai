@@ -71,6 +71,16 @@ class InferenceSettings(BaseSettings):
         ),
     )
 
+    # ── Adapter auto-rollback ─────────────────────────────────────────────
+    adapter_fallback_rollback_threshold: int = Field(
+        default=5,
+        description="Number of base-fallback events within the window that triggers auto-rollback.",
+    )
+    adapter_fallback_window_seconds: int = Field(
+        default=60,
+        description="Sliding window (seconds) for counting adapter fallback events.",
+    )
+
     # ── Service ports ─────────────────────────────────────────────────────
     port: int = Field(default=8010, description="HTTP port this service listens on.")
     grpc_port: int = Field(default=50051, description="gRPC port (runs alongside HTTP).")

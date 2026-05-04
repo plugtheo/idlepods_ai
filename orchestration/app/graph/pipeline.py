@@ -42,6 +42,7 @@ from .edges import (
     route_entry,
 )
 from .nodes import (
+    _tool_using_roles,
     coder_node,
     consensus_node,
     critic_node,
@@ -214,7 +215,7 @@ def build_pipeline() -> CompiledStateGraph:
     # detours to tool_executor instead of advancing the chain.
     _all_agent_roles = list(_AGENT_NODES.keys())
     _non_consensus_roles = [r for r in _all_agent_roles if r != "consensus"]
-    _tool_using = {"coder"} & set(_non_consensus_roles)
+    _tool_using = _tool_using_roles() & set(_non_consensus_roles)
     targets = {r: r for r in _non_consensus_roles}
     targets["check_convergence"] = "check_convergence"
     targets["tool_executor"] = "tool_executor"
@@ -226,7 +227,7 @@ def build_pipeline() -> CompiledStateGraph:
     # tool_executor routes back to whichever role emitted the pending call.
     graph.add_conditional_edges(
         "tool_executor",
-        lambda s: s.get("tool_originating_role", "coder"),
+        lambda s: s.get("tool_originating_role") or next(iter(_tool_using_roles() & set(_non_consensus_roles)), _non_consensus_roles[0]),
         {role: role for role in _AGENT_NODES},
     )
 

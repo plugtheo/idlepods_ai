@@ -25,7 +25,27 @@
       "Bash(python -m pytest shared/tests/test_no_model_literals.py -v)",
       "Bash(python -m pytest inference/tests/ orchestration/tests/test_run_route.py shared/tests/ scripts/tests/ -q)",
       "Bash(python *)",
-      "Bash(Select-String -Pattern \"role_model_family\" healthcheck.py)"
+      "Bash(Select-String -Pattern \"role_model_family\" healthcheck.py)",
+      "Bash(where python *)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest training/tests/test_experience_cursor.py -x -q)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest orchestration/tests/test_jsonl_rotation.py -x -q)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest inference/tests/test_auto_rollback.py -x -q)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest training/tests/test_scheduler_timeout.py -x -q)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest orchestration/tests/test_role_tools_enabled.py orchestration/tests/test_jsonl_rotation.py -x -q)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest training/tests/test_experience_cursor.py training/tests/test_scheduler_timeout.py training/tests/test_seed_data_status_log.py training/tests/test_recipe_peft_type_gate.py -x -q)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest training/tests/test_recipe_peft_type_gate.py -x -q)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest training/tests/test_seed_data_status_log.py -x -q)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest training/tests/ orchestration/tests/ inference/tests/ -q --tb=short)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest training/tests/test_trainer_launcher.py -x -q)",
+      "Bash(git stash *)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest inference/tests/test_local_vllm.py inference/tests/test_streaming_backends.py inference/tests/test_generate_route.py -x -q)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest inference/tests/test_local_vllm.py -x -q)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest inference/tests/test_local_vllm.py inference/tests/test_streaming_backends.py inference/tests/test_generate_route.py inference/tests/test_grpc_server.py -q --tb=line)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest inference/tests/test_local_vllm.py inference/tests/test_generate_route.py inference/tests/test_grpc_server.py -q --tb=no)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest orchestration/tests/test_inference_grpc_client.py -q --tb=no)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest orchestration/tests/test_inference_grpc_client.py::TestGrpcClientGenerate::test_returns_generate_response_with_echoed_fields -q --tb=short)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest training/tests/ orchestration/tests/ inference/tests/ -q --tb=no)",
+      "Bash(C:/Users/ksens/AppData/Local/Python/bin/pytest training/tests/ orchestration/tests/ inference/tests/ --ignore=training/tests/test_experience_cursor.py --ignore=training/tests/test_scheduler_timeout.py --ignore=training/tests/test_recipe_peft_type_gate.py --ignore=training/tests/test_seed_data_status_log.py --ignore=orchestration/tests/test_jsonl_rotation.py --ignore=orchestration/tests/test_role_tools_enabled.py --ignore=inference/tests/test_auto_rollback.py -q --tb=no)"
     ]
   }
 }

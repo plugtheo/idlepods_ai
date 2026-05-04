@@ -5,30 +5,30 @@
 Complete end-to-end pipeline for training LoRA adapters on your **RTX 3090 GPU** with **Unsloth acceleration** (2-5x faster, 60% less memory).
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  TRAINING PIPELINE (GPU-ACCELERATED)                    │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
+┌────────────────────────────────────────────────────────┐
+│  TRAINING PIPELINE (GPU-ACCELERATED)                   │
+├────────────────────────────────────────────────────────┤
+│                                                        │
 │  Step 1: Data Generation                               │
 │  ├─ Public Data: BigCode + GitHub (40%)                │
 │  ├─ Synthetic Data: Agent-generated (60%)              │
 │  ├─ Target: 5k-10k balanced samples                    │
 │  └─ Output: training_dataset_{timestamp}_{count}.jsonl │
-│                                                         │
+│                                                        │
 │  Step 2: GPU Training (RTX 3090)                       │
-│  ├─ Unsloth: 2-5x faster, 60% less VRAM              │
+│  ├─ Unsloth: 2-5x faster, 60% less VRAM                │
 │  ├─ LoRA Rank: 32, Alpha: 64                           │
 │  ├─ Learning Rate: 2e-4                                │
 │  ├─ Epochs: 10 (for convergence)                       │
-│  ├─ Batch Size: 4 (optimized for 24GB VRAM)           │
+│  ├─ Batch Size: 4 (optimized for 24GB VRAM)            │
 │  └─ Output: lora_unsloth_{timestamp}_{samples}exp      │
-│                                                         │
+│                                                        │
 │  Step 3: Validation & Deployment                       │
 │  ├─ Loss convergence tracking                          │
 │  ├─ VRAM usage monitoring                              │
 │  └─ Adapter ready for model router                     │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
+│                                                        │
+└────────────────────────────────────────────────────────┘
 ```
 
 ## Quick Start

@@ -1,9 +1,9 @@
 """
 Trainer wrapper — one-shot container entrypoint.
 
-Acquires a file-lock, optionally stops vLLM (BLOCK mode), then either runs
-trainer_entry locally for each capability or POSTs to a remote trigger URL.
-Always restarts vLLM in `finally` when in BLOCK mode.
+Acquires a file-lock then either runs trainer_entry locally for each
+capability or POSTs to a remote trigger URL.  Adapters land via the
+hot-swap /adapters/load route — the trainer never touches the vLLM container.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -28,30 +29,6 @@ log = logging.getLogger(__name__)
 CAPABILITIES = ["coder", "debugger", "reviewer", "planner", "researcher", "critic"]
 
 REMOTE_TRIGGER_LOG_PREVIEW_CHARS = 500
-
-
-def stop_vllm() -> None:
-    """Thin abstraction — replace with k8s scale-to-zero when porting."""
-    if not settings.vllm_services:
-        return
-    cmd = ["docker", "compose", "-f", settings.compose_file, "stop", *settings.vllm_services]
-    log.info("stop_vllm: %s", " ".join(cmd))
-    try:
-        subprocess.run(cmd, check=True)
-    except Exception as exc:
-        log.error("stop_vllm failed: %s", exc)
-
-
-def start_vllm() -> None:
-    """Thin abstraction — replace with k8s scale-up when porting."""
-    if not settings.vllm_services:
-        return
-    cmd = ["docker", "compose", "-f", settings.compose_file, "start", *settings.vllm_services]
-    log.info("start_vllm: %s", " ".join(cmd))
-    try:
-        subprocess.run(cmd, check=True)
-    except Exception as exc:
-        log.error("start_vllm failed: %s", exc)
 
 
 @contextmanager
@@ -95,6 +72,12 @@ def _run_local(records: list[dict]) -> None:
             tmp.write(json.dumps(rec) + "\n")
         tmp_path = tmp.name
 
+    platform_kwargs: dict = {}
+    if sys.platform == "win32":
+        platform_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        platform_kwargs["start_new_session"] = True
+
     try:
         for capability in CAPABILITIES:
             base_model = _base_model_for(capability)
@@ -106,8 +89,33 @@ def _run_local(records: list[dict]) -> None:
                 "--capability", capability,
             ]
             log.info("trainer_entry capability=%s base=%s", capability, base_model)
+            dataset_hash = None
             try:
-                subprocess.run(cmd, check=False)
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    timeout=settings.training_timeout_seconds,
+                    **platform_kwargs,
+                )
+                if result.returncode != 0:
+                    log.error("trainer_entry non-zero exit capability=%s code=%s", capability, result.returncode)
+            except subprocess.TimeoutExpired as exc:
+                if exc.process is not None:
+                    try:
+                        if sys.platform == "win32":
+                            subprocess.run(
+                                ["taskkill", "/F", "/T", "/PID", str(exc.process.pid)],
+                                check=False,
+                            )
+                        else:
+                            import signal
+                            os.killpg(os.getpgid(exc.process.pid), signal.SIGTERM)
+                    except Exception:
+                        pass
+                log.error(
+                    "training_timed_out role=%s dataset_hash=%s timeout=%s",
+                    capability, dataset_hash, settings.training_timeout_seconds,
+                )
             except Exception as exc:
                 log.error("trainer_entry failed for %s: %s", capability, exc)
     finally:
@@ -131,10 +139,7 @@ def _run_remote() -> None:
 
 
 def main() -> None:
-    log.info(
-        "Training wrapper: target=%s exclusive=%s",
-        settings.training_target, settings.training_exclusive_mode,
-    )
+    log.info("Training wrapper: target=%s", settings.training_target)
 
     records = load_experiences()
     passed, reason = check_diversity(records)
@@ -144,20 +149,10 @@ def main() -> None:
     log.info("Threshold met: %s", reason)
 
     with file_lock(settings.lock_path):
-        block = (
-            settings.training_exclusive_mode == "BLOCK"
-            and settings.training_target == "local"
-        )
-        if block:
-            stop_vllm()
-        try:
-            if settings.training_target == "remote":
-                _run_remote()
-            else:
-                _run_local(records)
-        finally:
-            if block:
-                start_vllm()
+        if settings.training_target == "remote":
+            _run_remote()
+        else:
+            _run_local(records)
 
 
 if __name__ == "__main__":

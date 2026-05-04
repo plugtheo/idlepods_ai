@@ -17,7 +17,7 @@ Agent constants (AGENT_PROMPTS, role_max_tokens, role_backend, role_adapter)
 are also exported from this module so nodes.py has a single import point.
 """
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -253,6 +253,21 @@ class OrchestrationSettings(BaseSettings):
             "Override with ORCHESTRATION__ROLE_ADAPTER."
         ),
     )
+    role_tools_enabled: Dict[str, List[str]] = Field(
+        default_factory=lambda: {
+            "planner":    [],
+            "researcher": [],
+            "coder":      ["read_file", "write_file", "list_files", "run_command"],
+            "debugger":   [],
+            "reviewer":   [],
+            "critic":     [],
+            "consensus":  [],
+        },
+        description=(
+            "Per-role tool allowlist. Empty list ⇒ role does not call tools. "
+            "Override with ORCHESTRATION__ROLE_TOOLS_ENABLED."
+        ),
+    )
     structured_field_value_max_chars: int = Field(
         default=300,
         description=(
@@ -263,9 +278,13 @@ class OrchestrationSettings(BaseSettings):
     )
 
     # ── Experience recording (formerly the Experience Service) ────────────
+    jsonl_dir: str = Field(
+        default="/data",
+        description="Directory where daily JSONL shards (experiences-YYYYMMDD.jsonl) are written.",
+    )
     jsonl_path: str = Field(
         default="/data/experiences.jsonl",
-        description="Append-only JSONL file for experience records.",
+        description="Legacy single-file path; still readable by the cursor until pruned.",
     )
     spool_path: str = Field(
         default="/data/experiences.spool.jsonl",

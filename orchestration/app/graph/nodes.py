@@ -64,8 +64,12 @@ logger = logging.getLogger(__name__)
 ROLE_NAME_OVERHEAD_TOKENS = 20
 LABEL_PADDING_TOKENS = 5
 
-_TOOL_USING_ROLES = {"coder"}
 _MAX_TOOL_STEPS = 8
+
+
+def _tool_using_roles() -> set[str]:
+    """Derive tool-capable roles from config; never a hardcoded literal."""
+    return {role for role, tools in settings.role_tools_enabled.items() if tools}
 
 
 def _default_backend() -> str:
@@ -336,7 +340,7 @@ def _build_messages(
     messages.append(user_msg)
 
     # ── Tool-loop messages (OpenAI assistant+tool pairs, chronological) ──
-    if tool_loop_entries and role in _TOOL_USING_ROLES:
+    if tool_loop_entries and role in _tool_using_roles():
         for entry in tool_loop_entries:
             if "tool_calls" in entry:
                 messages.append(Message(role="assistant", tool_calls=entry["tool_calls"]))
@@ -374,8 +378,8 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
         max_tokens=settings.role_max_tokens.get(role, 1024),
         session_id=session_id,
     )
-    if role in _TOOL_USING_ROLES:
-        request_kwargs["tools"] = build_tool_schemas()
+    if role in _tool_using_roles():
+        request_kwargs["tools"] = build_tool_schemas(settings.role_tools_enabled.get(role))
 
     request = GenerateRequest(**request_kwargs)
 
@@ -385,7 +389,7 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
         q = get_token_queue(session_id)
 
         # Tool-using roles always use the blocking path so response.tool_calls is available.
-        if q is not None and hasattr(client, "generate_stream") and role not in _TOOL_USING_ROLES:
+        if q is not None and hasattr(client, "generate_stream") and role not in _tool_using_roles():
             thinking_msg, _ = AGENT_FRIENDLY.get(role, (f"{role.capitalize()} is working...", role))
             await q.put({"type": "agent_start", "role": role, "message": thinking_msg})
             tokens: List[str] = []
@@ -447,6 +451,7 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
         "full_output": output,         # original LLM response — scorer and training use this
         "messages": [m.model_dump() for m in messages],  # full prompt sent to LLM — SFT training pair
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "used_base_fallback": getattr(response, "used_base_fallback", False),
     }
 
     updated_history = list(state.get("iteration_history", [])) + [history_entry]

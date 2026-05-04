@@ -90,6 +90,11 @@ def _build_contributions(
                     "content": entry.get("content", ""),
                 })
 
+    used_base_fallback = any(
+        e.get("used_base_fallback", False)
+        for e in iteration_history
+        if e.get("role") == role
+    )
     contributions.append(AgentContribution(
         role=role,
         output=output_text,
@@ -98,6 +103,7 @@ def _build_contributions(
         messages=messages or None,
         tool_calls=final_tool_calls or None,
         tool_results=final_tool_results or None,
+        used_base_fallback=used_base_fallback,
     ))
     return contributions
 

@@ -21,3 +21,31 @@ by_role:
 # Example:
 # by_backend_role:
 #   "primary:coder": {peft_type: rslora, use_rslora: true, r: 48, alpha: 96}
+
+# ── Onboarding a new agent role ──────────────────────────────────────────────
+#
+# Four steps to add a new role (e.g. "summarizer"):
+#
+# (a) Add a system prompt entry in shared/contracts/agent_prompts.py:
+#         AGENT_PROMPTS["summarizer"] = "You are a summarisation expert..."
+#
+# (b) Add entries in training/app/trainer_entry.py:
+#         _CAPABILITY_TO_CURATED["summarizer"] = "summarizer_curated.jsonl"
+#         _CAPABILITY_TO_ADAPTER["summarizer"] = "summarizer_lora"
+#
+# (c) Add a by_role override here if the default rsLoRA recipe needs adjustment:
+#         by_role:
+#           summarizer: {r: 16, alpha: 32}
+#     Omit the entry to inherit the default (peft_type: rslora, r: 32, alpha: 64).
+#
+# (d) Optionally enable tool calling for the new role by adding tool names to
+#         orchestration/app/config/settings.py → role_tools_enabled["summarizer"]
+#     No graph or pipeline change is required — tools are dispatched by config.
+#
+# Notes:
+#   - peft_type: none is RESERVED for the "consensus" role (final synthesiser,
+#     no LoRA adapter — it always runs on the base model).
+#   - The PEFT-type gate in trainer_entry.py will reject any non-consensus role
+#     whose peft_type is not in {lora, rslora, dora, qlora}.
+#   - Switching between rsLoRA, DoRA, or QLoRA is a YAML edit only — no code change.
+# ─────────────────────────────────────────────────────────────────────────────

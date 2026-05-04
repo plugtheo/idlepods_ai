@@ -8,6 +8,7 @@ Use --backend to specify which backend's active adapter to roll back.
 Usage:
     python scripts/rollback_adapter.py --backend primary
     python scripts/rollback_adapter.py --backend primary --inference-url http://localhost:8010
+    python scripts/rollback_adapter.py --backend primary --auto --reason "auto_fallback_threshold"
 """
 import argparse
 import sys
@@ -40,14 +41,39 @@ def main() -> None:
     )
     parser.add_argument("--inference-url", default="http://localhost:8010",
                         help="Inference service base URL")
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Auto mode: skip interactive confirmation prompt (used by auto-rollback path)",
+    )
+    parser.add_argument(
+        "--reason",
+        default="",
+        help="Free-text reason recorded into the manifest history (e.g. 'auto_fallback_threshold')",
+    )
     args = parser.parse_args()
 
     backend = args.backend or _default_backend()
 
+    if not args.auto:
+        try:
+            confirm = input(
+                f"Roll back adapter for backend '{backend}'? This cannot be undone. [y/N] "
+            ).strip().lower()
+        except EOFError:
+            confirm = ""
+        if confirm != "y":
+            print("Aborted.", file=sys.stderr)
+            sys.exit(1)
+
+    payload: dict = {"backend": backend}
+    if args.reason:
+        payload["reason"] = args.reason
+
     try:
         resp = httpx.post(
             f"{args.inference_url}/adapters/rollback",
-            json={"backend": backend},
+            json=payload,
             timeout=60.0,
         )
         resp.raise_for_status()

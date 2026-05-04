@@ -65,15 +65,15 @@ async def drain(timeout: float) -> list[ExperienceEvent]:
 
 def spool_pending(events: Iterable[ExperienceEvent], path: Path) -> None:
     """Append pending *events* to the spool file (synchronous; called at shutdown)."""
+    import filelock
     events = list(events)
     if not events:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        from .jsonl_store import _advisory_lock
-        _advisory_lock(fh, exclusive=True)
-        for evt in events:
-            fh.write(evt.model_dump_json() + "\n")
+    with filelock.FileLock(str(path) + ".lock", timeout=10):
+        with path.open("a", encoding="utf-8") as fh:
+            for evt in events:
+                fh.write(evt.model_dump_json() + "\n")
     logger.info("Spooled %d undrained experience event(s) to %s", len(events), path)
 
 

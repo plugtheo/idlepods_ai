@@ -405,6 +405,12 @@ def _post_train_version(
 
 def apply_recipe(model, recipe: "AdapterRecipe"):
     """Apply LoRA/RS-LoRA/DoRA/QLoRA PEFT config to model using Unsloth."""
+    print(
+        f"apply_recipe peft_type={recipe.peft_type} use_rslora={getattr(recipe, 'use_rslora', False)} "
+        f"use_dora={getattr(recipe, 'use_dora', False)} r={recipe.r} alpha={recipe.alpha} "
+        f"target_modules={recipe.target_modules}",
+        flush=True,
+    )
     from unsloth import FastLanguageModel
     available = {name.split(".")[-1] for name, _ in model.named_modules()}
     missing = [m for m in recipe.target_modules if m not in available]

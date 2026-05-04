@@ -77,6 +77,13 @@ TARGET_DIR.mkdir(parents=True, exist_ok=True)
 MIN_SAMPLES = 5_000
 MAX_SAMPLES = 10_000
 
+# Per-capability overrides — coding needs more signal than prose-only roles
+# because instruction complexity and language diversity are both higher.
+_CAP_MAX: dict[str, int] = {
+    "coding":    15_000,
+    "debugging":  8_000,
+}
+
 SEED = 42
 random.seed(SEED)
 
@@ -492,17 +499,50 @@ def _wrap_debugger_format(instruction: str, response: str) -> str:
 # Per-capability dataset loaders
 # ---------------------------------------------------------------------------
 
-def load_coding(target: int = MAX_SAMPLES) -> List[Dict]:
+def load_coding(target: int = _CAP_MAX.get("coding", MAX_SAMPLES)) -> List[Dict]:
     """
     Coding: Python, JS/TS, Java, C#, Go, Rust, Kotlin, Swift, SQL, HTML/CSS, shell, C/C++.
-    Sources (MIT priority):
-      - ise-uiuc/Magicoder-Evol-Instruct-110K   MIT  (30+ languages, evolved instruct)
-      - ise-uiuc/Magicoder-OSS-Instruct-75K      MIT  (real-world OSS, diverse languages)
-      - iamtarun/python_code_instructions_18k_alpaca  Apache-2.0  (idiomatic Python, replaces tiny-codes)
+    Sources (priority order — best quality first):
+      - ise-uiuc/Magicoder-OSS-Instruct-75K      MIT  (real-world OSS, grounded in actual GitHub code)
+      - ise-uiuc/Magicoder-Evol-Instruct-110K    MIT  (30+ languages, evolved instruct, diverse problems)
+      - nampdn-ai/stack-exchange-instruction      CC-BY-SA-4.0  (real Stack Overflow Q&A — human-authored)
+      - iamtarun/python_code_instructions_18k_alpaca  Apache-2.0  (idiomatic Python)
       - sahil2801/CodeAlpaca-20k                 Apache-2.0  (multi-language supplement)
+
+    OSS-Instruct is prioritised over Evol-Instruct because it is grounded in real
+    GitHub code snippets rather than GPT-4 evolution chains, producing more realistic
+    instruction/response distributions and reducing synthetic data bias.
+
+    Stack Exchange provides human-authored problem descriptions that differ
+    structurally from the LLM-generated Magicoder pairs, improving coverage of
+    real-world debugging patterns, API usage questions, and environment issues.
     """
     print("\n[CODING] Loading datasets...")
     samples: List[Dict] = []
+
+    # --- ise-uiuc/Magicoder-OSS-Instruct-75K  (MIT, grounded in real OSS code — best source) ---
+    # Cap raised from 4k → 7k: this is the highest-quality source because responses
+    # are derived from actual GitHub code rather than GPT-4 generation chains.
+    try:
+        ds = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K",
+                          split="train", trust_remote_code=True)
+        added = 0
+        for row in ds:
+            r = _norm(row, inst_key="instruction", resp_key="response")
+            if r:
+                r = _normalize_text(r)
+                if (not _keyword_match(r["instruction"], DEBUG_KEYWORDS | REVIEW_KEYWORDS)
+                        and _has_code(r["response"])
+                        and _has_min_code_lines(r["response"])
+                        and _is_clean(r)):
+                    r.update(source="Magicoder-OSS-Instruct-75K", capability="coding")
+                    samples.append(r)
+                    added += 1
+                    if added >= 7_000:
+                        break
+        print(f"  Magicoder-OSS-Instruct-75K: +{added} → {len(samples)} total")
+    except Exception as e:
+        print(f"  [WARN] Magicoder-OSS-Instruct-75K: {e}")
 
     # --- ise-uiuc/Magicoder-Evol-Instruct-110K  (MIT, 110k, 30+ languages) ---
     try:
@@ -526,27 +566,33 @@ def load_coding(target: int = MAX_SAMPLES) -> List[Dict]:
     except Exception as e:
         print(f"  [WARN] Magicoder-Evol-Instruct-110K: {e}")
 
-    # --- ise-uiuc/Magicoder-OSS-Instruct-75K  (MIT, real OSS code) ---
+    # --- nampdn-ai/stack-exchange-instruction  (CC-BY-SA-4.0, real Stack Overflow Q&A) ---
+    # Human-authored questions and answers covering real-world API usage, environment
+    # issues, and debugging patterns that the synthetic Magicoder sources lack.
+    # Filtered to programming-related tags by keyword matching on the instruction.
     try:
-        ds = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K",
+        ds = load_dataset("nampdn-ai/stack-exchange-instruction",
                           split="train", trust_remote_code=True)
         added = 0
         for row in ds:
-            r = _norm(row, inst_key="instruction", resp_key="response")
+            r = _norm(row, inst_key="question", resp_key="response")
+            if not r:
+                r = _norm(row, inst_key="instruction", resp_key="response")
             if r:
                 r = _normalize_text(r)
+                # Restrict to code-containing answers only — SO has many non-code answers.
                 if (not _keyword_match(r["instruction"], DEBUG_KEYWORDS | REVIEW_KEYWORDS)
                         and _has_code(r["response"])
                         and _has_min_code_lines(r["response"])
                         and _is_clean(r)):
-                    r.update(source="Magicoder-OSS-Instruct-75K", capability="coding")
+                    r.update(source="stack-exchange-instruction", capability="coding")
                     samples.append(r)
                     added += 1
-                    if added >= 4_000:
+                    if added >= 3_000:
                         break
-        print(f"  Magicoder-OSS-Instruct-75K: +{added} → {len(samples)} total")
+        print(f"  stack-exchange-instruction: +{added} → {len(samples)} total")
     except Exception as e:
-        print(f"  [WARN] Magicoder-OSS-Instruct-75K: {e}")
+        print(f"  [WARN] stack-exchange-instruction: {e}")
 
     # --- iamtarun/python_code_instructions_18k_alpaca  (Apache-2.0, idiomatic Python) ---
     # Replaces nampdn-ai/tiny-codes which used a synthetic "write code in N minutes"
@@ -583,7 +629,7 @@ def load_coding(target: int = MAX_SAMPLES) -> List[Dict]:
             if inp and inp not in inst:
                 inst = f"{inst}\n\n{inp}"
             if (len(inst) >= 20 and len(out) >= 40
-                    and len(out) <= _RESPONSE_MAX_CHARS          # C3: enforce response cap
+                    and len(out) <= _RESPONSE_MAX_CHARS
                     and not _keyword_match(inst, DEBUG_KEYWORDS | REVIEW_KEYWORDS)
                     and _has_code(out)
                     and _has_min_code_lines(out)
@@ -596,13 +642,13 @@ def load_coding(target: int = MAX_SAMPLES) -> List[Dict]:
         print(f"  [WARN] CodeAlpaca-20k: {e}")
 
     samples = _dedup(samples)
-    random.shuffle(samples)          # M4: shuffle before cap so every source is represented
+    random.shuffle(samples)          # shuffle before cap so every source is represented
     result = samples[:target]
-    print(f"[CODING] Final: {len(result)} samples")
+    print(f"[CODING] Final: {len(result)} samples (target={target})")
     return result
 
 
-def load_debugging(target: int = MAX_SAMPLES) -> List[Dict]:
+def load_debugging(target: int = _CAP_MAX.get("debugging", MAX_SAMPLES)) -> List[Dict]:
     """
     Debugging: bug reports, stack traces, async errors, memory leaks,
                test failures, segfaults, CI failures, logic errors.
@@ -1154,7 +1200,8 @@ def generate_datasets(capabilities: List[str] = None,
 
     Args:
         capabilities: list of capability names, or None for all six.
-        target: max samples per capability (default 10,000).
+        target: fallback max samples when no per-capability override exists.
+                Per-capability overrides in _CAP_MAX take precedence.
 
     Returns:
         dict mapping capability name → output JSONL path.
@@ -1164,7 +1211,7 @@ def generate_datasets(capabilities: List[str] = None,
     print("\n" + "="*70)
     print("  AGENT TRAINING DATA GENERATION")
     print(f"  Capabilities : {caps}")
-    print(f"  Target range : {MIN_SAMPLES:,} – {target:,} samples each")
+    print(f"  Target range : {MIN_SAMPLES:,} – {target:,} samples (base; coding/debugging use higher caps)")
     print(f"  Output dir   : {TARGET_DIR.resolve()}")
     print("="*70)
 
@@ -1174,7 +1221,8 @@ def generate_datasets(capabilities: List[str] = None,
         if cap not in LOADERS:
             print(f"[WARN] Unknown capability '{cap}' — skipping")
             continue
-        data = LOADERS[cap](target=target)
+        cap_target = _CAP_MAX.get(cap, target)
+        data = LOADERS[cap](target=cap_target)
         if len(data) < MIN_SAMPLES:
             print(f"  [WARN] {cap}: only {len(data):,} samples "
                   f"(target {MIN_SAMPLES:,}). Training will still proceed.")
