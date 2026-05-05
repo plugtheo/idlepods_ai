@@ -116,7 +116,17 @@ def load_recipes(path: Optional[str] = None) -> RecipeRegistry:
 
 
 def lookup_recipe(backend: str, role: str) -> AdapterRecipe:
-    return load_recipes().lookup(backend, role)
+    recipe = load_recipes().lookup(backend, role)
+
+    # --- Runtime validation: recipes.yaml must override max_seq_length ---
+    if recipe.max_seq_length == 2048:
+        # This means the YAML did NOT override it.
+        raise RuntimeError(
+            f"[recipes.yaml] Role '{role}' resolved to default max_seq_length=2048. "
+            "This indicates the YAML override is missing or misspelled."
+        )
+
+    return recipe
 
 
 class TrainingTriggerResponse(BaseModel):

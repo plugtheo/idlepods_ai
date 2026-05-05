@@ -51,7 +51,6 @@ class TrainingSettings(BaseSettings):
     hf_token: str = Field("", description="HuggingFace Hub token for downloading gated models")
 
     # ── LoRA training hyperparameters ─────────────────────────────────────
-    max_seq_length: int = Field(default=2048)
     response_max_chars: int = Field(default=6000)
     lora_num_epochs: int = Field(default=3)
     lora_learning_rate: float = Field(default=2e-4)

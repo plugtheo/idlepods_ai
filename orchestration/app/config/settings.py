@@ -118,7 +118,7 @@ class OrchestrationSettings(BaseSettings):
     # via environment variables without touching source code.
 
     chars_per_token: int = Field(
-        default=3,
+        default=2.5,
         description=(
             "Conservative characters-per-token ratio used for fast token estimation. "
             "Real averages: ~3.5 EN prose, ~2.5 code. Lowering this value makes "
@@ -150,7 +150,7 @@ class OrchestrationSettings(BaseSettings):
         ),
     )
     history_lookback_iterations: int = Field(
-        default=1,
+        default=9,
         description=(
             "Number of past pipeline iterations whose history entries are eligible for "
             "inclusion (e.g. 1 = last iteration only; 0 = all iterations). "
@@ -169,7 +169,7 @@ class OrchestrationSettings(BaseSettings):
         ),
     )
     max_conversation_turns: int = Field(
-        default=10,
+        default=1000,   # Soft cap - token budget does heavy lifting
         description=(
             "Maximum number of prior conversation turns to inject into agent prompts. "
             "Most-recent turns are kept; oldest are dropped when this cap is exceeded. "
@@ -177,7 +177,7 @@ class OrchestrationSettings(BaseSettings):
         ),
     )
     max_conversation_history_tokens: int = Field(
-        default=2048,
+        default=12288,
         description=(
             "Token cap for the full conversation history persisted to Redis per task_id. "
             "Oldest entries are trimmed before saving when this cap is exceeded. "
@@ -185,21 +185,21 @@ class OrchestrationSettings(BaseSettings):
         ),
     )
     fewshot_problem_max_chars: int = Field(
-        default=300,
+        default=500,
         description=(
             "Maximum characters kept from each few-shot example's problem field. "
             "Override with ORCHESTRATION__FEWSHOT_PROBLEM_MAX_CHARS."
         ),
     )
     fewshot_solution_max_chars: int = Field(
-        default=400,
+        default=800,
         description=(
             "Maximum characters kept from each few-shot example's solution field. "
             "Override with ORCHESTRATION__FEWSHOT_SOLUTION_MAX_CHARS."
         ),
     )
     repo_snippet_max_chars: int = Field(
-        default=400,
+        default=1200,
         description=(
             "Maximum characters kept from each repository snippet. "
             "Override with ORCHESTRATION__REPO_SNIPPET_MAX_CHARS."
@@ -209,11 +209,11 @@ class OrchestrationSettings(BaseSettings):
         default_factory=lambda: {
             "planner":    512,
             "researcher": 768,
-            "coder":      1536,
-            "debugger":   1024,
+            "coder":      3072,
+            "debugger":   2048,
             "reviewer":   512,
-            "critic":     384,
-            "consensus":  1536,
+            "critic":     512,
+            "consensus":  2048,
         },
         description=(
             "Per-role output token budget reserved for model generation. "
@@ -363,6 +363,19 @@ class OrchestrationSettings(BaseSettings):
         description=(
             "TTL in seconds for session history keys in Redis. "
             "Override with ORCHESTRATION__REDIS_SESSION_TTL_S."
+        ),
+    )
+    
+    p95_latency_budget_s: int = Field(
+        default=90.0,
+        description=(
+            "A hard upper bound (in seconds) on the 95th percentile inference latency allowed during validation of a newly trained adapter."
+        ),
+    )  
+    context_trim_log_level: int = Field(
+        default="warning",
+        description=(
+            "Controls how loudly the system logs when it trims conversation context to fit within the model’s maximum sequence length."
         ),
     )
 

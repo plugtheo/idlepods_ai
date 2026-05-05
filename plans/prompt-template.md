@@ -8,10 +8,7 @@
     - Do NOT perform any full file reads automatically. If deeper analysis is required, list candidate files and ask the user for explicit permission.
     - Do not modify any files.
     Tasks:
-    - Ensure Plans A, B, C, and D have been completed without any gaps.
-    - Ensure training is implemented properly so that on initial bootstrap - the training loads curated dataset for initial adapters, curated dataset is correct and suitable for each agents, trained properly for correct output per base model (input/output/tools/etc), and creates adapters in versions for proper rollback and newer version reads.
-    - Ensure retrainining does not corrupt the new adapter from incorrect formatting of data, needs to use existing adapter somehow (explain briefly) with added experience data + synthetic data (not in yet - but soon; needs flexibility now) - to produce better adapters. Need a way for end users to verify that the retrained adapter or newer adapter is better than previous with visuals (one of core values of this project).
-    - Ensure full end to end prompting works properly (sessions - conversations/coding/research), tool calling for coding tasks or conversations/research (like read/writing files, or searching the web, asking for local perms, etc.).
+    
 
     - Output exactly:
       - Bullet list of action plan + critical observations/risks (based only on lightweight searches)
@@ -49,36 +46,18 @@
     - Tests written as part of a step must pass before the step is reported complete. If a test fails, fix the underlying step rather than weakening the assertion.
 
     Task:
-        - Execute the exact plan in @plans/current-task.md. Follow its steps in strict sequential order with zero deviation or extra scope.
-        - Plan E is now the stability + safety pass *and* the adapter-training-readiness gate. On Plan E completion the codebase MUST be in a state where rank-stabilised LoRA training can be started immediately with zero further code changes. The plan's steps 12–17 enforce this; treat them as load-bearing, not optional.
-        - Adapter-training readiness — non-negotiable assertions to verify as you complete each related step:
-            • rsLoRA / DoRA / QLoRA flexibility: `AdapterRecipe.peft_type` is the ONLY switch; selecting one is a `recipes.yaml` edit. The trainer logs `apply_recipe peft_type=... use_rslora=... ...` once per call. The startup gate (step 14) refuses `peft_type ∉ {lora,rslora,dora,qlora}` for any role except `consensus`, and refuses inconsistent flags (e.g. `peft_type=rslora` with `use_rslora=False`).
-            • Tool-calling scope is config-driven via `settings.role_tools_enabled: Dict[str, List[str]]`. After Plan E, the literal `{"coder"}` MUST NOT appear in `nodes.py`, `pipeline.py`, `runner.py`, or `recorder.py` for routing/scope decisions — assert via a grep guard in the new test. Researcher / debugger / any future agent gains tool calling by adding tool names to `role_tools_enabled[<role>]` plus registering the tool in `runner.py:_TOOL_REGISTRY`. No graph or pipeline change required.
-            • Per-role tool allowlist is honoured end-to-end: `build_tool_schemas(allowlist=...)` filters `_TOOL_REGISTRY` by name, called from `nodes.py` with `settings.role_tools_enabled.get(role)`.
-            • Initial seed-data observability: `_load_curated_pairs` and the experience-pair load both emit a structured `seed_data_status` log with `role`, `curated_count` / `experience_count`, `path`, `exists`. No automatic data download from inside the trainer subprocess.
-            • Recipe defaults: `recipes.yaml` keeps rsLoRA as default (r=32, alpha=64). Per-role and per-backend overrides remain a YAML edit.
-            • Tool-call SFT is role-agnostic: `_load_sft_pairs` already iterates contributions by role and reads `tool_turns` without a coder-only branch. Verify and add the explanatory comment from step 16; do not introduce any role check.
-            • Adapter-name decoupling: `_CAPABILITY_TO_ADAPTER` and `_CAPABILITY_TO_CURATED` are the only role↔filename maps. Onboarding a new role follows the four-step procedure documented in the new `recipes.yaml` comment block (step 17).
+    -
 
     Instructions:
     - Make all file changes silently (no diffs, no patches, no code blocks, no before/after).
     - For any read, always specify offset + limit.
     - Output exactly one bullet per completed step: "• Step N: [one-line description of what changed and why]".
-    - For steps 14, 15, and the grep guard in step 12's test, also include the literal log-line / assertion shape in the bullet so it is obvious from the output that the readiness gate fired (still one line per step).
     - No reasoning, explanations, or commentary beyond those bullets.
 
     Begin.
 
 ## Compact
     /compact
-    Full roadmap context is in @plans/current-roadmap.md.
-    Summarize in 4-6 short bullets only:
-    - Which plan just completed
-    - Key files changed
-    - Critical invariants now enforced (especially no hardcoded model names, registry usage)
-    - Current state of the codebase
-    - Any open items or next steps
-    Stay extremely concise. Do not explain or add commentary.
 
 ## Verification
 You are now in VERIFICATION MODE for the just-completed plan.

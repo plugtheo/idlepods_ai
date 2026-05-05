@@ -20,6 +20,9 @@ RUN pip install --no-cache-dir \
     "torch==2.7.0" "torchvision==0.22.0" "torchaudio==2.7.0" \
     && pip install --no-cache-dir "unsloth[cu126-torch270]"
 
+RUN pip install --no-cache-dir \
+      https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+
 # Create a GNU ld linker script stub so triton can compile its CUDA driver shim on
 # WSL2 (where the real libcuda.so.1 is visible to the runtime linker but the build-time
 # linker needs an unversioned libcuda.so in one of the -L directories).

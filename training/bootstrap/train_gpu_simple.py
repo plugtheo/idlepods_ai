@@ -54,12 +54,8 @@ from shared.contracts.sft_builder import build_sft_pair
 # ---------------------------------------------------------------------------
 def _resolve_base_model_id() -> str:
     from shared.contracts.models import load_registry
-    registry = load_registry()
-    backend = registry.backends[registry.default_backend]
-    # Prefer training_model_id (non-quantized base) over model_id (AWQ/quantized inference model).
-    # Unsloth applies its own 4-bit quantization; training on an already-quantized model
-    # produces incorrect adapter weights.
-    return backend.training_model_id or backend.model_id
+    backend = load_registry().backends[load_registry().default_backend]
+    return backend.resolve_training_model_id()
 
 
 def _resolve_local_model_path(model_id: str) -> str:
@@ -276,7 +272,7 @@ async def train_capability(
 
     # ── Train via LoRATrainer ────────────────────────────────────────────────
     try:
-        trainer = LoRATrainer(base_model=model_id, output_dir=str(save_path))
+        trainer = LoRATrainer(base_model=model_id, output_dir=str(save_path), max_seq_length=recipe.max_seq_length)
         result  = await trainer.train(
             dataset_path=dataset_path,
             num_epochs=recipe.num_epochs,

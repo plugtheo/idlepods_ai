@@ -3,17 +3,17 @@ default:
   use_rslora: true
   r: 32
   alpha: 64
-  dropout: 0.05
+  dropout: 0.0
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
   learning_rate: 2e-4
   num_epochs: 3
-  max_seq_length: 2048
+  max_seq_length: 10240
   sft_format: openai_messages
   tool_call_style: openai_native
 
 by_role:
-  coder:    {r: 32, alpha: 64, num_epochs: 4}
-  debugger: {r: 32, alpha: 64, num_epochs: 4}
+  coder:    {r: 32, alpha: 64, num_epochs: 4, dropout: 0.05}
+  debugger: {r: 32, alpha: 64, num_epochs: 3, dropout: 0.05}
   consensus: {peft_type: none}
 
 # Per-backend role overrides: future model-specific tuning goes here.

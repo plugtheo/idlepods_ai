@@ -32,6 +32,16 @@ class BackendEntry(BaseModel):
     # Reserved for future per-backend pre-tokenizer override — not implemented now.
     tokenizer_pre_tokenizer: Optional[Literal["bytelevel", "metaspace"]] = None
 
+    def resolve_training_model_id(self) -> str:
+        """
+        Resolution policy for training:
+        - Prefer training_model_id when present
+        - Fall back to model_id
+        - Never silently use AWQ for training
+        """
+        if self.training_model_id:
+            return self.training_model_id
+        return self.model_id
 
 class ModelsRegistry(BaseModel):
     default_backend: str

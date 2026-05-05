@@ -92,7 +92,7 @@ random.seed(SEED)
 # Rule of thumb: max_seq_length (tokens) * ~3 chars/token.
 # Configurable via TRAINING__RESPONSE_MAX_CHARS to stay in sync with
 # TrainingSettings.max_seq_length without code changes.
-_RESPONSE_MAX_CHARS: int = int(os.environ.get("TRAINING__RESPONSE_MAX_CHARS", "6000"))
+_RESPONSE_MAX_CHARS: int = int(os.environ.get("TRAINING__RESPONSE_MAX_CHARS", "22000"))
 
 # ---------------------------------------------------------------------------
 # Keywords used to route instruction text into the right capability bucket
@@ -1220,6 +1220,38 @@ def print_stats(capability: str, data: List[Dict]) -> None:
     if lengths:
         avg = sum(lengths) / len(lengths)
         print(f"    avg text length: {avg:.0f} chars")
+        
+    import numpy as np
+    p50 = int(np.percentile(lengths, 50))
+    p95 = int(np.percentile(lengths, 95))
+    p99 = int(np.percentile(lengths, 99))
+    print(f"    p50 chars: {p50}")
+    print(f"    p95 chars: {p95}")
+    print(f"    p99 chars: {p99}")
+
+    # --- Token lengths (rendered chat → tokenizer.encode) ---
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(
+        "Qwen/Qwen2.5-7B-Instruct",
+        trust_remote_code=True
+    )
+
+    token_lengths = []
+    for d in data:
+        rendered = tok.apply_chat_template(
+            d["messages"],
+            tokenize=False,
+            add_generation_prompt=False
+        )
+        token_lengths.append(len(tok.encode(rendered)))
+
+    tp50 = int(np.percentile(token_lengths, 50))
+    tp95 = int(np.percentile(token_lengths, 95))
+    tp99 = int(np.percentile(token_lengths, 99))
+
+    print(f"    p50 tokens: {tp50}")
+    print(f"    p95 tokens: {tp95}")
+    print(f"    p99 tokens: {tp99}")
 
 
 # ---------------------------------------------------------------------------

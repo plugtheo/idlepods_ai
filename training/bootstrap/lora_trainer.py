@@ -579,13 +579,11 @@ class LoRATrainer:
     """Train LoRA adapter on prepared dataset"""
     
     def __init__(self,
-                 base_model: Optional[str] = None,
-                 output_dir: str = "./data/adapters",
-                 max_seq_length: int = 2048):
-        self.base_model = base_model or _resolve_base_model()
+                 base_model: str,
+                 output_dir: str = "./data/adapters"):
+        self.base_model = base_model
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.max_seq_length = max_seq_length
         self.adapter_id = None
         self.HAS_UNSLOTH = self._check_unsloth()
     
@@ -621,11 +619,11 @@ class LoRATrainer:
                    resume_from_checkpoint: Optional[str] = None) -> Dict[str, Any]:
         """
         Train LoRA adapter on dataset.
-
-        recipe: when provided, PEFT config is applied via apply_recipe().
-        Falls back to explicit lora_rank / lora_alpha parameters otherwise.
         """
         
+        if recipe is None:
+            raise RuntimeError("LoRATrainer.train() requires a recipe with max_seq_length override")
+                
         print(f"\n{'='*70}")
         print("LORA TRAINING")
         print(f"{'='*70}")
@@ -634,29 +632,34 @@ class LoRATrainer:
         print(f"[TRAINER] Epochs: {num_epochs}")
         print(f"[TRAINER] LoRA rank: {lora_rank}, alpha: {lora_alpha}")
         print(f"[TRAINER] Learning rate: {learning_rate}")
+        print(f"[TRAINER] Max sequence length: {recipe.max_seq_length}")
         
         # Load dataset
         dataset = []
         
         with open(dataset_path, 'r', encoding='utf-8') as f:
             for line in f:
-                if line.strip():
-                    record = json.loads(line)
-                    # Only keep records that are in a supported format
-                    if "messages" in record:
-                        # Chat format: nothing to do
-                        dataset.append(record)
-                    elif "prompt" in record and "completion" in record:
-                        # Prompt/completion format: nothing to do
-                        dataset.append(record)
-                    # else: skip records that don't match any known format
+                if not line.strip():
+                    continue
+                
+                record = json.loads(line)
+                # Only keep records that are in a supported format
+                if isinstance(record, list):
+                    for r in record:
+                        if "messages" in r:
+                            dataset.append(r)
+                        elif "prompt" in r and "completion" in r:
+                            dataset.append(r)
+                    continue
+                if "messages" in record:
+                    dataset.append(record)
+                elif "prompt" in record and "completion" in record:
+                    dataset.append(record)
 
         print(f"[TRAINER] Loaded {len(dataset)} training samples")
         
         if self.HAS_UNSLOTH:
             return await self._train_unsloth(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe, resume_from_checkpoint=resume_from_checkpoint)
-        elif self._check_peft_gpu():
-            return await self._train_peft(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe, resume_from_checkpoint=resume_from_checkpoint)
         else:
             return await self._train_mock(dataset, num_epochs)
 
@@ -676,7 +679,7 @@ class LoRATrainer:
             print("\n[TRAINER] Loading Unsloth model...")
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=self.base_model,
-                max_seq_length=self.max_seq_length,
+                max_seq_length=recipe.max_seq_length,
                 dtype=None,
                 load_in_4bit=True,
             )
@@ -684,6 +687,9 @@ class LoRATrainer:
             # Ensure pad token is set — required for batched training.
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
+
+            # One-shot validation: render a sample tool-call record through tokenizer.apply_chat_template and inspect for the markers - hard fail
+            self._validate_qwen3_toolcall_wrapping(tokenizer)
 
             # Apply LoRA via recipe (preferred) or explicit rank/alpha fallback.
             if recipe is not None:
@@ -708,30 +714,11 @@ class LoRATrainer:
             # - legacy prompt+completion records → simple concat
             # completion_only_loss CANNOT be used with text-only datasets.
             _has_messages_records = any("messages" in r for r in dataset)
-            text_records: List[Dict[str, str]] = []
-            for record in dataset:
-                if "messages" in record:
-                    # preserve messages so trainer sees conversational schema
-                    txt = tokenizer.apply_chat_template(record["messages"], tokenize=False)
-                    text_records.append({
-                        "messages": record["messages"],
-                        "text": txt,
-                        "instruction": record.get("instruction",""),
-                        "response": record.get("response","")
-                    })
-                elif "prompt" in record and "completion" in record:
-                    txt = record["prompt"] + record["completion"]
-                    text_records.append({"text": txt})
-                else:
-                    instr = record.get("instruction", "")
-                    resp  = record.get("response", record.get("completion", ""))
-                    if instr or resp:
-                        text_records.append({"text": instr + "\n\n" + resp})
 
             sft_config_kwargs = dict(
-                per_device_train_batch_size=2,
-                gradient_accumulation_steps=4,
-                warmup_steps=100,
+                per_device_train_batch_size=1,
+                gradient_accumulation_steps=8,
+                warmup_ratio=0.05,
                 num_train_epochs=num_epochs,
                 learning_rate=learning_rate,
                 fp16=False,
@@ -741,19 +728,20 @@ class LoRATrainer:
                 weight_decay=0.01,
                 lr_scheduler_type="linear",
                 output_dir=str(self.output_dir / "checkpoint"),
-                max_seq_length=self.max_seq_length,
-                dataset_text_field="text",
+                max_seq_length=recipe.max_seq_length,
                 # Never write HF checkpoints during training — we do a single
                 # explicit save after training completes.  Without this,
                 # SFTTrainer dumps ~200 MB checkpoint dirs every 500 steps
                 # (7+ times per capability), consuming ~1.4 GB of wasted disk.
                 save_strategy="no",
-                # packing=False: do NOT concatenate examples, so each example
-                # is trained independently without cross-contamination.
-                packing=False,
+                packing=True,       # pack multiple examples into a single sequence - works since assistant_only_loss = true is used
                 # Suppress wandb / tensorboard init — not needed in training
                 # containers and causes hangs if wandb credentials are absent.
                 report_to="none",
+                dataset_num_proc=4,
+                dataloader_num_workers=2,
+                dataset_text_field=None,
+                dataset_kwargs={"formatting_func": None}
             )
             # assistant_only_loss: only backprop on assistant tokens (using the
             # chat template's {% generation %} markers).  Best for chat-format
@@ -768,7 +756,7 @@ class LoRATrainer:
                 sft_config = SFTConfig(**sft_config_kwargs)
 
             from datasets import Dataset as HFDataset
-            train_dataset = HFDataset.from_list(text_records)
+            train_dataset = HFDataset.from_list(dataset)
 
             def _formatting_func(example):
                 # SFTTrainer may call this with either a single example (dict of
@@ -836,154 +824,6 @@ class LoRATrainer:
             # Service can record the failure accurately.
             raise
     
-    async def _train_peft(self,
-                          dataset: List[Dict],
-                          num_epochs: int,
-                          learning_rate: float,
-                          lora_rank: int,
-                          lora_alpha: int,
-                          recipe: Optional[AdapterRecipe] = None,
-                          resume_from_checkpoint: Optional[str] = None) -> Dict[str, Any]:
-        """Real GPU training via HuggingFace PEFT + TRL (no Unsloth dependency).
-
-        Used when Unsloth is unavailable (e.g. Windows triton incompatibility).
-        Slower than Unsloth (~2x) but produces identical adapter weights.
-        """
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-        from trl import SFTTrainer, SFTConfig
-        from datasets import Dataset as HFDataset
-
-        print("\n[TRAINER] HF PEFT training (GPU, no Unsloth)...")
-
-        _lora_rank  = recipe.r      if recipe else lora_rank
-        _lora_alpha = recipe.alpha  if recipe else lora_alpha
-        _dropout    = recipe.dropout if recipe else 0.05
-        _modules    = recipe.target_modules if recipe else _ADAPTER_TARGET_MODULES
-
-        bnb_cfg = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
-
-        print(f"[TRAINER] Loading base model: {self.base_model}")
-        model = AutoModelForCausalLM.from_pretrained(
-            self.base_model,
-            quantization_config=bnb_cfg,
-            device_map="auto",
-            trust_remote_code=True,
-        )
-        tokenizer = AutoTokenizer.from_pretrained(self.base_model, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        model = prepare_model_for_kbit_training(model)
-        lora_cfg = LoraConfig(
-            r=_lora_rank,
-            lora_alpha=_lora_alpha,
-            target_modules=_modules,
-            lora_dropout=_dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
-            use_rslora=getattr(recipe, "use_rslora", False) if recipe else False,
-        )
-        model = get_peft_model(model, lora_cfg)
-        model.print_trainable_parameters()
-
-        # Same shape-normalisation as _train_unsloth: pre-render to "text"
-        # column so SFTTrainer accepts both messages and prompt+completion records.
-        _has_messages_records = any("messages" in r for r in dataset)
-        text_records: List[Dict[str, str]] = []
-        for record in dataset:
-            if "messages" in record:
-                txt = tokenizer.apply_chat_template(record["messages"], tokenize=False)
-            elif "prompt" in record and "completion" in record:
-                txt = record["prompt"] + record["completion"]
-            else:
-                instr = record.get("instruction", "")
-                resp  = record.get("response", record.get("completion", ""))
-                txt = (instr + "\n\n" + resp) if (instr or resp) else ""
-            if txt:
-                text_records.append({"text": txt})
-        train_dataset = HFDataset.from_list(text_records)
-
-        sft_config_kwargs = dict(
-            per_device_train_batch_size=2,
-            gradient_accumulation_steps=4,
-            warmup_steps=100,
-            num_train_epochs=num_epochs,
-            learning_rate=learning_rate,
-            fp16=False,
-            bf16=True,
-            logging_steps=10,
-            optim="adamw_8bit",
-            weight_decay=0.01,
-            lr_scheduler_type="linear",
-            output_dir=str(self.output_dir / "checkpoint"),
-            max_seq_length=self.max_seq_length,
-            dataset_text_field="text",
-            save_strategy="no",
-            packing=False,
-            report_to="none",
-        )
-        if _has_messages_records:
-            try:
-                sft_config = SFTConfig(**sft_config_kwargs, assistant_only_loss=True)
-            except TypeError:
-                sft_config = SFTConfig(**sft_config_kwargs)
-        else:
-            sft_config = SFTConfig(**sft_config_kwargs)
-
-        def _formatting_func(example):
-            t = example["text"]
-            return t if isinstance(t, list) else [t]
-
-        trainer = SFTTrainer(
-            model=model,
-            processing_class=tokenizer,
-            train_dataset=train_dataset,
-            args=sft_config,
-            formatting_func=_formatting_func,
-        )
-
-        print("[TRAINER] Starting HF PEFT training...")
-        if resume_from_checkpoint:
-            print(f"[TRAINER] Warm-starting from prior adapter: {resume_from_checkpoint}")
-            trainer.train(resume_from_checkpoint=resume_from_checkpoint)
-        else:
-            trainer.train()
-
-        model.save_pretrained(str(self.output_dir))
-        tokenizer.save_pretrained(str(self.output_dir))
-
-        weight_file = self.output_dir / "adapter_model.safetensors"
-        if not weight_file.exists():
-            weight_file = self.output_dir / "adapter_model.bin"
-        size_mb = round(weight_file.stat().st_size / 1e6, 2) if weight_file.exists() else 0.0
-
-        final_loss = 0.0
-        if hasattr(trainer, "state") and trainer.state.log_history:
-            for entry in reversed(trainer.state.log_history):
-                if "loss" in entry:
-                    final_loss = float(entry["loss"])
-                    break
-
-        self.adapter_id = self.output_dir.name
-        print(f"[TRAINER] HF PEFT training complete — loss={final_loss:.4f}  size={size_mb:.1f}MB")
-        return {
-            "status":     "success",
-            "adapter_id": self.adapter_id,
-            "method":     "hf_peft",
-            "epochs":     num_epochs,
-            "samples":    len(dataset),
-            "lora_rank":  _lora_rank,
-            "size_mb":    size_mb,
-            "final_loss": round(final_loss, 6),
-        }
-
     async def _train_mock(self,
                          dataset: List[Dict],
                          num_epochs: int) -> Dict[str, Any]:
@@ -1016,18 +856,64 @@ class LoRATrainer:
             'samples': len(dataset),
         }
 
+    def _validate_qwen3_toolcall_wrapping(tokenizer):
+        """
+        Hard validation: Qwen3 chat template must wrap assistant tool-call turns
+        inside {% generation %} ... {% endgeneration %}.
+
+        If missing, training with assistant_only_loss=True will silently corrupt
+        tool-call learning. This is a blocker for Phase 3.
+        """
+
+        sample_messages = [
+            {"role": "user", "content": "test"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "t1",
+                        "type": "python",
+                        "function": {"name": "f", "arguments": "{}"},
+                    }
+                ],
+                "content": None,
+            },
+        ]
+
+        rendered = tokenizer.apply_chat_template(
+            sample_messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+
+        has_start = "{% generation %}" in rendered
+        has_end = "{% endgeneration %}" in rendered
+
+        if not (has_start and has_end):
+            raise RuntimeError(
+                "Qwen3 chat template is missing {% generation %} wrapping for "
+                "assistant tool-call turns. Tool-call masking will be incorrect. "
+                "Patch the chat template or install a custom assistant-mask collator."
+            )
 
 class LoRAAgentTrainerPipeline:
     """Complete 5-stage pipeline for training LoRA on agent outputs"""
     
     def __init__(self,
+                 base_model: str,
                  agent_runs_file: Optional[str] = None,
-                 base_model: Optional[str] = None):
+                 max_seq_length: Optional[int] = None):
         self.agent_runs_file = agent_runs_file
-        self.base_model = base_model or _resolve_base_model()
+        self.base_model = base_model
         self.dataset_manager = AgentOutputDataset()
         self.trainer_builder = TrainingDatasetBuilder()
-        self.lora_trainer = LoRATrainer(base_model=self.base_model)
+        if max_seq_length is None:
+            try:
+                from shared.contracts.training import load_recipes
+                max_seq_length = load_recipes().default.max_seq_length
+            except Exception:
+                max_seq_length = 2048
+        self.lora_trainer = LoRATrainer(base_model=self.base_model, max_seq_length=max_seq_length)
         
         self.run_id = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.report = {
@@ -1186,8 +1072,12 @@ class LoRAAgentTrainerPipeline:
 async def main():
     """Example usage"""
     
-    # Initialize pipeline
-    pipeline = LoRAAgentTrainerPipeline()
+    from shared.contracts.models import load_registry
+    backend = load_registry().backends[load_registry().default_backend]
+    training_model_id = backend.resolve_training_model_id()
+
+    # Initialize pipeline with explicit base model
+    pipeline = LoRAAgentTrainerPipeline(base_model=training_model_id)
     
     # Run complete pipeline
     report = await pipeline.run(

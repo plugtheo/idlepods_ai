@@ -49,18 +49,12 @@ def _build_openai_messages_record(
     tool_calls = contribution.tool_calls or []
     tool_results = contribution.tool_results or []
     
-    instruction = extract_user_task(messages)
-
     if tool_calls:
         assistant_tool_turn = {"role": "assistant", "tool_calls": list(tool_calls), "content": None}
         
         tool_target_msgs = list(messages) + [assistant_tool_turn]
         tool_target_record = {
             "messages": tool_target_msgs,
-            # Fallbacks for legacy/inspection
-            "instruction": instruction,
-            "response": "",  # no final assistant content in this record
-            "text": (instruction + "\n\n").strip(),
         }   
         
         full_msgs = list(messages) + [assistant_tool_turn]
@@ -78,9 +72,6 @@ def _build_openai_messages_record(
 
         full_record = {
             "messages": full_msgs,
-            "instruction": instruction,
-            "response": final_content,
-            "text": (instruction + "\n\n" + final_content).strip(),
         }
 
         return [tool_target_record, full_record]
@@ -98,22 +89,45 @@ def _build_openai_messages_record(
     if not (_last and _last.get("role") == "assistant" and (_last.get("content") or "") == final_content):
         messages.append({"role": "assistant", "content": final_content})
 
-    text = (instruction + "\n\n" + final_content).strip()
 
-    return {"messages": messages, "instruction": instruction, "response": final_content, "text": text}
+    return {"messages": messages }
 
-def extract_user_task(messages: List[Dict[str, Any]]) -> str:
+
     """
-    Return the actual user task from a LangGraph message list.
+    Hard validation: Qwen3 chat template must wrap assistant tool-call turns
+    inside {% generation %} ... {% endgeneration %}.
 
-    LangGraph inserts multiple synthetic user messages (few-shots,
-    repo snippets, conversation history, iteration history). The *real*
-    user task is always the last user-role message before any tool turns.
-
-    This function scans messages in reverse and returns the first
-    user-role message it finds.
+    If missing, training with assistant_only_loss=True will silently corrupt
+    tool-call learning. This is a blocker for Phase 3.
     """
-    for m in reversed(messages):
-        if m.get("role") == "user":
-            return m.get("content", "") or ""
-    return ""
+
+    sample_messages = [
+        {"role": "user", "content": "test"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "t1",
+                    "type": "python",
+                    "function": {"name": "f", "arguments": "{}"},
+                }
+            ],
+            "content": None,
+        },
+    ]
+
+    rendered = tokenizer.apply_chat_template(
+        sample_messages,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+
+    has_start = "{% generation %}" in rendered
+    has_end = "{% endgeneration %}" in rendered
+
+    if not (has_start and has_end):
+        raise RuntimeError(
+            "Qwen3 chat template is missing {% generation %} wrapping for "
+            "assistant tool-call turns. Tool-call masking will be incorrect. "
+            "Patch the chat template or install a custom assistant-mask collator."
+        )

@@ -416,7 +416,7 @@ def main() -> None:
     # Resolve AdapterRecipe — registry lookup unless --recipe-name overrides it.
     try:
         from shared.contracts.models import load_registry
-        backend = load_registry().default_backend
+        backend = load_registry().backends[load_registry().default_backend].resolve_training_model_id()
     except Exception:
         backend = "primary"
     _recipe_role = args.recipe_name if args.recipe_name else role_name
@@ -552,7 +552,7 @@ def main() -> None:
     trainer = LoRATrainer(
         base_model=args.base_model,
         output_dir=adapter_output_dir,
-        max_seq_length=_training_settings.max_seq_length,
+        max_seq_length=recipe.max_seq_length,
     )
     try:
         result = asyncio.run(trainer.train(

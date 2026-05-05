@@ -293,6 +293,21 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
     combined = _trim_conversation_history(
         prior_history + history, settings.max_conversation_history_tokens
     )
+    
+    if len(combined) < len(prior_history) + len(history):
+        logger.warning(
+        "context_trim",
+            extra={
+                "bucket": "conversation_history",
+                "task_id": initial_state.get("task_id"),
+                "allowed": None,  # or the history cap if you have one
+                "returned": len(prior_history),
+                "kept": len(combined),
+                "dropped": len(prior_history) - len(combined),
+                "reason": "redis_cap",
+            },
+        )
+    
     asyncio.create_task(session_store.save_session(
         initial_state["task_id"], combined, settings.redis_session_ttl_s
     ))
@@ -499,6 +514,21 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                     combined = _trim_conversation_history(
                         prior_history + history, settings.max_conversation_history_tokens
                     )
+                    
+                    if len(combined) < len(prior_history) + len(history):
+                        logger.warning(
+                        "context_trim",
+                            extra={
+                                "bucket": "conversation_history",
+                                "task_id": initial_state.get("task_id"),
+                                "allowed": None,  
+                                "returned": len(prior_history),
+                                "kept": len(combined),
+                                "dropped": len(prior_history) - len(combined),
+                                "reason": "redis_cap",
+                            },
+                        )
+                    
                     asyncio.create_task(session_store.save_session(
                         initial_state["task_id"], combined, settings.redis_session_ttl_s
                     ))

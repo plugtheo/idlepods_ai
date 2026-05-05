@@ -280,6 +280,20 @@ def _build_messages(
         eligible: List[str] = []
         used        = 0
         recent_conv = conversation_history[-settings.max_conversation_turns:]
+        
+        logger.warning(
+                "context_trim",
+                extra={
+                    "bucket": "history",
+                    "task_id": state.get("task_id"),
+                    "allowed": settings.max_conversation_turns,
+                    "returned": len(conversation_history),
+                    "kept": len(recent_conv),
+                    "dropped": len(conversation_history) - len(recent_conv),
+                    "reason": "max_conversation_turns",
+                },
+            )
+            
         for h in reversed(recent_conv):
             h_role    = h.get("role", "agent")
             output    = str(h.get("output") or h.get("full_output", ""))
