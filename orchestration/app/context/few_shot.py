@@ -54,9 +54,17 @@ async def _get_collection():
     return _collection
 
 
-async def search(prompt: str) -> List[FewShotExample]:
+async def search(
+    prompt: str,
+    *,
+    exclude_task_id: str | None = None,
+) -> List[FewShotExample]:
     """
     Return up to settings.max_few_shots past experiences similar to *prompt*.
+
+    When ``exclude_task_id`` is set, results from that task are filtered out
+    via a ChromaDB ``where`` clause so the current run cannot retrieve its own
+    in-flight experiences (or any prior ones from the same multi-turn task).
 
     Returns an empty list when the store is empty or unavailable.
     """
@@ -72,11 +80,17 @@ async def search(prompt: str) -> List[FewShotExample]:
         query_vector = (await embed_async(prompt)).tolist()
 
         def _query():
-            return collection.query(
-                query_embeddings=[query_vector],
-                n_results=min(settings.max_few_shots, count),
-                include=["documents", "metadatas", "distances"],
-            )
+            kwargs = {
+                "query_embeddings": [query_vector],
+                "n_results":        min(settings.max_few_shots, count),
+                "include":          ["documents", "metadatas", "distances"],
+            }
+            if exclude_task_id:
+                # Existing rows upserted before task_id metadata existed have an
+                # empty-string task_id; the $ne filter still excludes the matching
+                # current task_id without dropping the legacy rows.
+                kwargs["where"] = {"task_id": {"$ne": exclude_task_id}}
+            return collection.query(**kwargs)
 
         results = await asyncio.to_thread(_query)
 

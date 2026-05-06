@@ -215,6 +215,7 @@ class OrchestrationSettings(BaseSettings):
             "critic":     512,
             "consensus":  2048,
             "summarizer": 512,
+            "router":     64,
         },
         description=(
             "Per-role output token budget reserved for model generation. "
@@ -270,6 +271,58 @@ class OrchestrationSettings(BaseSettings):
         description=(
             "Per-role tool allowlist. Empty list ⇒ role does not call tools. "
             "Override with ORCHESTRATION__ROLE_TOOLS_ENABLED."
+        ),
+    )
+    non_streaming_roles: List[str] = Field(
+        default_factory=lambda: ["reviewer", "critic", "review_critic", "router"],
+        description=(
+            "List of roles for which the inference call should use the blocking path even when a streaming response is available."
+        ),
+    )
+
+    # ── Query router ─────────────────────────────────────────────────────────
+    router_mode: str = Field(
+        default="hybrid",
+        description=(
+            "Routing strategy: 'regex' (legacy keyword classifier), 'llm' "
+            "(every prompt goes through a guided-JSON LLM call), or 'hybrid' "
+            "(regex first, LLM only when regex confidence is below "
+            "router_confidence_threshold). Override with ORCHESTRATION__ROUTER_MODE."
+        ),
+    )
+    router_backend: str = Field(
+        default="primary",
+        description="Inference backend used for LLM-based routing.",
+    )
+    router_max_tokens: int = Field(
+        default=64,
+        description="Generation token budget for the router classification call.",
+    )
+    router_temperature: float = Field(
+        default=0.0,
+        description="Temperature for the router classification call (0.0 = deterministic).",
+    )
+    router_confidence_threshold: float = Field(
+        default=0.6,
+        description=(
+            "Hybrid router only: regex confidence below this triggers an LLM "
+            "classification call."
+        ),
+    )
+    router_cache_size: int = Field(
+        default=256,
+        description="Maximum prompts cached in-process by LLMQueryRouter.",
+    )
+
+    # ── Few-shot retrieval scoping ───────────────────────────────────────────
+    few_shot_scope: str = Field(
+        default="task_exclude",
+        description=(
+            "Scope for few-shot RAG retrieval: 'global' (no filter — legacy "
+            "behaviour, leaks across task_ids), or 'task_exclude' (exclude "
+            "experiences from the current task_id, preventing in-flight echo "
+            "and cross-task content leakage). Override with "
+            "ORCHESTRATION__FEW_SHOT_SCOPE."
         ),
     )
     compaction_trigger_ratio: float = Field(

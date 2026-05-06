@@ -60,8 +60,9 @@ class RemoteVLLMBackend(InferenceBackend):
         self._registry = _AdapterRegistry(self._base_url, self._model_id)
 
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
-        effective_model = await _resolve_model(
-            self._model_id, request.adapter_name, self._registry, request.role
+        effective_model, used_base_fallback = await _resolve_model(
+            self._model_id, request.adapter_name, self._registry, request.role,
+            self._base_url,
         )
 
         messages = [m.model_dump(exclude_none=True) for m in request.messages]
@@ -82,6 +83,11 @@ class RemoteVLLMBackend(InferenceBackend):
         }
         if request.tools:
             payload["tools"] = [t.model_dump() for t in request.tools]
+        if request.response_schema:
+            # vLLM HTTP API: guided_json must live at the top level of the JSON
+            # body. (`extra_body` is an OpenAI Python-SDK convention only.)
+            payload["guided_json"] = request.response_schema
+            payload["guided_decoding_backend"] = "xgrammar"
 
         try:
             resp = await self._client.post(
@@ -99,12 +105,22 @@ class RemoteVLLMBackend(InferenceBackend):
         content = _fix_bpe_artifacts(message.get("content") or "")
         tool_calls = message.get("tool_calls")
 
+        parsed: Optional[dict] = None
+        if request.response_schema and content:
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "RemoteVLLM guided_json parse failed for role=%s: %s",
+                    request.role, exc,
+                )
+
         tokens_out = data.get("usage", {}).get("completion_tokens", 0)
 
         logger.info(
-            "RemoteVLLM ← role=%s  backend=%s  model=%s  tokens=%d  tool_calls=%s",
+            "RemoteVLLM ← role=%s  backend=%s  model=%s  tokens=%d  tool_calls=%s  parsed=%s",
             request.role, self._backend_name, effective_model, tokens_out,
-            bool(tool_calls),
+            bool(tool_calls), bool(parsed),
         )
 
         return GenerateResponse(
@@ -114,14 +130,17 @@ class RemoteVLLMBackend(InferenceBackend):
             tokens_generated=tokens_out,
             session_id=request.session_id,
             tool_calls=tool_calls,
+            used_base_fallback=used_base_fallback,
+            parsed=parsed,
         )
 
     async def generate_stream(
         self, request: GenerateRequest
     ) -> AsyncGenerator[str, None]:
         """Stream tokens via SSE from the remote vLLM server."""
-        effective_model = await _resolve_model(
-            self._model_id, request.adapter_name, self._registry, request.role
+        effective_model, _ = await _resolve_model(
+            self._model_id, request.adapter_name, self._registry, request.role,
+            self._base_url,
         )
 
         messages = [m.model_dump(exclude_none=True) for m in request.messages]

@@ -63,6 +63,7 @@ async def upsert(event: ExperienceEvent) -> None:
                 embeddings=[embedding],
                 documents=[event.prompt],
                 metadatas=[{
+                    "task_id": event.task_id or "",
                     "solution": event.final_output,
                     "score": str(event.final_score),
                     "agent_chain": ",".join(event.agent_chain),

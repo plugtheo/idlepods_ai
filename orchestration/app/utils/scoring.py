@@ -18,8 +18,11 @@ Score bands
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, List
+
+from shared.contracts.evaluator_schemas import EVALUATOR_SCHEMAS
 
 # Regex to extract "SCORE: 0.82" style annotations from reviewer / critic output.
 _SCORE_RE = re.compile(r"\bSCORE\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
@@ -69,7 +72,20 @@ _EVALUATOR_REQUIRED_FIELDS: Dict[str, List[str]] = {
 
 
 def _required_fields_present(text: str, role: str) -> bool:
-    """Return True if all non-SCORE structured fields for *role* appear in *text*."""
+    """Return True if all required fields for *role* appear in *text*.
+
+    Tries the JSON path first (post-guided-decoding output) and falls back to the
+    legacy SCORE:/ISSUES: regex format so older adapter outputs continue scoring.
+    """
+    schema_cls = EVALUATOR_SCHEMAS.get(role)
+    if schema_cls is not None:
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                schema_cls.model_validate(obj)
+                return True
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
     fields = _EVALUATOR_REQUIRED_FIELDS.get(role, [])
     return all(re.search(rf"(?mi)^{field}:", text) for field in fields)
 
@@ -80,6 +96,14 @@ def extract_score_from_text(text: str) -> float | None:
 
     Returns the float if found and in [0, 1], otherwise None.
     """
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict) and "score" in obj:
+            value = float(obj["score"])
+            if 0.0 <= value <= 1.0:
+                return value
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
     match = _SCORE_RE.search(text)
     if match:
         value = float(match.group(1))

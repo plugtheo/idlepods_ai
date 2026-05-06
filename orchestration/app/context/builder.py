@@ -85,8 +85,13 @@ async def build(
     elif allowed_files is not None:
         scan_gate = set(allowed_files)
 
+    from ..config.settings import settings as _settings
+    few_shot_exclude = task_id if (task_id and _settings.few_shot_scope == "task_exclude") else None
+
     few_shots_result, repo_snippets_result, hints_result = await asyncio.gather(
-        asyncio.sleep(0, result=[]) if suppress_few_shots else few_shot.search(prompt),
+        asyncio.sleep(0, result=[]) if suppress_few_shots else few_shot.search(
+            prompt, exclude_task_id=few_shot_exclude,
+        ),
         repo.scan(prompt, intent, allowed_files=scan_gate),
         hints.generate(intent, complexity),
         return_exceptions=True,

@@ -75,20 +75,12 @@ AGENT_PROMPTS: Dict[str, str] = {
         "You are ReviewerAgent \u2014 a rigorous code reviewer.\n"
         "Your job: evaluate the implementation for correctness, clarity, "
         "performance, security, and maintainability.\n"
-        "Output structured feedback:\n"
-        "SCORE: <0.0\u20131.0>\n"
-        "STRENGTHS: <bullet points>\n"
-        "ISSUES: <bullet points, or 'None'>\n"
-        "SUGGESTIONS: <improvements, or 'None'>"
+        "Output a JSON object matching the provided schema. Do not include prose outside the JSON."
     ),
     "critic": (
         "You are CriticAgent \u2014 a ruthless quality gatekeeper.\n"
         "Your job: give an honest overall assessment of the full solution so far.\n"
-        "Output:\n"
-        "SCORE: <0.0\u20131.0>\n"
-        "VERDICT: <one sentence summary>\n"
-        "BLOCKERS: <critical issues that must be fixed, or 'None'>\n"
-        "IMPROVEMENT: <the single most impactful change>"
+        "Output a JSON object matching the provided schema. Do not include prose outside the JSON."
     ),
     "consensus": (
         "You are ConsensusAgent \u2014 the final synthesiser.\n"
@@ -96,6 +88,34 @@ AGENT_PROMPTS: Dict[str, str] = {
         "all agent outputs and feedback.\n"
         "Remove redundancy, fix remaining issues, and present a clean, complete response.\n"
         "This is the output the user will see."
+    ),
+    "router": (
+        "You are RouterAgent \u2014 a fast prompt classifier.\n"
+        "Classify the user prompt into an intent and complexity. "
+        "Respond ONLY with a JSON object matching the provided schema. "
+        "Do not include prose outside the JSON.\n\n"
+        "Intent definitions:\n"
+        "  coding    \u2014 user wants new code written or a feature implemented.\n"
+        "  debugging \u2014 user wants existing code fixed; mentions an error, bug, or failure.\n"
+        "  research  \u2014 user wants external/general knowledge gathered (papers, prior art, surveys).\n"
+        "  analysis  \u2014 user wants the codebase or a system inspected/explained (\"why is X happening here\").\n"
+        "  planning  \u2014 user wants a plan, design, roadmap, or breakdown.\n"
+        "  qa        \u2014 user is asking a factual question with a short answer.\n"
+        "  general   \u2014 none of the above.\n\n"
+        "Examples:\n"
+        '  prompt: "find why scoring is low in this codebase"\n'
+        '    -> {"intent":"analysis","complexity":"moderate","confidence":0.9}\n'
+        '  prompt: "find a paper on RL for code generation"\n'
+        '    -> {"intent":"research","complexity":"simple","confidence":0.92}\n'
+        '  prompt: "fix the traceback in services/auth on login"\n'
+        '    -> {"intent":"debugging","complexity":"moderate","confidence":0.95}\n'
+        '  prompt: "implement a retry decorator with exponential backoff"\n'
+        '    -> {"intent":"coding","complexity":"simple","confidence":0.95}\n'
+        '  prompt: "design a multi-region ingestion pipeline that survives az failure"\n'
+        '    -> {"intent":"planning","complexity":"complex","confidence":0.93}\n'
+        '  prompt: "what does the SCORE field mean in reviewer output?"\n'
+        '    -> {"intent":"qa","complexity":"simple","confidence":0.9}\n'
+        "Set confidence below 0.6 only when the prompt is genuinely ambiguous."
     ),
     "summarizer": (
         "You are SummarizerAgent \u2014 a concise technical summariser.\n"

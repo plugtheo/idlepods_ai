@@ -46,6 +46,8 @@ class RouteDecision:
     complexity: str
     agent_chain: List[str]
     matched_keywords: List[str] = field(default_factory=list)
+    confidence: float = 1.0
+    source: str = "regex"  # "regex" | "llm" | "hybrid_regex" | "hybrid_llm"
 
 
 # ── Intent patterns — ALL matching patterns are scored; highest-count wins.
@@ -137,18 +139,42 @@ _CHAINS = {
 }
 
 
-class QueryRouter:
+def _resolve_chain(intent: str, complexity: str) -> List[str]:
+    """Look up the agent chain for an (intent, complexity) pair.
+
+    Single source of truth so the LLM router and the regex router produce
+    consistent chains for the same classification.
+    """
+    try:
+        return _CHAINS[(Intent(intent), Complexity(complexity))]
+    except (KeyError, ValueError):
+        return ["planner"]
+
+
+class RegexQueryRouter:
     """Stateless prompt classifier.  No I/O, no model calls."""
 
     def route(self, prompt: str) -> RouteDecision:
-        intent, keywords = self._classify_intent(prompt)
+        intent, keywords, raw_score = self._classify_intent(prompt)
         complexity = self._classify_complexity(prompt)
-        chain = _CHAINS.get((intent, complexity), ["planner"])
+        chain = _resolve_chain(intent.value, complexity.value)
+        # Confidence is derived from match count: 0 matches → low (we fell back
+        # to GENERAL); 1 match → modest; 2+ → high.  Capped so even strong regex
+        # matches stay below 1.0 — explicit gateway/client overrides outrank any
+        # router output.
+        if raw_score == 0:
+            confidence = 0.2
+        elif raw_score == 1:
+            confidence = 0.55
+        else:
+            confidence = 0.8
         return RouteDecision(
             intent=intent.value,
             complexity=complexity.value,
             agent_chain=chain,
             matched_keywords=keywords,
+            confidence=confidence,
+            source="regex",
         )
 
     def _classify_intent(self, prompt: str):
@@ -163,9 +189,9 @@ class QueryRouter:
                     scores[intent] = len(matches)
                     all_keywords[intent] = [m.lower() for m in matches[:3]]
         if not scores:
-            return Intent.GENERAL, []
+            return Intent.GENERAL, [], 0
         best = max(scores, key=scores.__getitem__)
-        return best, all_keywords[best]
+        return best, all_keywords[best], scores[best]
 
     def _classify_complexity(self, prompt: str) -> Complexity:
         for complexity, pattern in _COMPLEXITY_MARKERS.items():
@@ -177,3 +203,9 @@ class QueryRouter:
         if word_count > _COMPLEX_WORD_THRESHOLD:
             return Complexity.COMPLEX
         return Complexity.MODERATE
+
+
+# Backwards-compatible alias — `from shared.routing.query_router import QueryRouter`
+# still resolves to the synchronous regex router so the gateway and existing tests
+# keep working without any change.
+QueryRouter = RegexQueryRouter

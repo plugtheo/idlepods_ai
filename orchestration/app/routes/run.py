@@ -89,19 +89,34 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
         )
     allowed_files = getattr(request, "allowed_files", None)
 
-    # Use intent/complexity forwarded from the gateway if available — avoids
-    # double routing.  Fall back to a local QueryRouter pass only when the request
-    # comes from a caller that doesn't pre-classify (e.g. direct API access or tests).
-    if request.intent is not None and request.complexity is not None:
+    # Routing precedence:
+    #  1. Caller passes an explicit ``agent_chain`` → respect it (also use the
+    #     forwarded intent/complexity for context enrichment).
+    #  2. Otherwise run the configured router. In ``regex`` mode, gateway-forwarded
+    #     intent/complexity is honored as-is to avoid double work.  In ``llm`` /
+    #     ``hybrid`` mode the orchestration router is authoritative — gateway hints
+    #     are ignored because the LLM router can correct regex misclassifications.
+    if request.agent_chain is not None:
+        agent_chain = request.agent_chain
+        context_intent = request.intent or "general"
+        context_complexity = request.complexity or "moderate"
+    elif settings.router_mode == "regex" and request.intent is not None and request.complexity is not None:
         context_intent = request.intent
         context_complexity = request.complexity
-        agent_chain = request.agent_chain
+        from ..routing import get_query_router
+        _route = await get_query_router().route(request.prompt)
+        agent_chain = _route.agent_chain
     else:
-        from ..routing.query_router import QueryRouter
-        _route = QueryRouter().route(request.prompt)
+        from ..routing import get_query_router
+        _route = await get_query_router().route(request.prompt)
         context_intent = _route.intent
         context_complexity = _route.complexity
-        agent_chain = request.agent_chain or _route.agent_chain
+        agent_chain = _route.agent_chain
+        logger.info(
+            "router_decision source=%s intent=%s complexity=%s confidence=%.2f chain=%s",
+            _route.source, _route.intent, _route.complexity, _route.confidence,
+            _route.agent_chain,
+        )
 
     try:
         built_context = await builder.build(
@@ -352,6 +367,7 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
     if final_output:
         event = ExperienceEvent(
             session_id=session_id,
+            task_id=initial_state.get("task_id"),
             prompt=request.prompt,
             final_output=final_output,
             agent_chain=agent_chain,
@@ -539,6 +555,7 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                     if final_output and history:
                         event = ExperienceEvent(
                             session_id=session_id,
+                            task_id=initial_state.get("task_id"),
                             prompt=request.prompt,
                             final_output=final_output,
                             agent_chain=agent_chain,

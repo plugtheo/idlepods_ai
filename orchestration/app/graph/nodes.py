@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional
 from shared.contracts.inference import GenerateRequest, Message
 from shared.contracts.models import load_registry
 from shared.contracts.agent_prompts import PLAN_STEP_SYSTEM_TEMPLATE
+from shared.contracts.evaluator_schemas import EVALUATOR_SCHEMAS
 from ..clients.inference import get_inference_client
 from ..config.settings import AGENT_PROMPTS, settings
 from ..tools.runner import build_tool_schemas, execute_tool_call
@@ -424,8 +425,11 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
         max_tokens=settings.role_max_tokens.get(role, 1024),
         session_id=session_id,
     )
+    
     if role in _tool_using_roles():
         request_kwargs["tools"] = build_tool_schemas(settings.role_tools_enabled.get(role))
+    if role in EVALUATOR_SCHEMAS:
+        request_kwargs["response_schema"] = EVALUATOR_SCHEMAS[role].model_json_schema()
 
     request = GenerateRequest(**request_kwargs)
 
@@ -434,9 +438,11 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
     try:
         client = get_inference_client()
         q = get_token_queue(session_id)
-
+        
         # Tool-using roles always use the blocking path so response.tool_calls is available.
-        if q is not None and hasattr(client, "generate_stream") and role not in _tool_using_roles():
+        if (q is not None and hasattr(client, "generate_stream") 
+            and role not in _tool_using_roles()
+            and role not in settings.non_streaming_roles):
             thinking_msg, _ = AGENT_FRIENDLY.get(role, (f"{role.capitalize()} is working...", role))
             await q.put({"type": "agent_start", "role": role, "message": thinking_msg})
             tokens: List[str] = []

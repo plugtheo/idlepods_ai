@@ -64,6 +64,13 @@ class ExperienceEvent(BaseModel):
     """
 
     session_id: str = Field(description="Loop session identifier for correlation.")
+    task_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Stable identifier scoping multi-turn context state. Persisted to "
+            "ChromaDB metadata so few-shot retrieval can isolate cross-task results."
+        ),
+    )
     prompt: str = Field(description="Original user prompt.")
     final_output: str = Field(description="Best output produced by the pipeline.")
     agent_chain: List[str] = Field(description="Ordered list of agent roles that ran.")

@@ -136,6 +136,7 @@ def get_fallback_counts() -> dict[str, int]:
     return {k: len(v) for k, v in _adapter_fallback_counts.items()}
 
 
+# TODO: REMOVE - Also remove legacy path support in generate() and generate_stream() once all adapters are retrained with tool_call_style in the manifest.
 # ---------------------------------------------------------------------------
 # Training-format chat template
 # ---------------------------------------------------------------------------
@@ -449,6 +450,9 @@ class LocalVLLMBackend(InferenceBackend):
                     if request.tools:
                         payload["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
                         payload["tool_choice"] = "auto"
+                    if request.response_schema:
+                        payload["guided_json"] = request.response_schema
+                        payload["guided_decoding_backend"] = "xgrammar"
                     resp = await self._client.post(
                         f"{self._base_url}/v1/chat/completions",
                         json=payload,
@@ -472,6 +476,9 @@ class LocalVLLMBackend(InferenceBackend):
                 if request.tools:
                     payload["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
                     payload["tool_choice"] = "auto"
+                if request.response_schema:
+                    payload["guided_json"] = request.response_schema
+                    payload["guided_decoding_backend"] = "xgrammar"
                 resp = await self._client.post(
                     f"{self._base_url}/v1/chat/completions",
                     json=payload,
@@ -494,6 +501,16 @@ class LocalVLLMBackend(InferenceBackend):
             finish_reason, bool(raw_tool_calls),
         )
 
+        parsed: Optional[dict] = None
+        if request.response_schema and content:
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "LocalVLLM guided_json parse failed for role=%s: %s",
+                    request.role, exc,
+                )
+
         return GenerateResponse(
             content=content,
             backend=self._backend_name,
@@ -502,6 +519,7 @@ class LocalVLLMBackend(InferenceBackend):
             session_id=request.session_id,
             tool_calls=raw_tool_calls,
             used_base_fallback=used_base_fallback,
+            parsed=parsed,
         )
 
     async def generate_stream(

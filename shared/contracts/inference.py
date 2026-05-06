@@ -77,6 +77,7 @@ class GenerateRequest(BaseModel):
         default=False,
         description="Enable Qwen3 thinking mode (disabled by default).",
     )
+    response_schema: Optional[Dict[str, Any]] = None  # JSON schema for guided decoding
 
     @field_validator("backend", mode="before")
     @classmethod
@@ -119,4 +120,11 @@ class GenerateResponse(BaseModel):
     used_base_fallback: bool = Field(
         default=False,
         description="True when the base model served this response because the requested adapter was unavailable.",
+    )
+    parsed: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "If response_schema was provided in the request, the model's output parsed according to that schema. "
+            "Otherwise None."
+        ),
     )
