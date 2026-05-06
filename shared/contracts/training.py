@@ -119,11 +119,11 @@ def lookup_recipe(backend: str, role: str) -> AdapterRecipe:
     recipe = load_recipes().lookup(backend, role)
 
     # --- Runtime validation: recipes.yaml must override max_seq_length ---
-    if recipe.max_seq_length == 2048:
-        # This means the YAML did NOT override it.
+    # Check model_fields_set to distinguish "yaml said 2048" from "yaml omitted it → Python default leaked".
+    if recipe.max_seq_length == 2048 and "max_seq_length" not in recipe.model_fields_set:
         raise RuntimeError(
             f"[recipes.yaml] Role '{role}' resolved to default max_seq_length=2048. "
-            "This indicates the YAML override is missing or misspelled."
+            f"The YAML override for '{role}' (or the default section) is missing or misspelled."
         )
 
     return recipe

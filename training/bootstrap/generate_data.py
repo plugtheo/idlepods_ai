@@ -1254,6 +1254,100 @@ def print_stats(capability: str, data: List[Dict]) -> None:
     print(f"    p99 tokens: {tp99}")
 
 
+def load_from_experiences(capability: Optional[str] = None, target: Optional[int] = None) -> List[Dict]:
+    """
+    Load SFT pairs from experience replay (experiences.jsonl).
+
+    Filters by capability (all roles when None) and quality_score >= min_quality_score.
+    Applies AWQ-cutover guard: pre-cutover tool_call records are skipped when
+    TrainingSettings.awq_cutover_iso is set.
+
+    Returns [] and logs a warning when fewer than min_batch_size records pass the filter
+    (caller falls through to synthetic-only).
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
+    try:
+        _root = Path(__file__).resolve().parents[2]
+        if str(_root) not in sys.path:
+            sys.path.insert(0, str(_root))
+
+        from training.app.config.settings import settings as _ts
+        from shared.contracts.sft_builder import build_sft_pair as _build_sft_pair
+        from shared.contracts.experience import ExperienceEvent as _ExperienceEvent
+        from shared.contracts.training import AdapterRecipe as _AdapterRecipe, lookup_recipe as _lookup_recipe
+        from shared.contracts.models import load_registry as _load_registry
+    except ImportError as exc:
+        _log.warning("load_from_experiences: import failed — %s", exc)
+        return []
+
+    jsonl_path = Path(_ts.jsonl_path)
+    if not jsonl_path.exists():
+        return []
+
+    # Resolve recipe (fall back to default if lookup fails)
+    try:
+        _registry = _load_registry()
+        _backend = _registry.default_backend
+        _recipe = _lookup_recipe(_backend, capability or "coder")
+    except Exception:
+        _recipe = _AdapterRecipe()
+
+    # AWQ cutover timestamp
+    _cutover_dt = None
+    if _ts.awq_cutover_iso:
+        from datetime import datetime, timezone
+        try:
+            _parsed = datetime.fromisoformat(_ts.awq_cutover_iso)
+            _cutover_dt = _parsed if _parsed.tzinfo else _parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            _log.warning("load_from_experiences: invalid awq_cutover_iso=%r — guard disabled", _ts.awq_cutover_iso)
+
+    records: List[Dict] = []
+    with open(jsonl_path, encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if not _line:
+                continue
+            try:
+                _event = _ExperienceEvent(**json.loads(_line))
+            except Exception:
+                continue
+
+            for _contrib in _event.contributions:
+                if capability and _contrib.role != capability:
+                    continue
+                if _contrib.quality_score < _ts.min_quality_score:
+                    continue
+                # AWQ guard: skip pre-cutover tool_call records
+                if _cutover_dt and _contrib.tool_calls and _event.timestamp:
+                    from datetime import timezone
+                    _ts_ev = _event.timestamp
+                    if _ts_ev.tzinfo is None:
+                        _ts_ev = _ts_ev.replace(tzinfo=timezone.utc)
+                    if _ts_ev < _cutover_dt:
+                        continue
+                try:
+                    _pairs = _build_sft_pair(_contrib, _recipe, _contrib.role)
+                    if isinstance(_pairs, list):
+                        records.extend(_pairs)
+                    else:
+                        records.append(_pairs)
+                except Exception as _exc:
+                    _log.warning("load_from_experiences: build_sft_pair failed — %s", _exc)
+
+    if len(records) < _ts.min_batch_size:
+        _log.warning(
+            "load_from_experiences: %d records for capability=%r below min_batch_size=%d — "
+            "falling through to synthetic-only",
+            len(records), capability, _ts.min_batch_size,
+        )
+        return []
+
+    return records
+
+
 # ---------------------------------------------------------------------------
 # Loader registry
 # ---------------------------------------------------------------------------
@@ -1264,6 +1358,7 @@ LOADERS = {
     "planning":  load_planning,
     "research":  load_research,
     "criticism": load_criticism,
+    "experiences": load_from_experiences,
 }
 
 

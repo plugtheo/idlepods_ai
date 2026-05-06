@@ -4,7 +4,7 @@ Training configuration
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -77,6 +77,19 @@ class TrainingSettings(BaseSettings):
     jsonl_retention_days: int = Field(
         default=30,
         description="Informational: shards older than this should be pruned by scripts/prune_experiences.py (never automatic).",
+    )
+    awq_cutover_iso: Optional[str] = Field(
+        default=None,
+        description=(
+            "ISO 8601 timestamp of the AWQ→BF16 base-model cutover. "
+            "Experience records with tool_calls whose timestamp predates this value are skipped "
+            "during experience replay (their logits were corrupted by AWQ). "
+            "Unset = no records skipped (backwards compatible)."
+        ),
+    )
+    experience_only: bool = Field(
+        default=False,
+        description="When true, training uses experience replay data only (no synthetic HF datasets).",
     )
     scheduler_interval_hours: int = Field(
         default=4,

@@ -98,6 +98,7 @@ _CAPABILITY_TO_CURATED: dict[str, str] = {
     "planner":    "planning_dataset.jsonl",
     "researcher": "research_dataset.jsonl",
     "critic":     "criticism_dataset.jsonl",
+    "summarizer": "summarizer_curated.jsonl",
 }
 
 # Maps capability label (from Experience Service) to the adapter directory name
@@ -110,6 +111,7 @@ _CAPABILITY_TO_ADAPTER: dict[str, str] = {
     "planner":    "planning_lora",
     "researcher": "research_lora",
     "critic":     "criticism_lora",
+    "summarizer": "summarizer_lora",
 }
 
 # Safety floors — keep as module constants, do NOT promote to env.

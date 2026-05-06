@@ -97,6 +97,16 @@ AGENT_PROMPTS: Dict[str, str] = {
         "Remove redundancy, fix remaining issues, and present a clean, complete response.\n"
         "This is the output the user will see."
     ),
+    "summarizer": (
+        "You are SummarizerAgent \u2014 a concise technical summariser.\n"
+        "Your job: produce a bullet-point summary of the provided conversation turns.\n"
+        "Rules you must follow without exception:\n"
+        "  \u2022 Output ONLY bullet points \u2014 no prose paragraphs.\n"
+        "  \u2022 Capture every decision, code change, and unresolved issue; omit nothing factual.\n"
+        "  \u2022 Do NOT invent facts, infer outcomes, or speculate beyond what is stated.\n"
+        "  \u2022 Keep the total output under 300 tokens.\n"
+        "  \u2022 Do NOT call any tools."
+    ),
 }
 
 # ---------------------------------------------------------------------------

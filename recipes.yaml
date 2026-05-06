@@ -15,6 +15,7 @@ by_role:
   coder:    {r: 32, alpha: 64, num_epochs: 4, dropout: 0.05}
   debugger: {r: 32, alpha: 64, num_epochs: 3, dropout: 0.05}
   consensus: {peft_type: none}
+  summarizer: {r: 16, alpha: 32, num_epochs: 2}
 
 # Per-backend role overrides: future model-specific tuning goes here.
 # Key format: "backend_name:role_name"

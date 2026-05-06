@@ -39,12 +39,6 @@ def _resolve_registry_default() -> str:
         return "primary"
 
 
-def _resolve_base_model() -> str:
-    from shared.contracts.models import load_registry
-    registry = load_registry()
-    return registry.backends[registry.default_backend].model_id
-
-
 # ---------------------------------------------------------------------------
 # Versioning helpers — imported by train_gpu_simple.py and trainer_entry.py
 # so both the one-time bootstrap path and the online self-training path use
@@ -121,6 +115,8 @@ def _post_train_stage(
     dataset_hash: str = "unknown",
     tokenizer_hash: str = "unknown",
     trainer_version: str = "",
+    experience_record_count: int = 0,
+    synthetic_record_count: int = 0,
 ) -> Dict[str, Any]:
     """
     Validate adapter weights and write metadata.json with status='staging'.
@@ -162,40 +158,49 @@ def _post_train_stage(
     created_at = old_created_at or now_iso
 
     _tv = trainer_version or _compute_trainer_version()
+    _total = experience_record_count + synthetic_record_count
+    _exp_pct = round(experience_record_count / _total * 100, 1) if _total > 0 else 0.0
+
     new_history_entry: Dict[str, Any] = {
-        "version":         new_version,
-        "status":          "staging",
-        "created_at":      now_iso,
-        "n_samples":       n_samples,
-        "epochs":          num_epochs,
-        "learning_rate":   learning_rate,
-        "lora_r":          lora_r,
-        "lora_alpha":      lora_alpha,
-        "final_loss":      round(final_loss, 6),
-        "size_mb":         size_mb,
-        "note":            note,
-        "dataset_hash":    dataset_hash,
-        "tokenizer_hash":  tokenizer_hash,
-        "trainer_version": _tv,
+        "version":                new_version,
+        "status":                 "staging",
+        "created_at":             now_iso,
+        "n_samples":              n_samples,
+        "epochs":                 num_epochs,
+        "learning_rate":          learning_rate,
+        "lora_r":                 lora_r,
+        "lora_alpha":             lora_alpha,
+        "final_loss":             round(final_loss, 6),
+        "size_mb":                size_mb,
+        "note":                   note,
+        "dataset_hash":           dataset_hash,
+        "tokenizer_hash":         tokenizer_hash,
+        "trainer_version":        _tv,
+        "experience_record_count": experience_record_count,
+        "synthetic_record_count":  synthetic_record_count,
+        "experience_data_pct":     _exp_pct,
     }
 
     new_meta: Dict[str, Any] = {
-        "name":            f"{capability}_lora",
-        "version":         new_version,
-        "capability":      capability,
-        "backend":         _resolve_registry_default(),
-        "base_model":      base_model_id,
-        "status":          "staging",
-        "created_at":      created_at,
-        "updated_at":      now_iso,
-        "lora_r":          lora_r,
-        "lora_alpha":      lora_alpha,
-        "target_modules":  _ADAPTER_TARGET_MODULES,
-        "size_mb":         size_mb,
-        "dataset_hash":    dataset_hash,
-        "tokenizer_hash":  tokenizer_hash,
-        "trainer_version": _tv,
-        "history":         old_history + [new_history_entry],
+        "name":                   f"{capability}_lora",
+        "version":                new_version,
+        "capability":             capability,
+        "backend":                _resolve_registry_default(),
+        "base_model":             base_model_id,
+        "status":                 "staging",
+        "created_at":             created_at,
+        "updated_at":             now_iso,
+        "lora_r":                 lora_r,
+        "lora_alpha":             lora_alpha,
+        "target_modules":         _ADAPTER_TARGET_MODULES,
+        "size_mb":                size_mb,
+        "dataset_hash":           dataset_hash,
+        "tokenizer_hash":         tokenizer_hash,
+        "trainer_version":        _tv,
+        "experience_record_count": experience_record_count,
+        "synthetic_record_count":  synthetic_record_count,
+        "experience_data_pct":     _exp_pct,
+        "history":                old_history + [new_history_entry],
     }
     meta_path.write_text(json.dumps(new_meta, indent=2))
 

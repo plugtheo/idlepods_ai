@@ -61,6 +61,10 @@ class OrchestrationRequest(BaseModel):
             "When task_id is None the plan is ephemeral (read-only, not persisted)."
         ),
     )
+    suppress_few_shots: bool = Field(
+        default=False,
+        description="When true, builder skips few-shot RAG retrieval. Used to test session isolation.",
+    )
 
 
 class AgentStep(BaseModel):

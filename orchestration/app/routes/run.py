@@ -82,10 +82,10 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
     
     session_id = request.session_id or str(uuid.uuid4())
     task_id = getattr(request, "task_id", None) or session_id
-    if task_id == session_id:
-        logger.debug(
-            "[%s] task_id not supplied — conversation history will not persist across separate sessions.",
-            session_id[:8],
+    if task_id == session_id and getattr(request, "task_id", None) is None:
+        logger.info(
+            "task_id_collapsed_to_session",
+            extra={"event": "task_id_collapsed_to_session", "session_id": session_id, "reason": "task_id_not_supplied"},
         )
     allowed_files = getattr(request, "allowed_files", None)
 
@@ -107,6 +107,7 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
         built_context = await builder.build(
             request.prompt, context_intent, context_complexity,
             task_id=task_id, allowed_files=allowed_files,
+            suppress_few_shots=request.suppress_few_shots,
         )
     except Exception as exc:
         logger.warning("Context build failed (%s) — proceeding with empty context.", exc)
@@ -184,8 +185,8 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
             plan_ephemeral, plan_path_str)
 
 
-def _trim_conversation_history(history: list, max_tokens: int) -> list:
-    """Return the most recent entries from history that fit within max_tokens (char-based estimate)."""
+def _trim_conversation_history(history: list, max_tokens: int) -> tuple[list, int]:
+    """Return (trimmed, tokens_dropped) — most recent entries fitting within max_tokens (char-based)."""
     chars_budget = max_tokens * settings.chars_per_token
     result: list = []
     used = 0
@@ -195,7 +196,12 @@ def _trim_conversation_history(history: list, max_tokens: int) -> list:
             break
         result.append(entry)
         used += chars
-    return list(reversed(result))
+    kept = list(reversed(result))
+    dropped = history[:len(history) - len(kept)]
+    tokens_dropped = sum(
+        len(str(e.get("output", "")) + str(e.get("full_output", ""))) for e in dropped
+    ) // settings.chars_per_token
+    return kept, tokens_dropped
 
 
 def _maybe_writeback_plan(
@@ -290,20 +296,18 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
     iterations_ran = final_state.get("current_iteration", 1)
 
     prior_history = initial_state.get("conversation_history", [])
-    combined = _trim_conversation_history(
+    combined, tokens_dropped = _trim_conversation_history(
         prior_history + history, settings.max_conversation_history_tokens
     )
-    
+
     if len(combined) < len(prior_history) + len(history):
         logger.warning(
-        "context_trim",
+            "conversation_trim",
             extra={
-                "bucket": "conversation_history",
+                "event": "conversation_trim",
                 "task_id": initial_state.get("task_id"),
-                "allowed": None,  # or the history cap if you have one
-                "returned": len(prior_history),
-                "kept": len(combined),
-                "dropped": len(prior_history) - len(combined),
+                "tokens_dropped": tokens_dropped,
+                "turns_dropped": (len(prior_history) + len(history)) - len(combined),
                 "reason": "redis_cap",
             },
         )
@@ -511,20 +515,18 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                     # Persist session history to Redis
                     history = accumulated.get("iteration_history", [])
                     prior_history = initial_state.get("conversation_history", [])
-                    combined = _trim_conversation_history(
+                    combined, tokens_dropped = _trim_conversation_history(
                         prior_history + history, settings.max_conversation_history_tokens
                     )
-                    
+
                     if len(combined) < len(prior_history) + len(history):
                         logger.warning(
-                        "context_trim",
+                            "conversation_trim",
                             extra={
-                                "bucket": "conversation_history",
+                                "event": "conversation_trim",
                                 "task_id": initial_state.get("task_id"),
-                                "allowed": None,  
-                                "returned": len(prior_history),
-                                "kept": len(combined),
-                                "dropped": len(prior_history) - len(combined),
+                                "tokens_dropped": tokens_dropped,
+                                "turns_dropped": (len(prior_history) + len(history)) - len(combined),
                                 "reason": "redis_cap",
                             },
                         )

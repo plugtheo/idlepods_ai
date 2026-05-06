@@ -20,7 +20,7 @@ class BackendEntry(BaseModel):
     served_url: str
     model_id: str
     training_model_id: Optional[str] = None  # base model for LoRA training; falls back to model_id
-    max_model_len: int = 4096
+    max_model_len: int = 12288
     quantization: Optional[str] = None
     chat_template_supports_tools: bool = True
     thinking_default: bool = False

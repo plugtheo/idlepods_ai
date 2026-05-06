@@ -44,8 +44,7 @@ services:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
     command: >
-      --model ${VLLM_MODEL_ID:-Qwen/Qwen3-8B-AWQ}
-      --quantization awq_marlin
+      --model ${VLLM_MODEL_ID:-Qwen/Qwen3-8B}
       --enable-lora
       --max-lora-rank 64
       --max-loras 8
@@ -53,8 +52,8 @@ services:
       --host 0.0.0.0
       --enable-auto-tool-choice
       --tool-call-parser hermes
-      --gpu-memory-utilization 0.92
-      --max-model-len ${VLLM_MAX_MODEL_LEN:-40960}
+      --gpu-memory-utilization 0.9385
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-12288}
       --kv-cache-dtype fp8
       --max-num-seqs 1
       --tokenizer-mode auto
@@ -237,7 +236,7 @@ services:
       - ORCHESTRATION__INFERENCE_GRPC_PORT=50051
       - ORCHESTRATION__JSONL_PATH=/data/experiences.jsonl
       - ORCHESTRATION__CHROMADB_PATH=/data/vector_store
-      - ORCHESTRATION__MODEL_CONTEXT_LEN=${VLLM_MAX_MODEL_LEN:-40960}
+      - ORCHESTRATION__MODEL_CONTEXT_LEN=${VLLM_MAX_MODEL_LEN:-12288}
       - MODELS_YAML_PATH=/config/models.yaml
       - RECIPES_YAML_PATH=/config/recipes.yaml
       # Uncomment to switch ChromaDB to server mode (also uncomment chromadb service above):

@@ -116,6 +116,37 @@ def run_command(command: str) -> str:
         raise ToolError(_truncate(str(exc)))
 
 
+# ── Web Search Tool ───────────────────────────────────────────────────────────
+
+def web_search(query: str, n: int = 5) -> str:
+    try:
+        from duckduckgo_search import DDGS
+    except Exception as exc:
+        raise ToolError(
+            _truncate(
+                "duckduckgo-search package not available. "
+                f"Install with `pip install duckduckgo-search`. ({exc})"
+            )
+        )
+
+    try:
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=n):
+                title = r.get("title") or ""
+                url = r.get("href") or r.get("url") or ""
+                snippet = r.get("body") or r.get("snippet") or ""
+                results.append(f"{title}\n{url}\n{snippet}".strip())
+
+        if not results:
+            return "(no results)"
+
+        return _truncate("\n\n---\n\n".join(results))
+
+    except Exception as exc:
+        raise ToolError(_truncate(str(exc)))
+
+
 # ── Registry ─────────────────────────────────────────────────────────────
 
 _TOOL_REGISTRY: Dict[str, Any] = {
@@ -123,6 +154,7 @@ _TOOL_REGISTRY: Dict[str, Any] = {
     "write_file":  write_file,
     "list_files":  list_files,
     "run_command": run_command,
+    "web_search":  web_search
 }
 
 _TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
@@ -182,6 +214,27 @@ _TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "command": {"type": "string", "description": "Full command string, e.g. 'pytest src/tests/ -x'"},
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    "web_search": {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Run a web search and return top-N text snippets.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query string."
+                    },
+                    "n": {
+                        "type": "integer",
+                        "description": "Number of snippets to return (default 5)."
+                    },
+                },
+                "required": ["query"],
             },
         },
     },

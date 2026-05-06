@@ -136,6 +136,31 @@ async def set_plan(task_id: str, plan: Any, ttl_s: int = _DEFAULT_TASK_STATE_TTL
         _redis_ok = False
 
 
+async def get_summary(key: str) -> dict[str, Any] | None:
+    """Return a cached compaction summary by its canonical key, or None on miss/error."""
+    global _redis_ok
+    try:
+        raw = await _get_client().get(key)
+        _redis_ok = True
+        if raw:
+            return json.loads(raw)
+    except Exception as exc:
+        logger.error("get_summary(%s) failed: %s", key, exc)
+        _redis_ok = False
+    return None
+
+
+async def save_summary(key: str, summary: dict[str, Any], ttl: int) -> None:
+    """Cache a compacted summary under key with the given TTL (seconds)."""
+    global _redis_ok
+    try:
+        await _get_client().setex(key, ttl, json.dumps(summary))
+        _redis_ok = True
+    except Exception as exc:
+        logger.error("save_summary(%s) failed: %s", key, exc)
+        _redis_ok = False
+
+
 async def get_plan(task_id: str) -> Any | None:
     """Return stored Plan dict for task_id, or None on miss/error."""
     global _redis_ok

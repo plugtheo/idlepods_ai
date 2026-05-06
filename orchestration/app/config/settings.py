@@ -105,7 +105,7 @@ class OrchestrationSettings(BaseSettings):
         description="Port of the Inference Service gRPC server.",
     )
     model_context_len: int = Field(
-        default=40960,
+        default=12288,
         description=(
             "Token context window of the deployed vLLM models. "
             "Must match --max-model-len in compose.yml. "
@@ -117,7 +117,7 @@ class OrchestrationSettings(BaseSettings):
     # All numeric token-related constants live here so they can be adjusted
     # via environment variables without touching source code.
 
-    chars_per_token: int = Field(
+    chars_per_token: float = Field(
         default=2.5,
         description=(
             "Conservative characters-per-token ratio used for fast token estimation. "
@@ -150,7 +150,7 @@ class OrchestrationSettings(BaseSettings):
         ),
     )
     history_lookback_iterations: int = Field(
-        default=9,
+        default=0,
         description=(
             "Number of past pipeline iterations whose history entries are eligible for "
             "inclusion (e.g. 1 = last iteration only; 0 = all iterations). "
@@ -214,6 +214,7 @@ class OrchestrationSettings(BaseSettings):
             "reviewer":   512,
             "critic":     512,
             "consensus":  2048,
+            "summarizer": 512,
         },
         description=(
             "Per-role output token budget reserved for model generation. "
@@ -231,6 +232,7 @@ class OrchestrationSettings(BaseSettings):
             "reviewer":   "primary",
             "critic":     "primary",
             "consensus":  "primary",
+            "summarizer": "primary",
         },
         description=(
             "Maps each agent role to the models.yaml backend name it should run on. "
@@ -246,6 +248,7 @@ class OrchestrationSettings(BaseSettings):
             "reviewer":   None,
             "critic":     None,
             "consensus":  None,
+            "summarizer": "summarizer_lora",
         },
         description=(
             "Maps each agent role to the LoRA adapter name activated on the vLLM server "
@@ -255,17 +258,55 @@ class OrchestrationSettings(BaseSettings):
     )
     role_tools_enabled: Dict[str, List[str]] = Field(
         default_factory=lambda: {
-            "planner":    [],
-            "researcher": [],
+            "planner":    ["web_search"],
+            "researcher": ["web_search"],
             "coder":      ["read_file", "write_file", "list_files", "run_command"],
-            "debugger":   [],
+            "debugger":   ["read_file", "write_file"],
             "reviewer":   [],
             "critic":     [],
             "consensus":  [],
+            "summarizer": [],
         },
         description=(
             "Per-role tool allowlist. Empty list ⇒ role does not call tools. "
             "Override with ORCHESTRATION__ROLE_TOOLS_ENABLED."
+        ),
+    )
+    compaction_trigger_ratio: float = Field(
+        default=0.85,
+        description=(
+            "Fraction of max_conversation_history_tokens at which compaction is triggered. "
+            "Override with ORCHESTRATION__COMPACTION_TRIGGER_RATIO."
+        ),
+    )
+    compaction_tool_output_threshold_tokens: int = Field(
+        default=500,
+        description=(
+            "Tool-output messages larger than this many tokens are eligible for truncation. "
+            "Override with ORCHESTRATION__COMPACTION_TOOL_OUTPUT_THRESHOLD_TOKENS."
+        ),
+    )
+    compaction_retain_recent_messages: int = Field(
+        default=6,
+        description=(
+            "Number of recent non-tool messages that are exempt from tool-output truncation. "
+            "Override with ORCHESTRATION__COMPACTION_RETAIN_RECENT_MESSAGES."
+        ),
+    )
+    compaction_retention_days: int = Field(
+        default=30,
+        description=(
+            "TTL (days) for compacted summary entries stored in Redis. "
+            "Override with ORCHESTRATION__COMPACTION_RETENTION_DAYS."
+        ),
+    )
+    compaction_rollup_iteration_history: bool = Field(
+        default=False,
+        description=(
+            "When true, applies LLM-based summarization to within-run iteration history "
+            "in addition to cross-turn conversation history. "
+            "Ship only after Phase 14 has been stable for one cycle. "
+            "Override with ORCHESTRATION__COMPACTION_ROLLUP_ITERATION_HISTORY."
         ),
     )
     structured_field_value_max_chars: int = Field(
@@ -366,13 +407,13 @@ class OrchestrationSettings(BaseSettings):
         ),
     )
     
-    p95_latency_budget_s: int = Field(
+    p95_latency_budget_s: float = Field(
         default=90.0,
         description=(
             "A hard upper bound (in seconds) on the 95th percentile inference latency allowed during validation of a newly trained adapter."
         ),
-    )  
-    context_trim_log_level: int = Field(
+    )
+    context_trim_log_level: str = Field(
         default="warning",
         description=(
             "Controls how loudly the system logs when it trims conversation context to fit within the model’s maximum sequence length."

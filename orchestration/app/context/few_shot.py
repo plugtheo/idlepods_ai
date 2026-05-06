@@ -99,8 +99,14 @@ async def search(prompt: str) -> List[FewShotExample]:
             )
 
         logger.info(
-            "Few-shot retrieval: prompt_len=%d  candidates=%d  accepted=%d",
-            len(prompt), len(docs), len(examples),
+            "few_shot_retrieval",
+            extra={
+                "event": "few_shot_retrieval",
+                "candidates": len(docs),
+                "accepted": len(examples),
+                "stored_categories": [m.get("category") for m in metas],
+                "min_similarity": min((1.0 - float(d) for d in distances), default=None),
+            },
         )
         return examples
 

@@ -303,7 +303,7 @@ def _build_messages(
                 break
             if _estimate_tokens(output) > available:
                 char_budget = available * settings.chars_per_token
-                output      = "…" + output[-char_budget:]
+                output      = "…" + output[-int(char_budget):]
             eligible.append(label + output)
             used += _estimate_tokens(label + output)
         if eligible:
@@ -339,7 +339,7 @@ def _build_messages(
             if _estimate_tokens(output) > available:
                 # Trim to fit — keep the most recent characters.
                 char_budget = available * settings.chars_per_token
-                output      = "\u2026" + output[-char_budget:]
+                output      = "\u2026" + output[-int(char_budget):]
             history_lines.append(label + output)
             used += _estimate_tokens(label + output)
         if len(history_lines) > 1:
@@ -383,6 +383,38 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
     current_iteration = state.get("current_iteration", 1)
 
     messages = _build_messages(role, state)
+
+    # Compaction tier 1: truncate oversized tool outputs if near context limit
+    _total_chars = sum(len(getattr(m, "content", None) or "") for m in messages)
+    _trigger_tokens = int(settings.compaction_trigger_ratio * settings.max_conversation_history_tokens)
+    if _total_chars // max(settings.chars_per_token, 1) > _trigger_tokens:
+        from ..context.compaction import truncate_tool_outputs
+        messages, _n_trunc, _bytes_saved = truncate_tool_outputs(
+            messages,
+            threshold_tokens=settings.compaction_tool_output_threshold_tokens,
+            retain_recent_n=settings.compaction_retain_recent_messages,
+        )
+        if _n_trunc:
+            logger.info(
+                "tool_output_truncated",
+                extra={
+                    "event": "tool_output_truncated",
+                    "task_id": state.get("task_id"),
+                    "n_truncated": _n_trunc,
+                    "bytes_saved": _bytes_saved,
+                },
+            )
+
+        # Compaction tier 2: LLM summarization if still over threshold after tier 1
+        _chars_after_t1 = sum(len(getattr(m, "content", None) or "") for m in messages)
+        if _chars_after_t1 // max(settings.chars_per_token, 1) > _trigger_tokens:
+            from ..context.compaction import summarize_oldest_turns
+            _non_system = [m for m in messages if getattr(m, "role", None) != "system"]
+            _n_summarize = max(2, len(_non_system) // 3)
+            try:
+                messages = await summarize_oldest_turns(messages, n_to_summarize=_n_summarize)
+            except Exception as _exc:
+                logger.warning("summarize_oldest_turns failed: %s", _exc)
 
     request_kwargs: Dict[str, Any] = dict(
         backend=settings.role_backend.get(role) or _default_backend(),

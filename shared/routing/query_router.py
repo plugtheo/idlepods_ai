@@ -112,8 +112,8 @@ _CHAINS = {
 
     # ── RESEARCH ────────────────────────────────────────────────────────────
     (Intent.RESEARCH,  Complexity.SIMPLE):   ["researcher"],
-    (Intent.RESEARCH,  Complexity.MODERATE): ["researcher", "critic"],
-    (Intent.RESEARCH,  Complexity.COMPLEX):  ["planner", "researcher", "critic"],
+    (Intent.RESEARCH, Complexity.MODERATE):  ["researcher", "reviewer", "critic"],
+    (Intent.RESEARCH, Complexity.COMPLEX):   ["planner", "researcher", "reviewer", "critic"],
 
     # ── ANALYSIS ────────────────────────────────────────────────────────────
     (Intent.ANALYSIS,  Complexity.SIMPLE):   ["reviewer"],
@@ -127,8 +127,8 @@ _CHAINS = {
 
     # ── QA ──────────────────────────────────────────────────────────────────
     (Intent.QA,        Complexity.SIMPLE):   ["researcher"],
-    (Intent.QA,        Complexity.MODERATE): ["researcher", "critic"],
-    (Intent.QA,        Complexity.COMPLEX):  ["planner", "researcher", "critic"],
+    (Intent.QA,        Complexity.MODERATE): ["researcher", "reviewer", "critic"],
+    (Intent.QA,        Complexity.COMPLEX):  ["planner", "researcher", "reviewer", "critic"],
 
     # ── GENERAL (fallback — no keyword matched) ──────────────────────────────
     (Intent.GENERAL,   Complexity.SIMPLE):   ["planner"],

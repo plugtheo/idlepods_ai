@@ -41,6 +41,7 @@ async def build(
     complexity: str,
     task_id: str = "",
     allowed_files: Optional[list[str]] = None,
+    suppress_few_shots: bool = False,
 ) -> BuiltContext:
     """
     Build enriched context for one request.
@@ -85,7 +86,7 @@ async def build(
         scan_gate = set(allowed_files)
 
     few_shots_result, repo_snippets_result, hints_result = await asyncio.gather(
-        few_shot.search(prompt),
+        asyncio.sleep(0, result=[]) if suppress_few_shots else few_shot.search(prompt),
         repo.scan(prompt, intent, allowed_files=scan_gate),
         hints.generate(intent, complexity),
         return_exceptions=True,
@@ -106,6 +107,29 @@ async def build(
     # Merge fresh snippets with cached snippets for unchanged files
     fresh_dicts = [s.model_dump() for s in repo_snippets_result]
     merged_snippets = cached_snippets + fresh_dicts
+
+    logger.info(
+        "bucket_assembled",
+        extra={
+            "event": "bucket_assembled",
+            "bucket": "few_shots",
+            "candidates_available": len(few_shots_result),
+            "items_included": len(few_shots_result),
+            "tokens_spent": None,  # TODO: budget tracking lives in nodes.py
+            "tokens_budget": None,  # TODO: budget tracking lives in nodes.py
+        },
+    )
+    logger.info(
+        "bucket_assembled",
+        extra={
+            "event": "bucket_assembled",
+            "bucket": "repo_snippets",
+            "candidates_available": len(repo_snippets_result),
+            "items_included": len(merged_snippets),
+            "tokens_spent": None,  # TODO: budget tracking lives in nodes.py
+            "tokens_budget": None,  # TODO: budget tracking lives in nodes.py
+        },
+    )
 
     if task_id:
         from ..config.settings import settings

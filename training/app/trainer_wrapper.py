@@ -57,7 +57,7 @@ def _base_model_for(role: str) -> str:
     try:
         registry = load_registry(settings.models_yaml_path)
         backend = registry.backends[registry.default_backend]
-        return backend.training_model_id or backend.model_id
+        return backend.resolve_training_model_id()
     except Exception as exc:
         raise RuntimeError(f"Cannot resolve base model from registry: {exc}") from exc
 

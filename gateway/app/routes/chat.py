@@ -32,6 +32,8 @@ _query_router = QueryRouter()
 class ChatRequest(BaseModel):
     prompt: str = Field(..., description="User's natural-language request")
     session_id: Optional[str] = Field(None, description="Optional session identifier for continuity")
+    task_id: Optional[str] = Field(None, description="Stable identifier scoping multi-turn context state. Defaults to session_id when absent.")
+    suppress_few_shots: bool = False
     max_iterations: Optional[int] = Field(None, description="Override default max iterations (1–10)")
     convergence_threshold: Optional[float] = Field(None, description="Override convergence score threshold (0.0–1.0)")
 
@@ -67,6 +69,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
         "intent": route.intent,
         "complexity": route.complexity,
     }
+    if request.task_id is not None:
+        orch_kwargs["task_id"] = request.task_id
+    if request.suppress_few_shots:
+        orch_kwargs["suppress_few_shots"] = True
     if request.max_iterations is not None:
         orch_kwargs["max_iterations"] = request.max_iterations
     if request.convergence_threshold is not None:
@@ -126,6 +132,10 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
         "intent": route.intent,
         "complexity": route.complexity,
     }
+    if request.task_id is not None:
+        orch_kwargs["task_id"] = request.task_id
+    if request.suppress_few_shots:
+        orch_kwargs["suppress_few_shots"] = True
     if request.max_iterations is not None:
         orch_kwargs["max_iterations"] = request.max_iterations
     if request.convergence_threshold is not None:

@@ -1,6 +1,8 @@
 # IdlePods AI
 
-A poor man's local (soon to be fully portable) coding/research assistant designed to be scalable and grow over time.
+A poor man's local (soon to be fully portable) coding/research assistant designed to be scalable and grow over time for full self-reliance.
+
+The project currently uses rank-stabilized LoRA adapter training/retraining to steadily improve niche agent adapters over time 
 
 More formally, this is a self-improving multi-agent LLM tool where a team of specialized agents collaborates to produce a solid response; every successful run feeds into training data that fine-tunes the models over time.
 
