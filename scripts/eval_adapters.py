@@ -163,7 +163,11 @@ _CODE_RE     = re.compile(r"```|def |class |import |\bfunction\b|\breturn\b", re
 # Orchestration metadata leakage pattern — adapter outputs pipeline JSON instead of code
 _METADATA_LEAKAGE_RE = re.compile(
     r"'agent_name'\s*:|\"agent_name\"\s*:|'iteration_number'\s*:|\"iteration_number\"\s*:"
-    r"|'quality_score'\s*:|\"quality_score\"\s*:|'execution_time_ms'\s*:|\"execution_time_ms\"\s*:",
+    r"|'quality_score'\s*:|\"quality_score\"\s*:|'execution_time_ms'\s*:|\"execution_time_ms\"\s*:"
+    r"|'session_id'\s*:|\"session_id\"\s*:|'final_output'\s*:|\"final_output\"\s*:"
+    r"|'agent_chain'\s*:|\"agent_chain\"\s*:|'contributions'\s*:|\"contributions\"\s*:"
+    r"|'iteration_scores'\s*:|\"iteration_scores\"\s*:|'final_score'\s*:|\"final_score\"\s*:"
+    r"|'converged'\s*:|\"converged\"\s*:",
     re.I,
 )
 _STRUCT_RE   = re.compile(

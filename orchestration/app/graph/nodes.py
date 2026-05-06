@@ -172,7 +172,7 @@ def _build_messages(
     tool_loop_entries = [
         h for h in raw_history
         if h.get("role") == "tool"
-        or (h.get("role") == role and "tool_calls" in h)
+        or "tool_calls" in h
     ]
     regular_raw = [h for h in raw_history if h not in tool_loop_entries]
     iteration_history = _optimizer.filter_history(role, regular_raw)
