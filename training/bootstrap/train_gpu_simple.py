@@ -272,7 +272,7 @@ async def train_capability(
 
     # ── Train via LoRATrainer ────────────────────────────────────────────────
     try:
-        trainer = LoRATrainer(base_model=model_id, output_dir=str(save_path), max_seq_length=recipe.max_seq_length)
+        trainer = LoRATrainer(base_model=model_id, output_dir=str(save_path))
         result  = await trainer.train(
             dataset_path=dataset_path,
             num_epochs=recipe.num_epochs,

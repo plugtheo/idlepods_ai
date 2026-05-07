@@ -56,9 +56,16 @@ async def lifespan(app: FastAPI):
     global _grpc_task
 
     # Eagerly initialise the default backend so the first real request is not slow.
-    from .backends.factory import get_backend
+    from .backends.factory import get_backend, bootstrap_adapters
     from shared.contracts.models import load_registry
     get_backend(load_registry().default_backend)
+
+    # Restore adapters that were active before the last restart.  Errors are
+    # non-fatal — the service starts and falls back to base until adapters load.
+    try:
+        await bootstrap_adapters(settings.lora_manifest_path)
+    except Exception as exc:
+        _log.warning("bootstrap_adapters failed: %s — starting without pre-loaded adapters", exc)
 
     # Start gRPC server as a background task alongside uvicorn.
     from .grpc.server import serve as grpc_serve

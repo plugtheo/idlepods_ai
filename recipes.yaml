@@ -8,6 +8,10 @@ default:
   learning_rate: 2e-4
   num_epochs: 3
   max_seq_length: 10240
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  packing: true
+  load_in_4bit: true
   sft_format: openai_messages
   tool_call_style: openai_native
 

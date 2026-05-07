@@ -436,150 +436,6 @@ def apply_recipe(model, recipe: "AdapterRecipe"):
     )
 
 
-class AgentOutputDataset:
-    """Manages agent output collection and filtering"""
-    
-    def __init__(self, results_dir: str = "./data/agent_runs"):
-        self.results_dir = Path(results_dir)
-        self.results_dir.mkdir(parents=True, exist_ok=True)
-        self.runs: List[Dict[str, Any]] = []
-        self.run_file = self.results_dir / f"runs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-    
-    def add_run(self, run: Dict[str, Any]) -> None:
-        """Add a single agent run"""
-        required_fields = {"problem", "context", "solution", "evaluation", "improvement", "lessons_learned"}
-        if not required_fields.issubset(run.keys()):
-            missing = required_fields - set(run.keys())
-            raise ValueError(f"Missing fields: {missing}")
-        
-        run["timestamp"] = datetime.now().isoformat()
-        self.runs.append(run)
-        self._save_run(run)
-    
-    def _save_run(self, run: Dict[str, Any]) -> None:
-        """Persist run to JSONL"""
-        with open(self.run_file, 'a') as f:
-            f.write(json.dumps(run) + '\n')
-    
-    def load_runs_from_file(self, filepath: str) -> None:
-        """Load runs from existing JSONL file"""
-        with open(filepath, 'r') as f:
-            for line in f:
-                if line.strip():
-                    self.runs.append(json.loads(line))
-    
-    def filter_by_score(self, min_score: float = 0.65) -> List[Dict[str, Any]]:
-        """Filter runs by evaluation score threshold"""
-        filtered = []
-        for run in self.runs:
-            score = float(run.get('evaluation', 0))
-            if score >= min_score:
-                filtered.append(run)
-        
-        print(f"[FILTER] Total runs: {len(self.runs)}")
-        print(f"[FILTER] Min score threshold: {min_score}")
-        print(f"[FILTER] High-quality runs: {len(filtered)}")
-        print(f"[FILTER] Filtered out: {len(self.runs) - len(filtered)}")
-        print(f"[FILTER] Avg score: {sum(float(r.get('evaluation', 0)) for r in self.runs) / len(self.runs):.2f}")
-        
-        return filtered
-
-
-class TrainingDatasetBuilder:
-    """Builds LoRA training dataset from filtered agent runs"""
-    
-    def __init__(self, output_dir: str = "./data/training_data"):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.dataset: List[Dict[str, str]] = []
-    
-    def build_from_filtered_runs(self, filtered_runs: List[Dict[str, Any]]) -> None:
-        """
-        Create instruction-response pairs from filtered runs.
-        
-        Format:
-        {
-            "instruction": "<problem>\nContext: <context>\nLessons from previous: <lessons>",
-            "response": "<solution>\nImprovement: <improvement>"
-        }
-        """
-        self.dataset = []
-        
-        for run in filtered_runs:
-            instruction = self._build_instruction(run)
-            response = self._build_response(run)
-            
-            self.dataset.append({
-                "instruction": instruction,
-                "response": response,
-                "evaluation": float(run.get('evaluation', 0)),
-                "metadata": {
-                    "original_problem": run.get('problem', ''),
-                    "lessons_learned": run.get('lessons_learned', '')
-                }
-            })
-        
-        print(f"\n[DATASET] Created {len(self.dataset)} training pairs")
-        if self.dataset:
-            avg_eval = sum(d['evaluation'] for d in self.dataset) / len(self.dataset)
-            print(f"[DATASET] Average evaluation score: {avg_eval:.3f}")
-    
-    def _build_instruction(self, run: Dict[str, Any]) -> str:
-        """Build instruction from problem, context, and lessons"""
-        parts = [
-            f"Problem: {run.get('problem', '')}"
-        ]
-        
-        if run.get('context'):
-            parts.append(f"Context: {run.get('context', '')}")
-        
-        if run.get('lessons_learned'):
-            parts.append(f"Lessons from previous: {run.get('lessons_learned', '')}")
-        
-        return "\n".join(parts)
-    
-    def _build_response(self, run: Dict[str, Any]) -> str:
-        """Build response from solution and improvement"""
-        parts = [
-            f"Solution: {run.get('solution', '')}"
-        ]
-        
-        if run.get('improvement'):
-            parts.append(f"Improvement: {run.get('improvement', '')}")
-        
-        return "\n".join(parts)
-    
-    def save_dataset(self, format: str = "jsonl") -> Path:
-        """Save dataset to file"""
-        if format == "jsonl":
-            output_file = self.output_dir / f"lora_training_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-            with open(output_file, 'w') as f:
-                for item in self.dataset:
-                    f.write(json.dumps(item) + '\n')
-        else:
-            output_file = self.output_dir / f"lora_training_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            with open(output_file, 'w') as f:
-                json.dump(self.dataset, f, indent=2)
-        
-        print(f"[DATASET] Saved to {output_file}")
-        return output_file
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get dataset statistics"""
-        if not self.dataset:
-            return {}
-        
-        avg_instruction_len = sum(len(d['instruction']) for d in self.dataset) / len(self.dataset)
-        avg_response_len = sum(len(d['response']) for d in self.dataset) / len(self.dataset)
-        
-        return {
-            'total_pairs': len(self.dataset),
-            'avg_instruction_length': int(avg_instruction_len),
-            'avg_response_length': int(avg_response_len),
-            'avg_evaluation': sum(d['evaluation'] for d in self.dataset) / len(self.dataset),
-        }
-
-
 class LoRATrainer:
     """Train LoRA adapter on prepared dataset"""
     
@@ -626,9 +482,10 @@ class LoRATrainer:
         Train LoRA adapter on dataset.
         """
         
-        if recipe is None:
+        # TODO: Consolidate and move to helpers.py
+        if recipe is None or not hasattr(recipe, "max_seq_length") or recipe.max_seq_length is None:
             raise RuntimeError("LoRATrainer.train() requires a recipe with max_seq_length override")
-                
+        
         print(f"\n{'='*70}")
         print("LORA TRAINING")
         print(f"{'='*70}")
@@ -677,16 +534,31 @@ class LoRATrainer:
                              recipe: Optional[AdapterRecipe] = None,
                              resume_from_checkpoint: Optional[str] = None) -> Dict[str, Any]:
         """Train with actual Unsloth (requires GPU)"""
+        import time as _time
+        _t_start = _time.monotonic()
         try:
             from unsloth import FastLanguageModel
             from trl import SFTTrainer, SFTConfig
-            
+
+            # TODO: Consolidate and move to helpers.py
+            if recipe is None or not hasattr(recipe, "max_seq_length") or recipe.max_seq_length is None:
+                raise RuntimeError("LoRATrainer.train() requires a recipe with max_seq_length override")
+
+            print(
+                f"\n[TRAINER] batch_size={recipe.per_device_train_batch_size} "
+                f"grad_accum={recipe.gradient_accumulation_steps} "
+                f"effective_batch={recipe.per_device_train_batch_size * recipe.gradient_accumulation_steps} "
+                f"packing={recipe.packing} "
+                f"max_seq_length={recipe.max_seq_length} "
+                f"load_in_4bit={recipe.load_in_4bit}",
+                flush=True,
+            )
             print("\n[TRAINER] Loading Unsloth model...")
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=self.base_model,
                 max_seq_length=recipe.max_seq_length,
                 dtype=None,
-                load_in_4bit=True,
+                load_in_4bit=recipe.load_in_4bit,
             )
 
             # Ensure pad token is set — required for batched training.
@@ -721,8 +593,8 @@ class LoRATrainer:
             _has_messages_records = any("messages" in r for r in dataset)
 
             sft_config_kwargs = dict(
-                per_device_train_batch_size=1,
-                gradient_accumulation_steps=8,
+                per_device_train_batch_size=recipe.per_device_train_batch_size,
+                gradient_accumulation_steps=recipe.gradient_accumulation_steps,
                 warmup_ratio=0.05,
                 num_train_epochs=num_epochs,
                 learning_rate=learning_rate,
@@ -739,7 +611,7 @@ class LoRATrainer:
                 # SFTTrainer dumps ~200 MB checkpoint dirs every 500 steps
                 # (7+ times per capability), consuming ~1.4 GB of wasted disk.
                 save_strategy="no",
-                packing=True,       # pack multiple examples into a single sequence - works since assistant_only_loss = true is used
+                packing=recipe.packing,
                 # Suppress wandb / tensorboard init — not needed in training
                 # containers and causes hangs if wandb credentials are absent.
                 report_to="none",
@@ -769,12 +641,33 @@ class LoRATrainer:
                 t = example["text"]
                 return t if isinstance(t, list) else [t]
 
+            _metrics_path = self.output_dir / "train_metrics.jsonl"
+            _callbacks = []
+            try:
+                from transformers import TrainerCallback
+
+                class _MetricsStreamCallback(TrainerCallback):
+                    def on_log(self, args, state, control, logs=None, **kwargs):
+                        if not logs:
+                            return
+                        entry = {"step": state.global_step, "epoch": state.epoch, **logs}
+                        try:
+                            with open(_metrics_path, "a", encoding="utf-8") as _fh:
+                                _fh.write(json.dumps(entry) + "\n")
+                        except OSError:
+                            pass
+
+                _callbacks = [_MetricsStreamCallback()]
+            except ImportError:
+                pass
+
             trainer = SFTTrainer(
                 model=model,
                 processing_class=tokenizer,
                 train_dataset=train_dataset,
                 args=sft_config,
                 formatting_func=_formatting_func,
+                callbacks=_callbacks if _callbacks else None,
             )
 
             print("[TRAINER] Starting Unsloth training...")
@@ -812,6 +705,14 @@ class LoRATrainer:
                         final_loss = float(entry["loss"])
                         break
 
+            duration_s = round(_time.monotonic() - _t_start, 1)
+            print(
+                f"training_complete method=unsloth role={self.output_dir.name} "
+                f"epochs={num_epochs} samples={len(dataset)} "
+                f"final_loss={final_loss:.6f} duration_s={duration_s}",
+                flush=True,
+            )
+
             return {
                 'status':     'success',
                 'adapter_id': self.adapter_id,
@@ -821,10 +722,15 @@ class LoRATrainer:
                 'lora_rank':  lora_rank,
                 'size_mb':    size_mb,
                 'final_loss': round(final_loss, 6),
+                'duration_s': duration_s,
             }
-            
+
         except Exception as e:
-            print(f"[TRAINER] Unsloth training failed: {e}")
+            duration_s = round(_time.monotonic() - _t_start, 1)
+            print(
+                f"training_failed method=unsloth duration_s={duration_s} error={e}",
+                flush=True,
+            )
             # Re-raise so the subprocess exits non-zero and the Training
             # Service can record the failure accurately.
             raise
@@ -861,7 +767,7 @@ class LoRATrainer:
             'samples': len(dataset),
         }
 
-    def _validate_qwen3_toolcall_wrapping(tokenizer):
+    def _validate_qwen3_toolcall_wrapping(self, tokenizer):
         """
         Hard validation: Qwen3 chat template must wrap assistant tool-call turns
         inside {% generation %} ... {% endgeneration %}.
@@ -901,202 +807,3 @@ class LoRATrainer:
                 "Patch the chat template or install a custom assistant-mask collator."
             )
 
-class LoRAAgentTrainerPipeline:
-    """Complete 5-stage pipeline for training LoRA on agent outputs"""
-    
-    def __init__(self,
-                 base_model: str,
-                 agent_runs_file: Optional[str] = None,
-                 max_seq_length: Optional[int] = None):
-        self.agent_runs_file = agent_runs_file
-        self.base_model = base_model
-        self.dataset_manager = AgentOutputDataset()
-        self.trainer_builder = TrainingDatasetBuilder()
-        if max_seq_length is None:
-            try:
-                from shared.contracts.training import load_recipes
-                max_seq_length = load_recipes().default.max_seq_length
-            except Exception:
-                max_seq_length = 2048
-        self.lora_trainer = LoRATrainer(base_model=self.base_model, max_seq_length=max_seq_length)
-        
-        self.run_id = datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.report = {
-            'run_id': self.run_id,
-            'stages': {}
-        }
-    
-    async def run(self, 
-                  filter_threshold: float = 0.65,
-                  num_epochs: int = 3,
-                  min_samples: int = 5) -> Dict[str, Any]:
-        """Execute full 5-stage pipeline"""
-        
-        print(f"\n{'='*70}")
-        print("LORA AGENT TRAINER PIPELINE")
-        print(f"{'='*70}")
-        print("Stage 1: Collect agent runs")
-        print("Stage 2: Filter successful runs (evaluation >= threshold)")
-        print("Stage 3: Build training dataset")
-        print("Stage 4: Prepare instruction-response pairs")
-        print("Stage 5: Train LoRA adapter")
-        print(f"{'='*70}\n")
-        
-        # Stage 1: Collect runs
-        print(f"\n{'='*70}")
-        print("STAGE 1: COLLECT AGENT RUNS")
-        print(f"{'='*70}")
-        
-        if self.agent_runs_file:
-            print(f"[STAGE 1] Loading from {self.agent_runs_file}...")
-            self.dataset_manager.load_runs_from_file(self.agent_runs_file)
-        else:
-            print("[STAGE 1] No runs file provided, using simulation mode")
-            await self._generate_simulation_runs()
-        
-        print(f"[STAGE 1] Total runs collected: {len(self.dataset_manager.runs)}")
-        self.report['stages']['stage_1'] = {
-            'total_runs': len(self.dataset_manager.runs),
-            'runs_file': str(self.dataset_manager.run_file)
-        }
-        
-        # Stage 2: Filter
-        print(f"\n{'='*70}")
-        print("STAGE 2: FILTER SUCCESSFUL RUNS")
-        print(f"{'='*70}\n")
-        
-        filtered_runs = self.dataset_manager.filter_by_score(min_score=filter_threshold)
-        self.report['stages']['stage_2'] = {
-            'threshold': filter_threshold,
-            'high_quality_count': len(filtered_runs),
-            'filtered_out': len(self.dataset_manager.runs) - len(filtered_runs),
-        }
-        
-        if len(filtered_runs) < min_samples:
-            print(f"\n[WARNING] Only {len(filtered_runs)} runs available (need {min_samples})")
-            print("Proceeding with available data...")
-        
-        # Stage 3: Build dataset
-        print(f"\n{'='*70}")
-        print("STAGE 3: BUILD TRAINING DATASET")
-        print(f"{'='*70}\n")
-        
-        self.trainer_builder.build_from_filtered_runs(filtered_runs)
-        stats = self.trainer_builder.get_stats()
-        print(f"\n[DATASET] Stats:")
-        for key, value in stats.items():
-            print(f"  {key}: {value}")
-        
-        self.report['stages']['stage_3'] = stats
-        
-        # Stage 4: Prepare pairs
-        print(f"\n{'='*70}")
-        print("STAGE 4: SAVE TRAINING DATA")
-        print(f"{'='*70}\n")
-        
-        dataset_path = self.trainer_builder.save_dataset(format="jsonl")
-        self.report['stages']['stage_4'] = {
-            'dataset_file': str(dataset_path),
-            'format': 'jsonl',
-            'pairs': len(self.trainer_builder.dataset)
-        }
-        
-        # Stage 5: Train LoRA
-        print(f"\n{'='*70}")
-        print("STAGE 5: TRAIN LORA ADAPTER")
-        print(f"{'='*70}")
-        
-        train_result = await self.lora_trainer.train(
-            dataset_path=dataset_path,
-            num_epochs=num_epochs
-        )
-        
-        self.report['stages']['stage_5'] = train_result
-        
-        # Final report
-        self._print_final_report()
-        self._save_report()
-        
-        return self.report
-    
-    async def _generate_simulation_runs(self) -> None:
-        """Generate simulated agent runs for demo"""
-        problems = [
-            "Refactor nested if statements in authentication handler",
-            "Optimize database query performance for user reports",
-            "Improve error handling in API endpoints",
-            "Consolidate duplicate utility functions",
-            "Add proper logging to async tasks",
-        ]
-        
-        print("[STAGE 1] Generating simulated runs for demo...\n")
-        
-        for i in range(10):
-            problem = random.choice(problems)
-            score = 0.4 + random.random() * 0.5
-            
-            run = {
-                'problem': problem,
-                'context': f"Found in codebase during analysis pass {i+1}",
-                'solution': f"Implemented solution with improved structure and error handling",
-                'evaluation': round(score, 2),
-                'improvement': f"Code quality improved by {int(score*100)}%",
-                'lessons_learned': "Focus on maintainability and performance"
-            }
-            
-            self.dataset_manager.add_run(run)
-            print(f"[STAGE 1] Run {i+1}: {problem[:50]}... (score: {score:.2f})")
-    
-    def _print_final_report(self) -> None:
-        """Print pipeline completion report"""
-        print(f"\n{'='*70}")
-        print("PIPELINE COMPLETE")
-        print(f"{'='*70}")
-        print(f"Run ID: {self.run_id}")
-        print(f"\nStages:")
-        print(f"  1. Collected: {self.report['stages']['stage_1']['total_runs']} runs")
-        print(f"  2. Filtered: {self.report['stages']['stage_2']['high_quality_count']} high-quality")
-        print(f"  3. Dataset: {self.report['stages']['stage_3']['total_pairs']} pairs")
-        print(f"  4. Saved: {Path(self.report['stages']['stage_4']['dataset_file']).name}")
-        print(f"  5. Trained: {self.report['stages']['stage_5']['adapter_id']}")
-        print(f"\nAdapter ready for deployment!")
-        print(f"{'='*70}\n")
-    
-    def _save_report(self) -> None:
-        """Save final report"""
-        report_dir = Path("./data/training_pipeline_reports")
-        report_dir.mkdir(parents=True, exist_ok=True)
-        
-        report_file = report_dir / f"lora_trainer_report_{self.run_id}.json"
-        with open(report_file, 'w') as f:
-            json.dump(self.report, f, indent=2)
-        
-        print(f"Report saved: {report_file}\n")
-
-
-async def main():
-    """Example usage"""
-    
-    from shared.contracts.models import load_registry
-    backend = load_registry().backends[load_registry().default_backend]
-    training_model_id = backend.resolve_training_model_id()
-
-    # Initialize pipeline with explicit base model
-    pipeline = LoRAAgentTrainerPipeline(base_model=training_model_id)
-    
-    # Run complete pipeline
-    report = await pipeline.run(
-        filter_threshold=0.65,  # Keep runs with score >= 0.65
-        num_epochs=3,           # Train for 3 epochs
-        min_samples=5           # Need at least 5 samples
-    )
-    
-    # You can also load from existing runs file:
-    # pipeline = LoRAAgentTrainerPipeline(
-    #     agent_runs_file="./data/agent_runs/my_runs.jsonl"
-    # )
-    # report = await pipeline.run()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

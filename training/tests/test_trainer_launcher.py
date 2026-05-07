@@ -8,11 +8,10 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-def _make_settings(qwen="Qwen/Qwen3-14B", output_dir="/tmp/lora", hf_token=""):
+def _make_settings(output_dir="/tmp/lora"):
     s = MagicMock()
-    s.qwen_model = qwen
     s.output_dir = output_dir
-    s.hf_token = hf_token
+    s.jsonl_path = "/tmp/experiences.jsonl"
     return s
 
 
@@ -39,7 +38,8 @@ class TestTrainerLauncher:
         mock_settings = _make_settings()
 
         with (
-            patch("services.training.app.utils.trainer_launcher.settings", mock_settings),
+            patch("services.training.app.utils.trainer_launcher._settings", mock_settings),
+            patch("services.training.app.utils.trainer_launcher._get_base_model", return_value="test-model"),
             patch(
                 "asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
@@ -52,7 +52,6 @@ class TestTrainerLauncher:
             )
 
         mock_exec.assert_called_once()
-        # First positional arg is the executable
         cmd_args = mock_exec.call_args[0]
         assert "trainer_entry" in " ".join(str(a) for a in cmd_args)
 
@@ -61,10 +60,11 @@ class TestTrainerLauncher:
         trainer_launcher._training_running = False
 
         mock_proc = _make_proc()
-        mock_settings = _make_settings(qwen="qwen-test-model")
+        mock_settings = _make_settings()
 
         with (
-            patch("services.training.app.utils.trainer_launcher.settings", mock_settings),
+            patch("services.training.app.utils.trainer_launcher._settings", mock_settings),
+            patch("services.training.app.utils.trainer_launcher._get_base_model", return_value="qwen-test-model"),
             patch(
                 "asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
@@ -85,10 +85,11 @@ class TestTrainerLauncher:
         trainer_launcher._training_running = False
 
         mock_proc = _make_proc()
-        mock_settings = _make_settings(qwen="qwen-test-model")
+        mock_settings = _make_settings()
 
         with (
-            patch("services.training.app.utils.trainer_launcher.settings", mock_settings),
+            patch("services.training.app.utils.trainer_launcher._settings", mock_settings),
+            patch("services.training.app.utils.trainer_launcher._get_base_model", return_value="qwen-test-model"),
             patch(
                 "asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,

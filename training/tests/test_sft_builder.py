@@ -39,13 +39,16 @@ def test_openai_messages_no_tool_calls():
 
 
 def test_openai_messages_with_tool_calls():
+    """tool_calls → returns [tool_target_record, full_record]; full record has all turns."""
     tool_calls = [{"id": "call_1", "type": "function",
                    "function": {"name": "read_file", "arguments": '{"path":"/tmp/f.py"}'}}]
     tool_results = [{"tool_call_id": "call_1", "content": "# contents"}]
     contrib = _make_contribution(tool_calls=tool_calls, tool_results=tool_results)
     result = build_sft_pair(contrib, _openai_recipe(), "coder",
                             system_prompt="sys", user_prompt="user")
-    msgs = result["messages"]
+    assert isinstance(result, list) and len(result) == 2
+    # full_record is the second element; has all turns
+    msgs = result[-1]["messages"]
     roles = [m["role"] for m in msgs]
     # system, user, assistant(tool_calls), tool, assistant(final)
     assert roles == ["system", "user", "assistant", "tool", "assistant"]
@@ -58,7 +61,7 @@ def test_openai_messages_with_tool_calls():
 
 
 def test_three_turn_tool_history_shape():
-    """Canonical 3-turn (coder→tool_calls, tool, coder→final) history."""
+    """Canonical 3-turn (coder→tool_calls, tool, coder→final) — full record checked."""
     tool_calls = [{"id": "c1", "type": "function",
                    "function": {"name": "run_command", "arguments": '{"cmd":"ls"}'}}]
     tool_results = [{"tool_call_id": "c1", "content": "main.py\n"}]
@@ -73,7 +76,8 @@ def test_three_turn_tool_history_shape():
         output="Here are the files: main.py",
     )
     result = build_sft_pair(contrib, _openai_recipe(), "coder")
-    msgs = result["messages"]
+    assert isinstance(result, list) and len(result) == 2
+    msgs = result[-1]["messages"]
     assert msgs[0]["role"] == "system"
     assert msgs[1]["role"] == "user"
     assert msgs[2]["role"] == "assistant"

@@ -289,7 +289,11 @@ def _load_curated_pairs(capability: str, data_root: Path, max_samples: int, reci
                     messages=full_messages,
                 )
                 sft_pair = build_sft_pair(contrib, recipe, capability)
-                pairs.append({**sft_pair, "score": 1.0})
+                if isinstance(sft_pair, list):
+                    for rec in sft_pair:
+                        pairs.append({**rec, "score": 1.0})
+                else:
+                    pairs.append({**sft_pair, "score": 1.0})
 
     if len(pairs) > max_samples:
         import random
@@ -351,7 +355,11 @@ def _load_synthetic_pairs(capability: str, recipe: "AdapterRecipe", max_samples:
                     messages=full_messages,
                 )
                 sft_pair = build_sft_pair(contrib, recipe, capability)
-                pairs.append({**sft_pair, "score": 1.0})
+                if isinstance(sft_pair, list):
+                    for rec in sft_pair:
+                        pairs.append({**rec, "score": 1.0})
+                else:
+                    pairs.append({**sft_pair, "score": 1.0})
 
     if len(pairs) > max_samples:
         import random
@@ -383,6 +391,14 @@ def main() -> None:
     parser.add_argument("--output-dir",  required=True,  help="Base adapter output directory (e.g. /data/lora_checkpoints)")
     parser.add_argument("--capability",  default="general", help="Capability label (e.g. coder, researcher)")
     parser.add_argument("--recipe-name", default=None, help="Override recipe registry lookup (role name, e.g. coder)")
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help=(
+            "Throughput probe mode: cap dataset to 50 samples and 1 epoch, then exit. "
+            "Use this to estimate tokens/s and validate GPU readiness before a full run."
+        ),
+    )
     args = parser.parse_args()
 
     # ---------------------------------------------------------------------------
@@ -514,6 +530,13 @@ def main() -> None:
         )
         sys.exit(0)
 
+    if args.probe:
+        pairs = pairs[:50]
+        print(
+            f"[trainer-entry] --probe mode: capped to {len(pairs)} samples, 1 epoch",
+            flush=True,
+        )
+
     if len(pairs) < MIN_SFT_PAIRS:
         print(
             f"[trainer-entry] Only {len(pairs)} SFT pairs — below minimum {MIN_SFT_PAIRS}. "
@@ -548,18 +571,22 @@ def main() -> None:
         resume_from_checkpoint = str(backup_path)
         print(f"[trainer-entry] Warm-start enabled: resuming from {backup_path}", flush=True)
 
+    import time as _time
+    _t_run_start = _time.monotonic()
+
     # Train — LoRATrainer.train() is async; run it in a new event loop.
     # The adapter is saved directly to adapter_output_dir so vLLM picks it up
     # without any path translation (e.g. /data/lora_checkpoints/coding_lora/).
+    probe_epochs = 1 if args.probe else recipe.num_epochs
+
     trainer = LoRATrainer(
         base_model=args.base_model,
-        output_dir=adapter_output_dir,
-        max_seq_length=recipe.max_seq_length,
+        output_dir=adapter_output_dir
     )
     try:
         result = asyncio.run(trainer.train(
             dataset_path=str(data_file),
-            num_epochs=recipe.num_epochs,
+            num_epochs=probe_epochs,
             learning_rate=recipe.learning_rate,
             lora_rank=recipe.r,
             lora_alpha=recipe.alpha,
@@ -573,6 +600,24 @@ def main() -> None:
         except OSError:
             pass
 
+    _run_duration_s = round(_time.monotonic() - _t_run_start, 1)
+    print(
+        f"trainer_entry_done capability={args.capability} role={role_name} "
+        f"method={result.get('method')} samples={len(pairs)} "
+        f"epochs={probe_epochs} final_loss={result.get('final_loss', 'n/a')} "
+        f"duration_s={_run_duration_s}",
+        flush=True,
+    )
+
+    if args.probe:
+        print(
+            f"[trainer-entry] --probe complete: method={result.get('method')} "
+            f"final_loss={result.get('final_loss', 'n/a')} "
+            f"samples={len(pairs)} epochs=1 duration_s={_run_duration_s}",
+            flush=True,
+        )
+        sys.exit(0)
+
     # Post-training: stage → smoke gate → swap+promote (or mark failed).
     # Skip entirely in mock mode (no GPU, no weights written).
     if result.get("method") != "mock":
@@ -582,6 +627,23 @@ def main() -> None:
             tokenizer_hash = _hashlib.sha256(_tok_path.read_bytes()).hexdigest()
         else:
             tokenizer_hash = "unknown"
+
+        _WEIGHT_FILES = ("adapter_model.safetensors", "adapter_model.bin")
+        weight_file = next((adapter_dir / f for f in _WEIGHT_FILES if (adapter_dir / f).exists()), None)
+        if weight_file is None or weight_file.stat().st_size == 0:
+            print(
+                f"[trainer-entry] Adapter checkpoint validation failed: "
+                f"no non-empty weight file found in {adapter_dir} — marking failed",
+                flush=True,
+            )
+            _mark_failed(Path(args.output_dir), cap_label, old_version,
+                         smoke_results={"pass": False, "reason": "missing_checkpoint"})
+            sys.exit(2)
+        print(
+            f"[trainer-entry] Checkpoint validated: {weight_file.name} "
+            f"({weight_file.stat().st_size / 1e6:.1f} MB)",
+            flush=True,
+        )
 
         new_meta = _post_train_stage(
             save_path=adapter_dir,

@@ -71,12 +71,17 @@ def test_messages_record_not_wrapped_with_legacy_markers(tmp_path):
         (p / "adapter_model.safetensors").write_bytes(b"fake")
 
     mock_model.save_pretrained.side_effect = _fake_save
-    mock_flm.from_pretrained.return_value = (mock_model, MagicMock())
+    # Tokenizer must satisfy _validate_qwen3_toolcall_wrapping's marker check
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.apply_chat_template.return_value = (
+        "{% generation %} assistant turn {% endgeneration %}"
+    )
+    mock_flm.from_pretrained.return_value = (mock_model, mock_tokenizer)
     mock_flm.get_peft_model.return_value = mock_model
 
     captured_dataset = []
 
-    def _capture_trainer(model, processing_class, train_dataset, args):
+    def _capture_trainer(model, processing_class, train_dataset, args, callbacks=None, **kwargs):
         if isinstance(train_dataset, list):
             captured_dataset.extend(train_dataset)
         instance = MagicMock()

@@ -103,102 +103,10 @@ def _fix_bpe_artifacts(text: str) -> str:
 logger = logging.getLogger(__name__)
 
 _adapter_fallback_counts: Dict[str, Deque[float]] = {}
-_adapter_tool_call_style_cache: dict[str, str] = {}
-
-
-def _load_tool_call_styles_from_manifest() -> None:
-    """Populate _adapter_tool_call_style_cache from the LoRA adapter manifest."""
-    try:
-        from ..config.settings import settings
-        import json as _json
-        manifest_path = Path(getattr(settings, "lora_manifest_path", "/data/lora_checkpoints/manifest.json"))
-        if not manifest_path.exists():
-            return
-        raw = _json.loads(manifest_path.read_text())
-        for adapter_name, entry in raw.get("adapters", {}).items():
-            history = entry.get("history", [])
-            if history:
-                last = history[-1]
-                style = last.get("recipe", {}).get("tool_call_style", "openai_native")
-                _adapter_tool_call_style_cache[adapter_name] = style
-    except Exception as exc:
-        logger.warning("Failed to load tool_call_styles from manifest: %s", exc)
-
-
-def _get_adapter_tool_call_style(adapter_name: str) -> str:
-    """Return the tool_call_style for adapter_name (default: openai_native)."""
-    if adapter_name not in _adapter_tool_call_style_cache:
-        _load_tool_call_styles_from_manifest()
-    return _adapter_tool_call_style_cache.get(adapter_name, "openai_native")
 
 
 def get_fallback_counts() -> dict[str, int]:
     return {k: len(v) for k, v in _adapter_fallback_counts.items()}
-
-
-# TODO: REMOVE - Also remove legacy path support in generate() and generate_stream() once all adapters are retrained with tool_call_style in the manifest.
-# ---------------------------------------------------------------------------
-# Training-format chat template
-# ---------------------------------------------------------------------------
-# Adapters (coding_lora, debugging_lora, planning_lora, …) were trained with
-# the following plain-text format (see lora_trainer.py / trainer_entry.py):
-#
-#   [SYSTEM]
-#   <system message content>
-#
-#   [USER]
-#   <user message content>
-#
-#   [RESPONSE]
-#   <response>
-#
-# For adapter inference we build this string via string concatenation and call
-# /v1/completions.  The Jinja2 chat_template approach was ABANDONED because
-# {%- -%} whitespace stripping silently removes the \n\n separators between
-# sections, producing [SYSTEM]\nS[USER]\nU[RESPONSE] instead of the correct
-# [SYSTEM]\nS\n\n[USER]\nU\n\n[RESPONSE]\n — a training/inference mismatch.
-#
-# Base-model calls (no adapter) continue to use /v1/chat/completions with
-# the model's native template, which is correct for non-fine-tuned inference.
-#
-# Note: adapters are NOT language-specific — coding_lora, debugging_lora, etc.
-# cover all languages (Python, JS/TS, Go, Rust, Java, C#, SQL, shell …).
-# The system prompt injected by the orchestration layer establishes the
-# capability context; the adapter supplies the fine-tuned response style.
-
-def _build_adapter_prompt(messages: list) -> str:
-    """
-    Assemble the canonical adapter prompt string from a messages list.
-
-    Output (for system + user turn):
-        [SYSTEM]
-        <system content>
-
-        [USER]
-        <user content>
-
-        [RESPONSE]
-
-    This is the EXACT format written to every training pair by load_sft_pairs()
-    in train_gpu_simple.py and by _format_messages_as_prompt() in trainer_entry.py.
-    DataCollatorForCompletionOnlyLM masks everything before "[RESPONSE]\\n",
-    so this boundary must be byte-for-byte identical at training and inference.
-    """
-    parts: list[str] = []
-    for msg in messages:
-        role    = msg.get("role", "")
-        content = msg.get("content", "")
-        if role == "system":
-            parts.append(f"[SYSTEM]\n{content}")
-        elif role == "user":
-            parts.append(f"[USER]\n{content}")
-        elif role == "assistant":
-            parts.append(f"[ASSISTANT]\n{content}")
-    return "\n\n".join(parts) + "\n\n[RESPONSE]\n"
-
-
-# Stop tokens prevent the model from hallucinating the next training pair.
-_ADAPTER_STOP_TOKENS = ["[SYSTEM]", "[USER]", "[ASSISTANT]", "\n[RESPONSE]"]
 
 
 async def get_max_model_len(base_url: str, client: httpx.AsyncClient) -> int:
@@ -415,55 +323,31 @@ class LocalVLLMBackend(InferenceBackend):
         raw_tool_calls = None
         try:
             if using_adapter:
-                tool_call_style = _get_adapter_tool_call_style(effective_model)
-                use_legacy_path = (tool_call_style == "none")
-                logger.info(
-                    "LocalVLLM adapter_dispatch adapter=%s tool_call_style=%s legacy=%s",
-                    effective_model, tool_call_style, use_legacy_path,
+                logger.info("LocalVLLM adapter_dispatch adapter=%s", effective_model)
+                payload = {
+                    "model":       effective_model,
+                    "messages":    messages,
+                    "max_tokens":  request.max_tokens,
+                    "temperature": request.temperature,
+                    "top_p":       request.top_p,
+                }
+                if request.tools:
+                    payload["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
+                    payload["tool_choice"] = "auto"
+                if request.response_schema:
+                    payload["guided_json"] = request.response_schema
+                    payload["guided_decoding_backend"] = "xgrammar"
+                resp = await self._client.post(
+                    f"{self._base_url}/v1/chat/completions",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
                 )
-                if use_legacy_path:
-                    payload = {
-                        "model":       effective_model,
-                        "prompt":      _build_adapter_prompt(messages),
-                        "max_tokens":  request.max_tokens,
-                        "temperature": request.temperature,
-                        "top_p":       request.top_p,
-                        "stop":        _ADAPTER_STOP_TOKENS,
-                    }
-                    resp = await self._client.post(
-                        f"{self._base_url}/v1/completions",
-                        json=payload,
-                        headers={"Content-Type": "application/json"},
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    finish_reason = data["choices"][0].get("finish_reason", "stop")
-                    content = _fix_bpe_artifacts(data["choices"][0]["text"])
-                else:
-                    payload = {
-                        "model":       effective_model,
-                        "messages":    messages,
-                        "max_tokens":  request.max_tokens,
-                        "temperature": request.temperature,
-                        "top_p":       request.top_p,
-                    }
-                    if request.tools:
-                        payload["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
-                        payload["tool_choice"] = "auto"
-                    if request.response_schema:
-                        payload["guided_json"] = request.response_schema
-                        payload["guided_decoding_backend"] = "xgrammar"
-                    resp = await self._client.post(
-                        f"{self._base_url}/v1/chat/completions",
-                        json=payload,
-                        headers={"Content-Type": "application/json"},
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    msg = data["choices"][0]["message"]
-                    finish_reason = data["choices"][0].get("finish_reason", "stop")
-                    raw_tool_calls = msg.get("tool_calls") or None
-                    content = _fix_bpe_artifacts(msg.get("content") or "")
+                resp.raise_for_status()
+                data = resp.json()
+                msg = data["choices"][0]["message"]
+                finish_reason = data["choices"][0].get("finish_reason", "stop")
+                raw_tool_calls = msg.get("tool_calls") or None
+                content = _fix_bpe_artifacts(msg.get("content") or "")
             else:
                 payload = {
                     "model":       effective_model,
@@ -541,36 +425,18 @@ class LocalVLLMBackend(InferenceBackend):
         using_adapter = effective_model != self._model_id
 
         if using_adapter:
-            tool_call_style = _get_adapter_tool_call_style(effective_model)
-            use_legacy_path = (tool_call_style == "none")
-            logger.info(
-                "LocalVLLM stream adapter_dispatch adapter=%s tool_call_style=%s legacy=%s",
-                effective_model, tool_call_style, use_legacy_path,
-            )
-            if use_legacy_path:
-                stream_payload: dict = {
-                    "model":       effective_model,
-                    "prompt":      _build_adapter_prompt(messages),
-                    "max_tokens":  request.max_tokens,
-                    "temperature": request.temperature,
-                    "top_p":       request.top_p,
-                    "stop":        _ADAPTER_STOP_TOKENS,
-                    "stream":      True,
-                }
-                stream_endpoint = f"{self._base_url}/v1/completions"
-            else:
-                stream_payload = {
-                    "model":       effective_model,
-                    "messages":    messages,
-                    "max_tokens":  request.max_tokens,
-                    "temperature": request.temperature,
-                    "top_p":       request.top_p,
-                    "stream":      True,
-                }
-                if request.tools:
-                    stream_payload["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
-                    stream_payload["tool_choice"] = "auto"
-                stream_endpoint = f"{self._base_url}/v1/chat/completions"
+            logger.info("LocalVLLM stream adapter_dispatch adapter=%s", effective_model)
+            stream_payload: dict = {
+                "model":       effective_model,
+                "messages":    messages,
+                "max_tokens":  request.max_tokens,
+                "temperature": request.temperature,
+                "top_p":       request.top_p,
+                "stream":      True,
+            }
+            if request.tools:
+                stream_payload["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
+                stream_payload["tool_choice"] = "auto"
         else:
             stream_payload = {
                 "model":       effective_model,
@@ -581,11 +447,10 @@ class LocalVLLMBackend(InferenceBackend):
                 "stream":      True,
                 "chat_template_kwargs": {"enable_thinking": request.thinking_enabled},
             }
-            stream_endpoint = f"{self._base_url}/v1/chat/completions"
 
         async with self._client.stream(
             "POST",
-            stream_endpoint,
+            f"{self._base_url}/v1/chat/completions",
             json=stream_payload,
             headers={"Content-Type": "application/json"},
         ) as resp:
@@ -600,14 +465,11 @@ class LocalVLLMBackend(InferenceBackend):
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                if using_adapter:
-                    token = chunk.get("choices", [{}])[0].get("text", "")
-                else:
-                    token = (
-                        chunk.get("choices", [{}])[0]
-                        .get("delta", {})
-                        .get("content", "")
-                    )
+                token = (
+                    chunk.get("choices", [{}])[0]
+                    .get("delta", {})
+                    .get("content", "")
+                )
                 if token:
                     yield _fix_bpe_artifacts(token)
 

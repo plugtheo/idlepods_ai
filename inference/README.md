@@ -10,7 +10,7 @@ The value of this service compounds when you have multiple model backends, remot
 
 - **InferenceBackend** (abstract base): Defines the interface every backend must implement. Callers don't need to know which concrete backend is active.
 
-- **LocalVLLMBackend**: The main implementation. Calls vLLM (a fast inference server) over HTTP. Routes requests to either DeepSeek (better for code) or Mistral (better for language/reasoning) based on the agent role.
+- **LocalVLLMBackend**: The main implementation. Calls vLLM (a fast inference server) over HTTP. Routes requests to Qwen3-8B.
 
 - **Adapter Registry** (`_AdapterRegistry`): Maintains a cache of available LoRA adapters. Periodically checks the vLLM server to discover newly trained adapters. Allows on-the-fly application of specialized fine-tuned weights.
 
@@ -49,9 +49,7 @@ When the Training Service completes training, it writes an adapter file to disk.
 
 ### Model Families
 
-Two base models:
-- **DeepSeek** (code-focused): Better at writing, understanding, and fixing code
-- **Mistral** (language-focused): Better at reasoning, planning, analysis
+- Qwen3-8b
 
 The service routes each request to the appropriate model based on the agent role.
 

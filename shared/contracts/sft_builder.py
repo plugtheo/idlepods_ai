@@ -7,7 +7,7 @@ for TRL >= 0.24 SFTTrainer with apply_chat_template.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 from shared.contracts.experience import AgentContribution
 from shared.contracts.training import AdapterRecipe
@@ -19,7 +19,7 @@ def build_sft_pair(
     role: str,
     system_prompt: str = "",
     user_prompt: str = "",
-) -> Dict[str, Any]:
+) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Return a training record dict keyed by the recipe's sft_format.
 
@@ -90,44 +90,4 @@ def _build_openai_messages_record(
         messages.append({"role": "assistant", "content": final_content})
 
 
-    return {"messages": messages }
-
-
-    """
-    Hard validation: Qwen3 chat template must wrap assistant tool-call turns
-    inside {% generation %} ... {% endgeneration %}.
-
-    If missing, training with assistant_only_loss=True will silently corrupt
-    tool-call learning. This is a blocker for Phase 3.
-    """
-
-    sample_messages = [
-        {"role": "user", "content": "test"},
-        {
-            "role": "assistant",
-            "tool_calls": [
-                {
-                    "id": "t1",
-                    "type": "python",
-                    "function": {"name": "f", "arguments": "{}"},
-                }
-            ],
-            "content": None,
-        },
-    ]
-
-    rendered = tokenizer.apply_chat_template(
-        sample_messages,
-        tokenize=False,
-        add_generation_prompt=False,
-    )
-
-    has_start = "{% generation %}" in rendered
-    has_end = "{% endgeneration %}" in rendered
-
-    if not (has_start and has_end):
-        raise RuntimeError(
-            "Qwen3 chat template is missing {% generation %} wrapping for "
-            "assistant tool-call turns. Tool-call masking will be incorrect. "
-            "Patch the chat template or install a custom assistant-mask collator."
-        )
+    return {"messages": messages}

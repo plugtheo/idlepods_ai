@@ -11,19 +11,11 @@ to the caller.
 """
 
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
-
-# One-release legacy alias map — only active when INFERENCE__ACCEPT_LEGACY_BACKEND_NAMES=true.
-# Keys are old model-name strings; values are registry backend names.
-_LEGACY_BACKEND_ALIASES: Dict[str, str] = {
-    "qwen":     "primary",
-}
-_legacy_warned: set[str] = set()
 
 
 class Message(BaseModel):
@@ -81,15 +73,7 @@ class GenerateRequest(BaseModel):
 
     @field_validator("backend", mode="before")
     @classmethod
-    def _resolve_backend(cls, v: str) -> str:
-        accept_legacy = os.environ.get("INFERENCE__ACCEPT_LEGACY_BACKEND_NAMES", "false").lower() == "true"
-        if accept_legacy and v in _LEGACY_BACKEND_ALIASES:
-            mapped = _LEGACY_BACKEND_ALIASES[v]
-            if v not in _legacy_warned:
-                logger.warning("Legacy backend name %r → %r", v, mapped)
-                _legacy_warned.add(v)
-            return mapped
-        # Validate against registry (import here to avoid circular at module load).
+    def _validate_backend(cls, v: str) -> str:
         from shared.contracts.models import load_registry
         try:
             registry = load_registry()

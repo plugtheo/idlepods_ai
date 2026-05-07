@@ -24,7 +24,7 @@ class InferenceSettings(BaseSettings):
     )
     accept_legacy_backend_names: bool = Field(
         default=False,
-        description="Accept legacy model-name strings as backend aliases (see _LEGACY_BACKEND_ALIASES in contracts).",
+        description="Deprecated: legacy backend alias translation has been removed; this field is kept for backwards-compatible env var parsing only.",
     )
 
     # ── HTTP client settings ──────────────────────────────────────────────
@@ -69,6 +69,12 @@ class InferenceSettings(BaseSettings):
             "Default top_p applied by the gRPC server when the proto request "
             "omits the field. Override with INFERENCE__GRPC_DEFAULT_TOP_P."
         ),
+    )
+
+    # ── Adapter bootstrap ─────────────────────────────────────────────────
+    lora_manifest_path: str = Field(
+        default="/data/lora_checkpoints/manifest.json",
+        description="Path to the LoRA adapter manifest written by the training service. Read at startup to restore adapter state after restart.",
     )
 
     # ── Adapter auto-rollback ─────────────────────────────────────────────

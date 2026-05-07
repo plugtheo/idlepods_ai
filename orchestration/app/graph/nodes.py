@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -435,14 +436,15 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
 
     failed = False
     response = None
+    _t_inf_start = time.monotonic()
     try:
         client = get_inference_client()
         q = get_token_queue(session_id)
-        
+
         # Tool-using roles always use the blocking path so response.tool_calls is available.
-        if (q is not None and hasattr(client, "generate_stream") 
-            and role not in _tool_using_roles()
-            and role not in settings.non_streaming_roles):
+        if (q is not None and hasattr(client, "generate_stream")
+                and role not in _tool_using_roles()
+                and role not in settings.non_streaming_roles):
             thinking_msg, _ = AGENT_FRIENDLY.get(role, (f"{role.capitalize()} is working...", role))
             await q.put({"type": "agent_start", "role": role, "message": thinking_msg})
             tokens: List[str] = []
@@ -451,9 +453,10 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
                     tokens.append(token)
                     await q.put({"type": "chunk", "content": token})
                 output = "".join(tokens)
+                _inf_ms = round((time.monotonic() - _t_inf_start) * 1000)
                 logger.info(
-                    "[%s] iter=%d  role=%s  tokens=%d (streamed)",
-                    session_id[:8], current_iteration, role, len(tokens),
+                    "agent_inference_done role=%s iter=%d tokens=%d duration_ms=%d mode=stream session=%s",
+                    role, current_iteration, len(tokens), _inf_ms, session_id[:8],
                 )
             except Exception as exc:
                 logger.error(
@@ -464,9 +467,10 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
         else:
             response = await client.generate(request)
             output = response.content
+            _inf_ms = round((time.monotonic() - _t_inf_start) * 1000)
             logger.info(
-                "[%s] iter=%d  role=%s  tokens=%d",
-                session_id[:8], current_iteration, role, response.tokens_generated,
+                "agent_inference_done role=%s iter=%d tokens=%d duration_ms=%d mode=blocking session=%s",
+                role, current_iteration, response.tokens_generated, _inf_ms, session_id[:8],
             )
     except Exception as exc:
         logger.error("[%s] Inference failed for role=%s: %s", session_id[:8], role, exc)

@@ -33,10 +33,11 @@ def test_run_local_timeout_logs_and_terminates(platform, tmp_path, caplog):
     tmp_jsonl = tmp_path / "data.jsonl"
     tmp_jsonl.write_text("")
 
+    records = [{"role": "coder", "final_score": 0.9}]
+
     with (
         patch("training.app.trainer_wrapper.settings") as mock_settings,
         patch("training.app.trainer_wrapper._base_model_for", return_value="base-model"),
-        patch("training.app.trainer_wrapper.to_training_records", return_value=[{"role": "coder"}]),
         patch("training.app.trainer_wrapper.CAPABILITIES", ["coder"]),
         patch("training.app.trainer_wrapper.sys") as mock_sys,
         patch("subprocess.run", side_effect=_make_timeout_exc()),
@@ -48,15 +49,7 @@ def test_run_local_timeout_logs_and_terminates(platform, tmp_path, caplog):
         mock_sys.platform = platform
 
         import training.app.trainer_wrapper as wrapper
-
-        with patch.object(wrapper, "CAPABILITIES", ["coder"]):
-            import tempfile, json
-            # Provide a real temp file so NamedTemporaryFile works
-            records = [{"role": "coder", "final_score": 0.9}]
-            with patch("training.app.trainer_wrapper.to_training_records", return_value=records):
-                with patch("training.app.trainer_wrapper._base_model_for", return_value="base-model"):
-                    with patch("subprocess.run", side_effect=_make_timeout_exc()):
-                        wrapper._run_local(records)
+        wrapper._run_local(records)
 
     assert any("training_timed_out" in r.message for r in caplog.records), (
         f"Expected 'training_timed_out' in log. Records: {[r.message for r in caplog.records]}"
@@ -75,7 +68,6 @@ def test_run_local_timeout_does_not_advance_cursor(tmp_path, caplog):
 
     with (
         patch("training.app.trainer_wrapper._base_model_for", return_value="base-model"),
-        patch("training.app.trainer_wrapper.to_training_records", return_value=records),
         patch("training.app.trainer_wrapper.CAPABILITIES", ["coder"]),
         patch("subprocess.run", side_effect=_make_timeout_exc()),
     ):

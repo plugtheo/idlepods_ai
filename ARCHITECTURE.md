@@ -1,180 +1,400 @@
-# IdlePods AI Architecture
+# IdlePods AI — Architecture
 
-## System Flow Diagram
+This document describes the *current* runtime topology, the data and control flow inside the orchestration pipeline, and the contracts between services. It is grounded in the code and meant to be read top-to-bottom by an engineer who has never touched the repo.
+
+---
+
+## 1. Topology
 
 ```mermaid
-graph TD
-    A["👤 User Prompt"] -->|HTTP POST| B["🚪 Gateway (8080)"]
-    
-    B -->|Auth + Classify| C["Query Router"]
-    C -->|intent, complexity| D["Select Agent Chain"]
-    D -->|OrchestrationRequest| E["🎯 Orchestration (8001)"]
-    
-    E -->|build context / RAG| F["📚 Context Enrichment (in-process)"]
-    F -->|ChromaDB search + repo scan| G["Retrieval"]
-    G -->|few-shot examples<br/>repo snippets| H["BuiltContext"]
-    H --> E
-    
-    E -->|LangGraph Pipeline| I["Agent Loop"]
-    I -->|iterate agents<br/>until convergence| J["Current Agent"]
-    J -->|gRPC GenerateRequest<br/>+ tool schemas for coder/debugger| K["🔧 Inference (8010/50051)"]
-    K -->|Qwen3-14B<br/>+ role-specific LoRA| L["LLM Output + tool_calls?"]
-    L --> J
-    
-    J -->|score output| M["Review Agent"]
-    M -->|SCORE: 0.0-1.0| N{Converged?}
-    N -->|score ≥ 0.85<br/>OR max iterations| O["Finalize"]
-    N -->|continue| P["Next Agent"]
-    P --> J
-    O -->|final_output| Q["✓ Response to User"]
-    
-    O -->|ExperienceEvent| R["💾 Experience recording (in-process)"]
-    R -->|append| S["JSONL + ChromaDB"]
-    R -->|notify| T["🎓 Training (8013)"]
-    
-    T -->|evaluate thresholds| U{≥50 diverse<br/>high-quality?}
-    U -->|yes| V["Launch Unsloth<br/>LoRA fine-tune"]
-    U -->|no| W["Accumulate more data"]
-    
-    V -->|new adapters| X["Save LoRA checkpoint"]
-    X -->|hot reload| K
-    
-    W -.->|next request| Q
-    
-    style A fill:#e1f5ff
-    style Q fill:#e1f5ff
-    style B fill:#fff3e0
-    style E fill:#f3e5f5
-    style K fill:#e8f5e9
-    style R fill:#fce4ec
-    style T fill:#fff9c4
-    style N fill:#f3e5f5
+flowchart LR
+    Client([Client]) -->|HTTP| GW["Gateway :8080<br/>auth + regex route"]
+    GW -->|HTTP| ORCH["Orchestration :8001<br/>LangGraph engine<br/>context + RAG<br/>experience recording"]
+    ORCH -->|gRPC :50051| INF["Inference :8010 / 50051<br/>backend dispatch<br/>adapter registry"]
+    INF -->|HTTP OpenAI| VLLM["vllm-primary :8000<br/>Qwen3-8B<br/>+ LoRA adapters"]
+
+    ORCH <-->|sessions, plans, cursors,<br/>fingerprints, summaries| REDIS[(Redis :6379)]
+    ORCH -->|append JSONL +<br/>upsert ChromaDB| DATA[("/data/<br/>experiences-*.jsonl<br/>vector_store/<br/>lora_checkpoints/")]
+
+    SCHED["training-scheduler<br/>(cron, every 4h)"] -->|reads JSONL,<br/>checks diversity| DATA
+    SCHED -->|docker compose run<br/>--profile training| TRAIN["training (one-shot)<br/>Unsloth + TRL SFT"]
+    TRAIN -->|writes adapter dir +<br/>manifest.json| DATA
+    TRAIN -->|/adapters/load /<br/>/adapters/swap| INF
+
+    classDef ext fill:#e1f5ff,stroke:#0288d1
+    classDef svc fill:#f3e5f5,stroke:#7b1fa2
+    classDef inf fill:#e8f5e9,stroke:#2e7d32
+    classDef store fill:#fff3e0,stroke:#ef6c00
+    classDef job fill:#fff9c4,stroke:#f9a825
+    class Client ext
+    class GW,ORCH svc
+    class INF,VLLM inf
+    class REDIS,DATA store
+    class SCHED,TRAIN job
 ```
 
-## Key Components
+Two shared volumes carry state across services: `experiences:/data` (JSONL shards, ChromaDB persistent dir, training cursors / heartbeat) and `lora_checkpoints:/data/lora_checkpoints` (adapter dirs + `manifest.json`).
 
-### Gateway (8080)
-- **Auth**: Validates API key
-- **QueryRouter**: Classifies intent (CODING, DEBUGGING, RESEARCH, etc.)
-- **Complexity Detection**: SIMPLE → MODERATE → COMPLEX
-- **Agent Chain Selection**: Maps (intent, complexity) → ordered agent list
+---
 
-### Orchestration (8001)
-- **LangGraph Pipeline**: State machine with convergence scoring
-- **Agent Loop**: Iterates through agent_chain until convergence or max_iterations
-- **Context & Experience**: Context enrichment, repo scan, and experience recording all run as in-process async tasks
-- **Convergence**: Extracts SCORE from reviewer/critic output, compares against threshold (default 0.85)
+## 2. Request lifecycle
 
-### Inference Service (8010 / 50051)
-- **Single vLLM Backend**: Qwen/Qwen3-14B serving all agent roles
-- **LoRA Adapters**: Six per-capability adapters (`coding_lora`, `debugging_lora`, `review_lora`, `planning_lora`, `research_lora`, `criticism_lora`) loaded on one server
-- **Native Tool Calling**: `--enable-auto-tool-choice --tool-call-parser hermes`; tools passed as OpenAI function schemas; thinking mode disabled via `chat_template_kwargs`
-- **gRPC Interface**: High-frequency hot path (one call per agent per iteration)
+### 2.1 End-to-end flow
 
-### Training Service (8013)
-- **Thresholds** (default):
-  - min_batch_size = 50 experiences
-  - min_quality_score = 0.65
-  - min_score_spread = 0.15 (diversity)
-  - min_diversity_ratio = 0.60
-- **Subprocess Launch**: Unsloth QLoRA fine-tune on Qwen/Qwen3-14B base
-- **Training Format**: ChatML (`<|im_start|>role\ncontent<|im_end|>`); masking boundary `<|im_start|>assistant\n`
-- **Tool-Use SFT**: `coder`/`debugger` batches include `tool_turns` (assistant tool-call + tool-result pairs); other roles exclude tool turns
-- **Hot Reload**: vLLM picks up new adapters automatically; next request uses improved model
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant G as Gateway
+    participant O as Orchestration
+    participant C as Context (in-process)
+    participant I as Inference (gRPC)
+    participant V as vLLM
+    participant R as Redis
+    participant E as Experience (in-process)
 
-## Data Models
+    U->>G: POST /v1/chat
+    G->>G: APIKeyMiddleware
+    G->>G: regex QueryRouter.route()
+    G->>O: POST /v1/run (intent, complexity, agent_chain)
 
-```
-OrchestrationRequest:
-  prompt: str
-  intent: CODING | DEBUGGING | RESEARCH | ANALYSIS | PLANNING | QA | GENERAL
-  complexity: SIMPLE | MODERATE | COMPLEX
-  agent_chain: List[str]          # e.g., ["planner", "coder", "reviewer"]
-  max_iterations: int
-  convergence_threshold: float    # default 0.85
-  session_id: UUID
+    O->>R: get_session(task_id)
+    O->>C: builder.build()
+    par few-shot RAG
+        C->>R: get_fingerprints / get_snippets
+    and repo scan
+        C->>C: scan changed files
+    and hints
+        C->>C: hints.generate(intent, complexity)
+    end
+    C-->>O: BuiltContext
 
-OrchestrationResponse:
-  session_id: UUID
-  output: str                      # final_output from consensus or best_output
-  success: bool
-  confidence: float                # best_score
-  iterations: int
-  converged: bool
-  agent_steps: List[AgentStep]     # per-iteration contributions
-  metadata: dict
+    loop until converged or max_iter
+        loop for role in agent_chain
+            O->>I: GenerateRequest(role, messages, adapter)
+            I->>V: /v1/chat/completions (+ tools, guided_json)
+            V-->>I: content / tool_calls
+            I-->>O: GenerateResponse
+            opt tool_calls present
+                O->>O: tool_executor_node (read/write/list/run/web_search)
+                O->>I: GenerateRequest (continue with tool result)
+            end
+        end
+        O->>O: score_iteration(history)
+    end
 
-AgentState (LangGraph TypedDict):
-  user_prompt: str
-  agent_chain: List[str]
-  agent_chain_index: int
-  few_shots: List[dict]            # from ChromaDB (RAG)
-  repo_snippets: List[dict]        # from repo scanner
-  iteration_history: List[dict]    # per step: role, output, tool_calls?, tool_call_id?
-  pending_tool_calls: List[dict]   # OpenAI-format {id, function:{name,arguments}}
-  tool_steps_used: int
-  tool_originating_role: str
-  current_iteration: int
-  best_score: float
-  best_output: str
-  converged: bool
-  final_output: str
+    O-->>G: OrchestrationResponse
+    G-->>U: ChatResponse
 
-ExperienceEvent (JSONL record):
-  session_id: UUID
-  prompt: str
-  final_output: str
-  agent_chain: List[str]
-  contributions: List[AgentContribution]  # role="tool" rows excluded
-  final_score: float
-  iterations: int
-  converged: bool
-  intent: str
-  complexity: str
-  timestamp: ISO8601
-  scorer_rule_version: str
-
-AgentContribution:
-  role: str
-  output: str
-  quality_score: float
-  iteration: int
-  messages: List[dict]            # full ChatML prompt sent to LLM (SFT instruction)
-  tool_turns: Optional[List[dict]] # interleaved assistant+tool message dicts for ReAct SFT
+    par fire-and-forget
+        O->>E: recorder.record(ExperienceEvent)
+        E->>E: append daily JSONL shard
+        E->>E: upsert ChromaDB
+    and persist conversation
+        O->>R: save_session(task_id, history)
+    and plan writeback
+        O->>R: set_plan(task_id, plan)
+        O->>O: write plans/current-task.md + archive
+    end
 ```
 
-## Self-Improvement Loop
+### 2.2 LangGraph pipeline
 
-```
-1. RUN       → User submits prompt → agents iterate → response generated
-2. RECORD    → ExperienceEvent saved to JSONL + ChromaDB
-3. RETRIEVE  → Next similar prompt → Context Service finds this example via RAG
-4. TRAIN     → ≥50 diverse high-quality examples accumulated
-             → Unsloth launches LoRA fine-tune subprocess
-5. DEPLOY    → New adapter saved to /data/lora_checkpoints/
-             → vLLM hot-reloads on next request
-6. IMPROVE   → Future requests use the fine-tuned adapter automatically
-```
+```mermaid
+flowchart TD
+    START([START]) -->|route_entry| A1["agent_chain[0]<br/>(planner / coder / debugger / ...)"]
+    A1 -->|next_in_chain| A2["agent_chain[i]"]
+    A2 -->|next_in_chain| A3["agent_chain[n-1]"]
 
-## Resilience & Graceful Degradation
+    A1 -.->|pending_tool_calls| TOOL[tool_executor]
+    A2 -.->|pending_tool_calls| TOOL
+    A3 -.->|pending_tool_calls| TOOL
+    TOOL -.->|tool_originating_role| A1
+    TOOL -.->|tool_originating_role| A2
+    TOOL -.->|tool_originating_role| A3
 
-| Component | Failure Mode | Behavior |
-|-----------|--------------|----------|
-| Context enrichment | Timeout (>2s) or unavailable | Pipeline continues with empty few_shots + repo_snippets |
-| ChromaDB | Write fails | JSONL append succeeds; embedding upsert silently fails |
-| ChromaDB | Read fails | RAG returns empty list; pipeline continues |
-| Inference (vLLM) | Node down | gRPC connection refused; Orchestration returns 503 |
-| Training | Concurrent job in progress | Returns "already training" without launching new subprocess |
-| Streaming | Client disconnect mid-stream | Token queue cleaned up in finally block |
+    A3 --> CC{check_convergence}
+    CC -->|score >= threshold<br/>or max_iterations| FIN[finalize]
+    CC -->|continue iterating| LOOP[update_loop]
+    LOOP -->|route_entry| A1
 
-## Critical Technical Notes
+    FIN -->|skip_consensus<br/>chain<=2 + quality met| END([END])
+    FIN -->|chain > 2 or<br/>not yet converged| CON[consensus]
+    CON --> END
 
-### Tokenizer Pre-Tokenizer Mismatch (DeepSeek)
-DeepSeek's `tokenizer.json` declares `Metaspace(replacement="▁")` but its BPE vocabulary uses GPT-2 byte-level encoding (`Ġ` for space). This causes silent space stripping in adapters trained without the fix. **Always applied at training time** in `training/training/lora_trainer.py`:
-
-```python
-from tokenizers.pre_tokenizers import ByteLevel
-tokenizer.backend_tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
+    classDef agent fill:#e3f2fd,stroke:#1565c0
+    classDef helper fill:#f3e5f5,stroke:#6a1b9a
+    classDef tool fill:#fff3e0,stroke:#e65100
+    class A1,A2,A3,CON agent
+    class CC,FIN,LOOP helper
+    class TOOL tool
 ```
 
-After training, save tokenizer directly from backend (not via Unsloth) to preserve the fix.
+### 2.3 `_prepare_pipeline_run` (`orchestration/app/routes/run.py`)
+
+1. Resolve `task_id` (falls back to `session_id`); ephemeral plans detected when these are equal.
+2. Routing precedence:
+   - Caller-supplied `agent_chain` always wins.
+   - In `regex` mode, gateway's `intent`/`complexity` are honored as-is.
+   - In `llm`/`hybrid` mode, the orchestration router is authoritative; gateway hints are discarded.
+3. Context build (`context/builder.py`, `asyncio.gather`):
+   - Few-shot RAG: ChromaDB query keyed by `all-MiniLM-L6-v2` embedding. Optional `task_exclude` scope.
+   - Repo scan with Redis-cached fingerprints.
+   - Static hint blob from `(intent, complexity)`.
+4. Conversation history loaded from Redis `session:v2:{task_id}`.
+5. Plan loading (Redis `task_state:{task_id}` → markdown `plans/current-task.md`); skipped for ephemeral tasks.
+6. Recursion limit computed from `(max_iter × per_iteration_nodes) + buffer`.
+
+### 2.4 LangGraph implementation files
+
+| File | Purpose |
+| --- | --- |
+| `graph/state.py` | `AgentState` TypedDict — JSON-serialisable, no framework objects. |
+| `graph/nodes.py` | One node per role; `_run_agent_node` is the shared core. Builds messages, dispatches inference (blocking or streaming), validates output, extracts structured fields. |
+| `graph/edges.py` | `route_entry`, `next_in_chain`, `check_convergence`, `route_after_tool_user`. |
+| `graph/pipeline.py` | Wires the graph and computes the recursion budget. |
+| `utils/scoring.py` | `score_iteration`, `score_per_entry`, `validate_output` — pattern-based, no ML. |
+| `utils/inference_optimizer.py` | Two orthogonal token-saving levers (role-history filter + structured extraction). |
+| `tools/runner.py` | `read_file`, `write_file`, `list_files`, `run_command` (allowlist: pytest/ruff/mypy), `web_search`. Path-traversal + dotfile guards. |
+| `context/compaction.py` | Tier-1 tool-output truncation + tier-2 LLM summarization (Redis-cached). |
+
+### 2.5 Inference flow (`inference/app/`)
+
+```mermaid
+flowchart TD
+    REQ["GenerateRequest<br/>(backend, role, adapter, msgs)"] --> FAC["factory.get_backend(backend_name)"]
+    FAC --> BE{backend_type}
+    BE -->|local_vllm| LB[LocalVLLMBackend]
+    BE -->|remote_vllm| RB[RemoteVLLMBackend]
+
+    LB --> RES["_resolve_model(adapter_name)"]
+    RES --> AR{"adapter<br/>registered?<br/>(120s cache)"}
+    AR -->|yes| ADAPTED["model = adapter_name"]
+    AR -->|no| FB["model = base<br/>used_base_fallback=true"]
+    FB --> CNT{"fallback count<br/>>= threshold<br/>in window?"}
+    CNT -->|yes| ROLLBACK["POST /adapters/rollback"]
+    CNT -->|no| CONT[continue]
+    ROLLBACK --> CONT
+
+    ADAPTED --> CALL["POST /v1/chat/completions<br/>+ tools, guided_json"]
+    CONT --> CALL
+    CALL --> VLLM["vLLM server"]
+    VLLM --> FIX["_fix_bpe_artifacts"]
+    FIX --> RESP["GenerateResponse<br/>(content, tool_calls, parsed)"]
+
+    classDef state fill:#fff3e0,stroke:#e65100
+    classDef ok fill:#e8f5e9,stroke:#2e7d32
+    classDef err fill:#ffebee,stroke:#c62828
+    class FB,ROLLBACK err
+    class ADAPTED,RESP ok
+    class AR,CNT state
+```
+
+Adapter lifecycle endpoints (`inference/app/routes/adapters.py`): `POST /adapters/load`, `POST /adapters/unload`, `POST /adapters/swap`, `POST /adapters/rollback`, `GET /adapters`.
+
+### 2.6 Self-improvement loop (training)
+
+```mermaid
+flowchart TD
+    EV["ExperienceEvent<br/>(fire-and-forget)"] --> JSONL["/data/experiences-YYYYMMDD.jsonl<br/>(daily shard, filelock-coordinated)"]
+    EV --> CHROMA[(ChromaDB experiences)]
+
+    SCHED{{"training-scheduler<br/>tick every N hours"}}
+    SCHED --> LOCK{"lock file<br/>present?"}
+    LOCK -->|yes| SKIP["skip tick"]
+    LOCK -->|no| DIV["check_diversity per role<br/>(>=50, spread>=0.15, unique>=60%)"]
+    DIV -->|none ready| SKIP
+    DIV -->|any ready| LAUNCH["docker compose run<br/>--profile training"]
+
+    LAUNCH --> WRAP["trainer_wrapper<br/>acquire file lock"]
+    WRAP --> ENTRY["trainer_entry per role"]
+    ENTRY --> RECIPE["lookup_recipe(backend, role)<br/>from recipes.yaml"]
+    ENTRY --> SFT["build SFT pairs:<br/>experience + curated + synthetic"]
+    SFT --> BACKUP["_pre_train_backup<br/>(snapshot existing adapter)"]
+    BACKUP --> TRAIN["LoRATrainer.train()<br/>Unsloth + TRL<br/>rsLoRA + assistant_only_loss"]
+    TRAIN --> SAVE["save_pretrained<br/>+ metadata.json (status=staging)"]
+    SAVE --> STAGE["POST /adapters/load<br/>as <adapter>__staging"]
+    STAGE --> SMOKE["run_smoke<br/>fixed canary prompts"]
+    SMOKE --> PASS{pass?}
+    PASS -->|yes| SWAP["POST /adapters/swap<br/>+ _promote_to_active<br/>+ manifest update"]
+    PASS -->|no| FAIL["_mark_failed<br/>+ unload staging"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0
+    classDef good fill:#e8f5e9,stroke:#2e7d32
+    classDef bad fill:#ffebee,stroke:#c62828
+    classDef neutral fill:#fff3e0,stroke:#ef6c00
+    class EV,SCHED start
+    class SWAP good
+    class FAIL,SKIP bad
+    class DIV,SMOKE,PASS neutral
+```
+
+Tracking files:
+
+- `training/scheduler/scheduler.py` — cron tick, launches the training profile.
+- `training/app/trainer_wrapper.py` — file-lock + per-capability driver.
+- `training/app/trainer_entry.py` — SFT pair builder + LoRATrainer caller + smoke-gate orchestrator.
+- `training/bootstrap/lora_trainer.py` — Unsloth + TRL training core, versioning helpers (`_pre_train_backup`, `_post_train_stage`, `_promote_to_active`, `_mark_failed`).
+- `training/bootstrap/smoke_gate.py` — runs the canary adapter probe.
+- `shared/manifest.py` + `shared/contracts/manifest_schema.py` — file-locked v2 manifest writer/reader.
+
+---
+
+## 3. State stores
+
+| Store | Purpose | Key TTL |
+| --- | --- | --- |
+| Redis `session:v2:{task_id}` | Cross-turn conversation history | `ORCHESTRATION__REDIS_SESSION_TTL_S` (3600s) |
+| Redis `task_state:{task_id}` | Current Plan dict | 7d default |
+| Redis `fps:v2:{task_id}` | File fingerprint cache | `redis_session_ttl_s` |
+| Redis `snippets:v2:{task_id}` | Cached repo snippets | `redis_session_ttl_s` |
+| Redis `summary:v1:{hash}:{adapter}` | LLM-summarised oldest-turn rollups | `compaction_retention_days` |
+| Redis `cursor:{role}` | Training scheduler position | none (persisted) |
+| ChromaDB `experiences` | Few-shot RAG (prompt embeddings) | none |
+| `/data/experiences-YYYYMMDD.jsonl` | Append-only experience log | manual prune |
+| `/data/experiences.spool.jsonl` | Undrained tasks at shutdown | drained on replay |
+| `/data/lora_checkpoints/manifest.json` | v2 schema; per-adapter active/previous + history | none |
+
+---
+
+## 4. Core data contracts
+
+All cross-service models live in `shared/contracts/` and are imported by both consumers. None are redefined per-service.
+
+| File | Models |
+| --- | --- |
+| `agent_prompts.py` | `AGENT_PROMPTS`, `BOOTSTRAP_CAP_TO_ROLE`, `ROLE_TO_BOOTSTRAP_CAP`, `PLAN_STEP_SYSTEM_TEMPLATE` |
+| `inference.py` | `Message`, `ToolDefinition`, `GenerateRequest`, `GenerateResponse` |
+| `orchestration.py` | `OrchestrationRequest`, `AgentStep`, `OrchestrationResponse` |
+| `experience.py` | `AgentContribution`, `ExperienceEvent`, `SCORER_RULE_VERSION` |
+| `evaluator_schemas.py` | `ReviewerOutput`, `CriticOutput`, `EVALUATOR_SCHEMAS` map |
+| `routing.py` | `RouteClassification` |
+| `models.py` | `BackendEntry`, `ModelsRegistry`, `load_registry`, `get_backend_entry` |
+| `training.py` | `AdapterRecipe`, `RecipeRegistry`, `load_recipes`, `lookup_recipe` |
+| `manifest_schema.py` | `HistoryEntry`, `AdapterEntry`, `Manifest` (v2) |
+| `sft_builder.py` | `build_sft_pair` |
+
+---
+
+## 5. Convergence and scoring
+
+```mermaid
+flowchart TD
+    HIST["iteration_history<br/>(this iteration)"] --> SPLIT["split by role"]
+    SPLIT --> EVAL["evaluator outputs<br/>(reviewer / critic)"]
+    SPLIT --> GEN["generative outputs<br/>(coder / debugger / ...)"]
+
+    EVAL --> REQ{"required fields<br/>present?"}
+    REQ -->|yes| EXPL["extract_score_from_text"]
+    REQ -->|no| HEUR_E["heuristic_score (eval)"]
+    EXPL --> P1{score parsed?}
+    P1 -->|yes| EXPLICIT["explicit_eval_scores"]
+    P1 -->|no| HEUR_E
+
+    GEN --> HEUR_G["heuristic_score (gen)"]
+
+    EXPLICIT --> R1["return mean(explicit)"]
+    HEUR_E -.-> BLEND["mean(eval_heur + gen_heur)"]
+    HEUR_G -.-> BLEND
+    BLEND --> R2[return blended]
+
+    R1 --> CONV{">= threshold<br/>(default 0.85)?"}
+    R2 --> CONV
+    CONV -->|yes| DONE[converged]
+    CONV -->|no| MAX{"current_iter ><br/>max_iterations?"}
+    MAX -->|yes| FORCED[forced stop]
+    MAX -->|no| LOOP[continue iterating]
+
+    classDef good fill:#e8f5e9,stroke:#2e7d32
+    classDef bad fill:#ffebee,stroke:#c62828
+    classDef neutral fill:#fff3e0,stroke:#ef6c00
+    class DONE good
+    class FORCED bad
+    class LOOP neutral
+```
+
+Heuristics:
+- `_METADATA_LEAKAGE_RE` detects pipeline JSON keys in agent outputs (heavy penalty 0.10) so contaminated adapters fail convergence.
+- Coder/debugger reward code presence + length; capped at 0.75.
+- Blocker patterns (`BLOCKERS:`, `CRITICAL ISSUE`, `DOES NOT WORK`) subtract; positive patterns (`LOOKS GOOD`, `WELL STRUCTURED`) add.
+
+`validate_output` runs as a post-generation gate. Failures replace the displayed output with `[VALIDATOR_FAIL:<reasons>]` so downstream agents see a sentinel; the original full output is retained on the history entry for accurate scoring.
+
+---
+
+## 6. Optimizations and gates
+
+### 6.1 Token budget management (`graph/nodes.py:_build_messages`)
+
+```mermaid
+flowchart LR
+    BUDGET["model_context_len<br/>- role_max_tokens<br/>- safety_margin<br/>- system+user tokens"] --> REM["remaining_budget"]
+    REM --> H["history (70%)"]
+    REM --> R["repo snippets (20%)<br/>coder/debugger/reviewer only"]
+    REM --> F["few-shots (remainder)"]
+
+    H --> H1["cross-turn convo (40%)"]
+    H --> H2["within-run iter history (60%)"]
+
+    H1 --> COMP{"sum > trigger_ratio *<br/>max_history_tokens?"}
+    H2 --> COMP
+    R --> COMP
+    F --> COMP
+
+    COMP -->|no| SEND["send to inference"]
+    COMP -->|yes| T1["tier 1: truncate large<br/>tool outputs (sha256 stub)"]
+    T1 --> COMP2{"still over?"}
+    COMP2 -->|no| SEND
+    COMP2 -->|yes| T2["tier 2: summarize oldest 1/3<br/>via summarizer role<br/>(Redis-cached)"]
+    T2 --> SEND
+
+    classDef alloc fill:#e3f2fd,stroke:#1565c0
+    classDef compact fill:#fff3e0,stroke:#ef6c00
+    class H,R,F,H1,H2 alloc
+    class T1,T2 compact
+```
+
+### 6.2 Routing modes (`ORCHESTRATION__ROUTER_MODE`)
+
+- `regex` — gateway-supplied classification stands; orchestration only re-runs regex internally for the chain.
+- `llm` — every prompt goes through `LLMQueryRouter` (guided-JSON, cached LRU).
+- `hybrid` — regex first; only when `confidence < router_confidence_threshold` is the LLM call made.
+
+### 6.3 Inference optimizer (`utils/inference_optimizer.py`)
+
+Two orthogonal levers, each toggleable via env:
+- **Role history filter** — each agent only sees prior history entries from semantically dependent roles (e.g. reviewer sees coder/debugger but not planner prose).
+- **Structured extraction** — reviewer/critic/debugger have only key fields (`SCORE`, `ISSUES`, `SUGGESTIONS`, …) stored in iteration_history; full prose stays in `last_output` for scoring.
+
+### 6.4 Adapter auto-rollback
+
+`_resolve_model` keeps a per-role sliding window of base-fallback events. After `INFERENCE__ADAPTER_FALLBACK_ROLLBACK_THRESHOLD` events in `INFERENCE__ADAPTER_FALLBACK_WINDOW_SECONDS`, it fires `POST /adapters/rollback`.
+
+### 6.5 Smoke gate (`training/bootstrap/smoke_gate.py`)
+
+A post-training adapter is loaded as `<adapter>__staging` and run through fixed canary prompts before swap. Failure leaves the previous adapter intact and writes `status: "failed"` into manifest history.
+
+---
+
+## 7. Resilience
+
+| Component | Failure mode | Behavior |
+| --- | --- | --- |
+| Context enrichment | Any exception during build | `BuiltContext()` empty; pipeline continues. |
+| Few-shot retrieval | ChromaDB unavailable | Empty list; logged warning. |
+| Repo scan | OSError | Skipped per file. |
+| Inference (gRPC) | Refused / timeout | `[<role> agent unavailable: …]` sentinel; iteration continues. |
+| Redis | Down | `is_healthy()` flips false; response carries `history_volatile=True`; pipeline still runs. |
+| Adapter not registered | `_resolve_model` falls back | Base model serves; `used_base_fallback=True` recorded. |
+| Training subprocess | Non-zero exit / timeout | Cursor not committed; replay on next tick. |
+| SSE client disconnect | Generator exits | `task.cancel()` in `finally` cleans the runner. |
+
+---
+
+## 8. Build & deploy notes
+
+- All services build from the repo root with their service-specific Dockerfile.
+- `models.yaml` and `recipes.yaml` are bind-mounted read-only into orchestration, inference, and training containers at `/config/`.
+- `training` mounts the host docker socket so the scheduler can launch sibling containers via `docker compose run`.
+- Health checks: every FastAPI service exposes `GET /health` returning `{"status": "ok", "service": "<name>"}` plus optional component statuses.
+- gRPC stubs (`shared/grpc_stubs/`) are generated from `.proto` via `scripts/generate_protos.py` and committed.

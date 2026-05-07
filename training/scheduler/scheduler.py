@@ -35,11 +35,10 @@ from app.utils.experience_reader import (  # noqa: E402
     iter_after,
     iter_records,
 )
+from shared.contracts.roles import CAPABILITIES  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-8s | %(name)s | %(message)s")
 log = logging.getLogger(__name__)
-
-CAPABILITIES = ["coder", "debugger", "reviewer", "planner", "researcher", "critic"]
 
 _redis_client = None
 
@@ -81,9 +80,10 @@ def _snapshot_latest_cursor() -> dict[str, dict]:
     """Snapshot the current tail position for each capability from the reader."""
     latest: dict[str, dict] = {}
     for shard, offset, record in iter_records():
-        role = record.get("capability") or record.get("role", "")
-        if role:
-            latest[role] = {"shard": str(shard), "offset": offset}
+        for contribution in record.get("contributions", []):
+            role = contribution.get("role", "")
+            if role:
+                latest[role] = {"shard": str(shard), "offset": offset}
     return latest
 
 
@@ -109,8 +109,10 @@ def tick() -> None:
     any_role_ready = False
     for role in CAPABILITIES:
         cursor = _read_cursor(role)
-        role_records = [r for _, _, r in iter_after(cursor)
-                        if (r.get("capability") or r.get("role", "")) == role]
+        role_records = [
+            r for _, _, r in iter_after(cursor)
+            if any(c.get("role") == role for c in r.get("contributions", []))
+        ]
         if role_records:
             passed, reason = check_diversity(role_records)
             if passed:
@@ -148,12 +150,7 @@ def tick() -> None:
             success = True
         else:
             log.error("Training container exited with code %s", result.returncode)
-    except subprocess.TimeoutExpired as exc:
-        if exc.process is not None:
-            try:
-                exc.process.terminate()
-            except Exception:
-                pass
+    except subprocess.TimeoutExpired:
         log.error(
             "training_timed_out timeout=%s",
             settings.training_timeout_seconds,

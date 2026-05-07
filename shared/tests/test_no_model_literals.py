@@ -20,7 +20,6 @@ _BANNED = re.compile(r"\b(qwen|deepseek|mistral)\b", re.IGNORECASE)
 _ALLOWLIST = {
     # This file itself references them as banned patterns
     os.path.join("shared", "tests", "test_no_model_literals.py"),
-    # _LEGACY_BACKEND_ALIASES in contracts/inference.py has these as map keys (one-release shim)
     os.path.join("shared", "contracts", "inference.py"),
     # The models.py registry loader may reference them as example values
     os.path.join("shared", "contracts", "models.py"),

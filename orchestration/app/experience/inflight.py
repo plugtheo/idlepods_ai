@@ -26,6 +26,8 @@ import logging
 from pathlib import Path
 from typing import Iterable
 
+import filelock
+
 from shared.contracts.experience import ExperienceEvent
 
 from . import jsonl_store, recorder
@@ -122,10 +124,8 @@ def _tail_dedupe_keys(path: Path, n: int = _DEDUPE_TAIL_LINES) -> set[tuple[str,
 def _truncate_spool_sync(path: Path) -> None:
     if not path.exists():
         return
-    with path.open("w", encoding="utf-8") as fh:
-        from .jsonl_store import _advisory_lock
-        _advisory_lock(fh, exclusive=True)
-        fh.truncate(0)
+    with filelock.FileLock(str(path) + ".lock", timeout=10):
+        path.write_text("", encoding="utf-8")
 
 
 async def replay_spool(spool_path: Path, jsonl_path: Path) -> None:

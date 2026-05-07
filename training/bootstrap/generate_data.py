@@ -1230,28 +1230,28 @@ def print_stats(capability: str, data: List[Dict]) -> None:
     print(f"    p99 chars: {p99}")
 
     # --- Token lengths (rendered chat → tokenizer.encode) ---
-    from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(
-        "Qwen/Qwen2.5-7B-Instruct",
-        trust_remote_code=True
-    )
-
-    token_lengths = []
-    for d in data:
-        rendered = tok.apply_chat_template(
-            d["messages"],
-            tokenize=False,
-            add_generation_prompt=False
-        )
-        token_lengths.append(len(tok.encode(rendered)))
-
-    tp50 = int(np.percentile(token_lengths, 50))
-    tp95 = int(np.percentile(token_lengths, 95))
-    tp99 = int(np.percentile(token_lengths, 99))
-
-    print(f"    p50 tokens: {tp50}")
-    print(f"    p95 tokens: {tp95}")
-    print(f"    p99 tokens: {tp99}")
+    try:
+        from transformers import AutoTokenizer
+        from shared.contracts.models import load_registry as _load_registry
+        _reg = _load_registry()
+        _model_id = _reg.backends[_reg.default_backend].model_id
+        tok = AutoTokenizer.from_pretrained(_model_id, trust_remote_code=True)
+        token_lengths = []
+        for d in data:
+            msgs = d.get("messages")
+            if not msgs:
+                continue
+            rendered = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
+            token_lengths.append(len(tok.encode(rendered)))
+        if token_lengths:
+            tp50 = int(np.percentile(token_lengths, 50))
+            tp95 = int(np.percentile(token_lengths, 95))
+            tp99 = int(np.percentile(token_lengths, 99))
+            print(f"    p50 tokens: {tp50}")
+            print(f"    p95 tokens: {tp95}")
+            print(f"    p99 tokens: {tp99}")
+    except Exception as _e:
+        print(f"    [token stats skipped: {_e}]")
 
 
 def load_from_experiences(capability: Optional[str] = None, target: Optional[int] = None) -> List[Dict]:

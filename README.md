@@ -1,69 +1,30 @@
 # IdlePods AI
 
-A poor man's local (soon to be fully portable) coding/research assistant designed to be scalable and grow over time for full self-reliance.
+A self-improving, self-hostable, multi-agent LLM assistant for everyday tasks — coding, debugging, research, planning, fact-checking, and general conversation. Built around a microservice architecture so it can run end-to-end on a single workstation (RTX 3090 or better) but is not locked to local inferencing: you can point it at any vLLM-compatible backend.
 
-The project currently uses rank-stabilized LoRA adapter training/retraining to steadily improve niche agent adapters over time 
-
-More formally, this is a self-improving multi-agent LLM tool where a team of specialized agents collaborates to produce a solid response; every successful run feeds into training data that fine-tunes the models over time.
+The system runs a **team of specialized agents** (planner, researcher, coder, debugger, reviewer, critic, consensus, summarizer) over a LangGraph state machine. Every successful run is recorded as an `ExperienceEvent` and, once enough diverse high-quality samples accumulate, the **training service** fine-tunes per-role rsLoRA adapters which are hot-swapped into the running vLLM server. Over time, your local model gets better at your kind of tasks. 
 
 ---
 
-## Architecture
+## Why this exists
 
-```
-User submits prompt
-    ↓
-Gateway → Orchestration (LangGraph pipeline)
-    ↓
-Pipeline completes (converges or max_iterations)
-    ↓
-Orchestration publishes ExperienceEvent
-    ↓ (fire-and-forget async, doesn't block user response)
-Orchestration stores to JSONL + ChromaDB
-    ↓ (async background task)
-Training job evaluates thresholds
-    ↓ Batch size: ≥ 50 total experiences accumulated (min_batch_size)
-    ↓ Score spread: max_score - min_score ≥ 0.15 (ensures diverse quality labels, not all high or all low)
-    ↓ Diversity ratio: ≥ 60% of records have unique prompt fingerprints (deduplication guard)
-    ↓ Quality filter: Only records with final_score ≥ 0.65 are used (min_quality_score)
-    ↓ IF thresholds met, launch LoRA subprocess
-Unsloth fine-tunes new adapters
-    ↓
-Save to /data/lora_checkpoints/
-    ↓
-vLLM hot-reloads adapters
-    ↓
-Next request uses improved model
-```
-
----
-
-## Services
-
-| Service | Port | Role |
-| --- | --- | --- |
-| [gateway](gateway/) | 8080 | Entry point — auth, routing |
-| [orchestration](orchestration/) | 8001 | LangGraph agent pipeline + context (in-process) + experience (in-process) |
-| [inference](inference/) | 8010 / 50051 | LLM backend — single Qwen/Qwen3-14B vLLM server with 6 LoRA adapters |
-| [training](training/) | — | LoRA fine-tuning via Unsloth |
-| [shared](shared/) | — | Pydantic contracts, QueryRouter, gRPC stubs |
-
-Agent roles: `planner researcher coder debugger reviewer critic consensus`  
-Intents: `CODING DEBUGGING RESEARCH ANALYSIS PLANNING QA GENERAL`  
-Convergence threshold: score ≥ 0.85 (bands: <0.4 poor · 0.4–0.7 acceptable · 0.7–0.85 good)
+- **Local-first, but not local-only.** Default deployment runs vLLM + adapters on one box. Swap models.yaml to point at a remote vLLM and the same code runs against shared infra.
+- **Self-improvement loop.** No need to babysit fine-tuning. Records pile up; the scheduler runs cron-style; new adapters are validated by a smoke gate before being promoted.
+- **Per-agent specialization via LoRA.** One base model (default `Qwen/Qwen3-8B`), many cheap rsLoRA adapters keyed by role. Per-role recipes live in `recipes.yaml`.
+- **Scalable architecture.** Microservices behind a Gateway → Orchestration → Inference / Training data plane. gRPC on the hot path; HTTP elsewhere.
 
 ---
 
 ## Quick start
 
-Requires NVIDIA GPU + CUDA drivers and Docker Compose.
+Requires Docker (with Compose), an NVIDIA GPU + recent drivers, and HuggingFace credentials for gated models.
 
 ```bash
 cp .env.example .env
 docker compose -f docker/compose.yml up
 ```
 
-All services expose `/health`. The system is ready when Docker Compose reports all containers healthy.
+When all containers report healthy, send a prompt:
 
 ```bash
 curl -X POST http://localhost:8080/v1/chat \
@@ -71,7 +32,16 @@ curl -X POST http://localhost:8080/v1/chat \
   -d '{"prompt": "Write a Python function that debounces a callback"}'
 ```
 
-If running services outside Docker, generate gRPC stubs first:
+Streaming endpoint (SSE):
+
+```bash
+curl -N -X POST http://localhost:8080/v1/chat/stream \
+  -H "Accept: text/event-stream" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Plan a multi-region ingestion pipeline"}'
+```
+
+Bare-metal (no Docker)? Generate gRPC stubs first:
 
 ```bash
 python scripts/generate_protos.py
@@ -79,42 +49,125 @@ python scripts/generate_protos.py
 
 ---
 
-## Demo
+## Services
 
-![alt text](image-1.png)
+| Service | Port | Responsibility |
+| --- | --- | --- |
+| [gateway](gateway/) | `8080` | External entry point. Auth (bearer key), regex prompt routing, proxy to orchestration. |
+| [orchestration](orchestration/) | `8001` (host: `8014`) | LangGraph multi-agent pipeline. Owns context enrichment (RAG + repo scan) and experience recording in-process. |
+| [inference](inference/) | `8010` HTTP, `50051` gRPC | Wraps the vLLM server(s). Loads/unloads/swaps LoRA adapters. Serves all agent roles. |
+| [vllm-primary](docker/compose.yml) | `8000` | The actual vLLM model server (`Qwen/Qwen3-8B` by default). |
+| [training](training/) | — | One-shot job (compose profile `training`). Reads experiences JSONL, builds SFT pairs, runs rsLoRA fine-tune via Unsloth, smoke-tests, and hot-swaps new adapter into vLLM. |
+| [training-scheduler](training/scheduler/) | — | Lightweight cron. Every `SCHEDULER_INTERVAL_HOURS` (default `4`) checks diversity thresholds and launches the training profile. |
+| [redis](docker/compose.yml) | `6379` | Session history, fingerprints, snippets, training cursors, compaction summaries. |
+| [shared](shared/) | — | Pydantic contracts, models registry, recipe registry, gRPC stubs, query router. |
 
-![alt text](image.png)
+The data plane uses **two bind-mounted volumes** rooted at `../data/`:
+- `vector_store/` — ChromaDB persistent client storage (few-shot RAG).
+- `lora_checkpoints/` — adapter directories + `manifest.json`.
+
+ChromaDB runs **embedded** by default (no separate container). To switch to a standalone server, uncomment the `chromadb` block + `ORCHESTRATION__CHROMADB_HOST` in `docker/compose.yml`.
 
 ---
 
-## Adapter training notes
+## Agent roles
 
-All six LoRA adapters (`coding_lora`, `debugging_lora`, `review_lora`, `planning_lora`, `research_lora`, `criticism_lora`) are fine-tuned on **Qwen/Qwen3-14B** base.
+| Role | What it does | Default LoRA adapter |
+| --- | --- | --- |
+| `planner` | Break the task into ordered steps. Emits a JSON plan. | base (none) |
+| `researcher` | Gather facts, prior art, best practices. May call `web_search`. | base |
+| `coder` | Implement. Calls `read_file` / `write_file` / `list_files` / `run_command` via OpenAI tool calls. | base |
+| `debugger` | Identify root cause, produce fixed code. | base |
+| `reviewer` | JSON-schema review (issues, suggestions, score). | base |
+| `critic` | JSON-schema verdict (blockers, improvements, score). | base |
+| `review_critic` | Runs reviewer → critic in one chain slot (critic depends on reviewer's structured fields). | base |
+| `consensus` | Final synthesizer. No adapter — always runs on base. | base |
+| `summarizer` | Compaction tier-2 LLM summariser (tool-output + oldest-turn rollups). | `summarizer_lora` |
+| `router` | Optional LLM-based prompt classifier (when `router_mode != regex`). | base |
 
-Training uses **ChatML** format (`<|im_start|>role\ncontent<|im_end|>`). The masking boundary for `DataCollatorForCompletionOnlyLM` is `<|im_start|>assistant\n` — only assistant turns are training targets. Tool-result turns (`role="tool"`) are never trained on.
-
-`coder` and `debugger` adapters receive tool-use SFT pairs (assistant tool-call emission + tool-result context) in addition to regular code-generation pairs. All adapters trained before the Qwen3-14B migration are invalid and require full retraining on the new base.
-
-Thinking mode is disabled at inference time via `chat_template_kwargs={"enable_thinking": False}` — no `<think>` tokens appear in agent outputs.
+The active chain for a request is decided by the query router (`shared/routing/query_router.py`) from `(intent, complexity)` — see the table in that file. Convergence threshold is `0.85` by default; max iterations is `5`.
 
 ---
 
-## Architecture decisions
+## Self-improvement loop
 
-**Single Qwen/Qwen3-8B vLLM server** — all six agent roles (planner, researcher, coder, debugger, reviewer, critic) share one server. Per-role specialisation is handled by LoRA adapters selected per request.
+```
+[ user prompt ]
+      │ HTTPS
+      ▼
+[ Gateway :8080 ] ── auth ── routes/chat.py classifies intent/complexity
+      │ HTTP
+      ▼
+[ Orchestration :8001 ] ── builds context (few-shots from ChromaDB,
+      │                                     repo snippets, hint text)
+      │ gRPC
+      ▼
+[ Inference :50051 ] ── vLLM with Qwen3-8B + per-role rsLoRA adapter
+      │
+      ▼
+agent loop — score each iteration, stop when ≥ 0.85 or max_iter
+      │
+      ▼
+[ ExperienceEvent ] ─── fire-and-forget ────► JSONL shard (daily) + ChromaDB
+                                                   │
+            (cron)                                 │
+              ▼                                    │
+      [ training-scheduler ] ── reads ◄────────────┘
+              │ if diversity thresholds met (≥50 records,
+              │ ≥0.15 score spread, ≥60% unique fingerprints)
+              ▼
+      `docker compose run --rm training` (one-shot, profile-gated)
+              │
+              ├── load adapter recipe from recipes.yaml (per role)
+              ├── build SFT pairs (curated + experience + synthetic)
+              ├── pre-train backup of existing adapter
+              ├── Unsloth + TRL SFT (rsLoRA by default)
+              ├── stage as `<adapter>__staging`, run smoke gate
+              └── on pass: POST /adapters/swap → vLLM hot-swaps
+```
 
-**Native OpenAI function calling** — the coder and debugger agents use `--enable-auto-tool-choice --tool-call-parser hermes` on the vLLM server. Tool calls arrive as structured JSON (`response.tool_calls`); the `<<TOOL>><<END>>` regex-parse approach is retired. Supported tools: `read_file`, `write_file`, `list_files`, `run_command` (pytest/ruff/mypy allowlist).
+Scoring (`orchestration/app/utils/scoring.py`) prefers explicit `SCORE:` from reviewer/critic, blends with code-presence heuristics for coder/debugger, and penalizes detected pipeline-metadata leakage.
 
-**gRPC for Orchestration → Inference, HTTP elsewhere** — the orchestration-to-inference call is the hot path (one call per agent node per iteration). Everything else is low-frequency enough that HTTP simplicity wins.
+---
 
-**Fire-and-forget for experience recording and training notification** — decouples the user-facing response time from downstream storage and training evaluation latency.
+## Configuration map
 
-**Context and Experience services are in-process** — no separate context or experience containers; both run as async tasks inside the orchestration process. ** Need to consider alternatives for better reliability.
+All knobs are pydantic `BaseSettings` per service. Env-var prefixes: `GATEWAY__`, `ORCHESTRATION__`, `INFERENCE__`, `TRAINING__`. The full lists live in:
+
+- `gateway/app/config/settings.py`
+- `orchestration/app/config/settings.py` — by far the largest; owns context-budget knobs, role maps, router config, ChromaDB, Redis, compaction.
+- `inference/app/config/settings.py` — HTTP timeouts, gRPC sampling defaults, adapter rollback thresholds.
+- `training/app/config/settings.py` — diversity thresholds, scheduler interval, lock path, training timeout.
+
+Backend identity (URL, model id, max ctx, parsers) lives in `models.yaml`. PEFT recipes live in `recipes.yaml`. `ORCHESTRATION__MODEL_CONTEXT_LEN` **must** match `--max-model-len` in `docker/compose.yml`. `MODELS_YAML_PATH` / `RECIPES_YAML_PATH` env vars override the lookup paths.
+
+---
+
+## Hardware
+
+Validated on a single RTX 3090 (24GB). The defaults assume that:
+
+- vLLM: `--gpu-memory-utilization 0.9385`, `--max-model-len 12288`, `--max-num-seqs 1`, `--kv-cache-dtype fp8`.
+- Training: Unsloth 4-bit base, rsLoRA (`r=32, alpha=64`), `bf16=True`, `per_device_train_batch_size=1`, `gradient_accumulation_steps=8`.
+
+Smaller GPU or different model? Edit `models.yaml` (and matching `--max-model-len`), `recipes.yaml`, and the vLLM `command:` block in `docker/compose.yml` together.
+
+---
 
 ## Limitations
 
-Local inference requires a GPU (min 3090 or better for standard to optimal performance). No CPU fallback path.
+- **GPU required.** No CPU fallback for inference or training.
+- **Training is long.** Per-role adapter retrains take 5–17 hours on a 3090 with the default recipe; see `recipes.yaml` to trade quality for speed (lower `r`, fewer epochs, packing tweaks).
+- **Adapter manifest is the source of truth.** If you delete `data/lora_checkpoints/manifest.json`, vLLM falls back to base; training will rebuild from scratch on the next run.
+- **Single-tenant.** No per-user quotas, no multi-tenant routing.
+- **Web search uses DuckDuckGo** (`duckduckgo-search`) — install on demand, may rate-limit.
 
-Limited to domain specific tasks (using LoRA mainly for Coding, Critic, Debugger, Researcher). Need to consider alternatives like rsLoRA in the future for better stability.
+---
 
-Limited to local inference for full self training pipeline but scalable for self hosted vllm servers to serve baseline models.
+## Development
+
+- Tests: `pytest` from the repo root. `conftest.py` handles namespace packaging.
+- Lint: `ruff` (allowed via `run_command` tool).
+- Type-check: `mypy` (allowed via `run_command` tool).
+- Architecture overview: see [ARCHITECTURE.md](ARCHITECTURE.md).
+- Service-level READMEs in each `<service>/README.md`.

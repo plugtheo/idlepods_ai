@@ -14,28 +14,52 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 import httpx
 
+from shared.contracts.roles import CAPABILITIES
 from .config.settings import settings
-from .utils.experience_reader import check_diversity, load_experiences, to_training_records
+from .utils.experience_reader import check_diversity, load_experiences
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-8s | %(name)s | %(message)s")
 log = logging.getLogger(__name__)
 
-CAPABILITIES = ["coder", "debugger", "reviewer", "planner", "researcher", "critic"]
-
 REMOTE_TRIGGER_LOG_PREVIEW_CHARS = 500
 
 
+def _is_stale_lock(p: Path, stale_age_seconds: int) -> bool:
+    """Return True when the lock at *p* belongs to a dead process or is too old."""
+    try:
+        age = time.time() - p.stat().st_mtime
+        pid_text = p.read_text().strip()
+        pid = int(pid_text) if pid_text.isdigit() else None
+        if pid:
+            try:
+                os.kill(pid, 0)
+                pid_alive = True
+            except (ProcessLookupError, PermissionError):
+                pid_alive = False
+        else:
+            pid_alive = False
+        return age > stale_age_seconds or not pid_alive
+    except OSError:
+        return False
+
+
 @contextmanager
-def file_lock(path: str):
-    # No stale-TTL: a crashed trainer leaves the lock in place; remove it manually.
+def file_lock(path: str, stale_age_seconds: int = 90000):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    if p.exists() and _is_stale_lock(p, stale_age_seconds):
+        log.warning("Removing stale lock at %s", path)
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
     try:
         fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
@@ -85,7 +109,7 @@ def _run_local(records: list[dict]) -> None:
                 "--capability", capability,
             ]
             log.info("trainer_entry capability=%s base=%s", capability, base_model)
-            dataset_hash = None
+            _t0 = time.monotonic()
             try:
                 result = subprocess.run(
                     cmd,
@@ -93,8 +117,17 @@ def _run_local(records: list[dict]) -> None:
                     timeout=settings.training_timeout_seconds,
                     **platform_kwargs,
                 )
-                if result.returncode != 0:
-                    log.error("trainer_entry non-zero exit capability=%s code=%s", capability, result.returncode)
+                duration_s = round(time.monotonic() - _t0, 1)
+                if result.returncode == 0:
+                    log.info(
+                        "training_run_done capability=%s duration_s=%s",
+                        capability, duration_s,
+                    )
+                else:
+                    log.error(
+                        "trainer_entry non-zero exit capability=%s code=%s duration_s=%s",
+                        capability, result.returncode, duration_s,
+                    )
             except subprocess.TimeoutExpired as exc:
                 if exc.process is not None:
                     try:
@@ -108,9 +141,10 @@ def _run_local(records: list[dict]) -> None:
                             os.killpg(os.getpgid(exc.process.pid), signal.SIGTERM)
                     except Exception:
                         pass
+                duration_s = round(time.monotonic() - _t0, 1)
                 log.error(
-                    "training_timed_out role=%s dataset_hash=%s timeout=%s",
-                    capability, dataset_hash, settings.training_timeout_seconds,
+                    "training_timed_out role=%s timeout=%s duration_s=%s",
+                    capability, settings.training_timeout_seconds, duration_s,
                 )
             except Exception as exc:
                 log.error("trainer_entry failed for %s: %s", capability, exc)

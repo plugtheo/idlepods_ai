@@ -58,6 +58,9 @@ class AdapterRecipe(BaseModel):
     learning_rate: float = 2e-4
     num_epochs: int = 3
     max_seq_length: int = 2048
+    per_device_train_batch_size: int = 1
+    gradient_accumulation_steps: int = 8
+    packing: bool = True
     sft_format: Literal["openai_messages"] = "openai_messages"
     tool_call_style: Literal["openai_native", "hermes", "none"] = "openai_native"
     tokenizer_pre_tokenizer: Optional[Literal["bytelevel", "metaspace"]] = None

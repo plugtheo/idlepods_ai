@@ -67,8 +67,8 @@ def test_openai_messages_emits_messages_key(tmp_path):
     assert roles[-1] == "assistant"
 
 
-def test_fallback_record_openai_messages(tmp_path):
-    """Records without per-contribution messages fall back to top-level prompt/output."""
+def test_empty_contributions_produces_no_pairs(tmp_path):
+    """Records with empty contributions list produce 0 SFT pairs (no top-level fallback)."""
     record = {
         "final_score": 0.8,
         "prompt": "Write a hello function",
@@ -81,12 +81,7 @@ def test_fallback_record_openai_messages(tmp_path):
 
     pairs = _call_load_sft_pairs(data_file, "coder", recipe)
 
-    assert len(pairs) >= 1
-    pair = pairs[0]
-    assert "messages" in pair
-    msgs = pair["messages"]
-    assert msgs[-1]["role"] == "assistant"
-    assert msgs[-1]["content"] == "def hello(): return 'hi'"
+    assert len(pairs) == 0, "Records with empty contributions should produce no SFT pairs"
 
 
 def test_below_min_score_excluded(tmp_path):

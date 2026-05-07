@@ -67,8 +67,8 @@ class TrainingSettings(BaseSettings):
         description="Remote training endpoint (used only when training_target='remote').",
     )
     training_timeout_seconds: int = Field(
-        default=3600,
-        description="Maximum seconds a single trainer_entry subprocess may run before being terminated.",
+        default=86400,
+        description="Maximum seconds a single trainer_entry subprocess may run before being terminated (default 24h; coder adapter can take 10–17h on RTX 3090).",
     )
     heartbeat_path: str = Field(
         default="/data/scheduler.heartbeat",
