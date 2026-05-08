@@ -128,3 +128,11 @@ class AgentState(TypedDict, total=False):
 
     current_step_id: Optional[str]
     """The step id the planner selected for this turn; injected into tool-role system msgs."""
+
+    # ── Supervisor-driven dispatch (pipeline_use_supervisor=True) ────────────
+    supervisor_decisions: List[Dict[str, Any]]
+    """
+    Append-only log of supervisor routing decisions for this run.
+    Each entry: {iteration, next_node, reason, metadata, ts}.
+    Populated only when pipeline_use_supervisor=True.
+    """

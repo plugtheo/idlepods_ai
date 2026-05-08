@@ -637,6 +637,12 @@ def _maybe_update_plan_step(state: AgentState, delta: dict) -> dict:
     import re as _re
     from datetime import datetime, timezone as _tz
 
+    # Tool call still in flight — the worker hasn't finished its turn yet.
+    # Marking the step done here would cause the supervisor to skip the tool
+    # result consumption turn and advance past the step prematurely.
+    if delta.get("pending_tool_calls"):
+        return delta
+
     step_id = state.get("current_step_id")
     plan_dict = state.get("plan")
     if not step_id or not plan_dict:

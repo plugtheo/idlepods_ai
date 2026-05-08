@@ -151,3 +151,68 @@ def test_try_parse_plan_output_json_fence():
 def test_try_parse_plan_output_returns_none_on_garbage():
     result = _try_parse_plan_output("No JSON here at all.")
     assert result is None
+
+
+# ── _maybe_update_plan_step regression tests ─────────────────────────────────
+
+def test_maybe_update_plan_step_skips_when_tool_call_pending():
+    """Step must NOT be closed when the worker delta contains pending_tool_calls.
+
+    Pre-existing bug: _maybe_update_plan_step used to mark in_progress→done even
+    when the worker emitted a tool call rather than a final answer.  The supervisor
+    pipeline amplifies this into a silent data-loss bug — the tool result is never
+    consumed because the plan already shows the step as done.
+    """
+    from datetime import datetime, timezone
+    from orchestration.app.graph.nodes import _maybe_update_plan_step
+
+    now = datetime.now(timezone.utc).isoformat()
+    plan = {
+        "goal": "fix bug",
+        "steps": [
+            {"id": "step-1", "description": "Read logs", "status": "in_progress",
+             "owner_role": "coder", "evidence": "", "files_touched": [], "tools_used": [], "depends_on": []},
+        ],
+        "created_at": now,
+        "updated_at": now,
+    }
+    state = _make_state(plan=plan, current_step_id="step-1")
+
+    delta = {
+        "last_output": "",
+        "pending_tool_calls": [{"id": "call_1", "function": {"name": "read_file", "arguments": "{}"}}],
+        "tool_originating_role": "coder",
+        "iteration_history": [],
+    }
+    result = _maybe_update_plan_step(state, delta)
+
+    # delta must be returned unchanged — step must stay in_progress
+    assert result is delta, "_maybe_update_plan_step must return delta unmodified"
+    assert "plan" not in result, "plan must not be mutated when tool call is pending"
+    assert result["pending_tool_calls"], "pending_tool_calls must be preserved"
+
+
+def test_maybe_update_plan_step_marks_done_when_no_tool_call():
+    """Normal completion: in_progress step transitions to done."""
+    from datetime import datetime, timezone
+    from orchestration.app.graph.nodes import _maybe_update_plan_step
+
+    now = datetime.now(timezone.utc).isoformat()
+    plan = {
+        "goal": "fix bug",
+        "steps": [
+            {"id": "step-1", "description": "Read logs", "status": "in_progress",
+             "owner_role": "coder", "evidence": "", "files_touched": [], "tools_used": [], "depends_on": []},
+        ],
+        "created_at": now,
+        "updated_at": now,
+    }
+    state = _make_state(plan=plan, current_step_id="step-1")
+    delta = {"last_output": "Done reading logs.", "iteration_history": []}
+
+    result = _maybe_update_plan_step(state, delta)
+
+    assert result.get("plan") is not None, "plan must be updated in delta"
+    step = result["plan"]["steps"][0]
+    assert step["status"] == "done", "step must transition to done"
+    assert result.get("plan_changed") is True

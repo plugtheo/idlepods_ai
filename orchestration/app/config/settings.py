@@ -371,6 +371,26 @@ class OrchestrationSettings(BaseSettings):
         ),
     )
 
+    # ── Pipeline dispatch strategy ────────────────────────────────────────
+    pipeline_use_supervisor: bool = Field(
+        default=False,
+        description=(
+            "When True, agent dispatch is driven by a supervisor node that reads "
+            "plan state and intent instead of advancing a static agent_chain index. "
+            "When False (default), the legacy chain-index path is used. "
+            "Enable with ORCHESTRATION__PIPELINE_USE_SUPERVISOR=true."
+        ),
+    )
+    pipeline_supervisor_max_steps: int = Field(
+        default=8,
+        description=(
+            "Maximum number of plan-step dispatches the supervisor will make per "
+            "iteration before forcing a convergence check.  Caps the recursion depth "
+            "under the supervisor pipeline.  "
+            "Override with ORCHESTRATION__PIPELINE_SUPERVISOR_MAX_STEPS."
+        ),
+    )
+
     # ── Tool runner ────────────────────────────────────────────────────────
     tool_output_truncate_chars: int = Field(
         default=4000,

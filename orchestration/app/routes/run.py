@@ -190,6 +190,7 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
         "plan": plan_dict,
         "plan_changed": False,
         "current_step_id": None,
+        "supervisor_decisions": [],
     }
 
     from ..graph.pipeline import _recursion_limit

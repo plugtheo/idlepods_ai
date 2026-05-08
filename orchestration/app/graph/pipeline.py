@@ -53,6 +53,7 @@ from .nodes import (
     reviewer_node,
     tool_executor_node,
 )
+from .supervisor import supervisor_anchor, supervisor_decide
 from .state import AgentState
 from ..utils.scoring import score_iteration
 
@@ -184,7 +185,19 @@ def build_pipeline() -> CompiledStateGraph:
     Build and compile the multi-agent LangGraph pipeline.
 
     Returns a compiled graph ready for `await graph.ainvoke(state)`.
+
+    When settings.pipeline_use_supervisor is True, agent dispatch is driven by
+    the supervisor node (DeterministicSupervisor) rather than the static
+    agent_chain index.  The legacy path remains the default.
     """
+    from ..config.settings import settings as _settings
+    if _settings.pipeline_use_supervisor:
+        return _build_supervisor_pipeline()
+    return _build_legacy_pipeline()
+
+
+def _build_legacy_pipeline() -> CompiledStateGraph:
+    """Original chain-index-driven pipeline (default)."""
     graph = StateGraph(AgentState)
 
     # Register agent nodes
@@ -199,7 +212,7 @@ def build_pipeline() -> CompiledStateGraph:
     graph.add_node("tool_executor", tool_executor_node)
 
     # Helper nodes (no inference call)
-    graph.add_node("check_convergence", _noop_convergence_anchor)  # no-op; routing done via edge
+    graph.add_node("check_convergence", _noop_convergence_anchor)
     graph.add_node("finalize",     _finalize_state)
     graph.add_node("update_loop",  _update_loop_state)
 
@@ -210,9 +223,6 @@ def build_pipeline() -> CompiledStateGraph:
         {role: role for role in _AGENT_NODES},
     )
 
-    # After each agent node: advance chain or go to convergence check.
-    # Tool-using roles route through route_after_tool_user so a tool call
-    # detours to tool_executor instead of advancing the chain.
     _all_agent_roles = list(_AGENT_NODES.keys())
     _non_consensus_roles = [r for r in _all_agent_roles if r != "consensus"]
     _tool_using = _tool_using_roles() & set(_non_consensus_roles)
@@ -224,33 +234,104 @@ def build_pipeline() -> CompiledStateGraph:
         edge_fn = route_after_tool_user if role in _tool_using else _next_in_chain_or_convergence
         graph.add_conditional_edges(role, edge_fn, targets)
 
-    # tool_executor routes back to whichever role emitted the pending call.
     graph.add_conditional_edges(
         "tool_executor",
         lambda s: s.get("tool_originating_role") or next(iter(_tool_using_roles() & set(_non_consensus_roles)), _non_consensus_roles[0]),
         {role: role for role in _AGENT_NODES},
     )
 
-    # check_convergence: either finalize (→ consensus) or loop
     graph.add_conditional_edges(
         "check_convergence",
         _check_convergence_with_update,
         {"finalize": "finalize", "update_loop": "update_loop"},
     )
 
-    # finalize → consensus (always) or END (when skip_consensus=True)
     graph.add_conditional_edges(
         "finalize",
         lambda s: END if s.get("skip_consensus", False) else "consensus",
         {END: END, "consensus": "consensus"},
     )
 
-    # update_loop → back to first agent in chain (via conditional entry)
     graph.add_conditional_edges(
         "update_loop",
         route_entry,
         {role: role for role in _AGENT_NODES},
     )
+
+    graph.add_edge("consensus", END)
+    return graph.compile()
+
+
+def _build_supervisor_pipeline() -> CompiledStateGraph:
+    """
+    Supervisor-driven pipeline.
+
+    Topology: START → supervisor → (any worker | tool_executor | check_convergence)
+              every worker → supervisor (ring)
+              tool_executor → supervisor
+              check_convergence → finalize | update_loop
+              update_loop → supervisor
+              finalize → consensus | END
+              consensus → END
+
+    "consensus" is deliberately excluded from the supervisor's routing targets —
+    it is reached only via finalize, never dispatched directly.
+    """
+    graph = StateGraph(AgentState)
+
+    # Agent nodes
+    graph.add_node("planner",       planner_node)
+    graph.add_node("researcher",    researcher_node)
+    graph.add_node("coder",         coder_node)
+    graph.add_node("debugger",      debugger_node)
+    graph.add_node("reviewer",      reviewer_node)
+    graph.add_node("critic",        critic_node)
+    graph.add_node("review_critic", review_critic_node)
+    graph.add_node("consensus",     consensus_node)
+    graph.add_node("tool_executor", tool_executor_node)
+
+    # Supervisor + helpers
+    graph.add_node("supervisor",        supervisor_anchor)
+    graph.add_node("check_convergence", _noop_convergence_anchor)
+    graph.add_node("finalize",          _finalize_state)
+    graph.add_node("update_loop",       _update_loop_state)
+
+    # Roles the supervisor may route to directly (consensus excluded).
+    _supervised_roles = [r for r in _AGENT_NODES if r != "consensus"]
+
+    supervisor_targets: dict[str, str] = {r: r for r in _supervised_roles}
+    supervisor_targets["tool_executor"]     = "tool_executor"
+    supervisor_targets["check_convergence"] = "check_convergence"
+
+    # START → supervisor
+    graph.add_edge(START, "supervisor")
+
+    # supervisor → next agent | tool_executor | check_convergence
+    graph.add_conditional_edges("supervisor", supervisor_decide, supervisor_targets)
+
+    # Every supervised worker → supervisor (the ring)
+    for role in _supervised_roles:
+        graph.add_edge(role, "supervisor")
+
+    # tool_executor → supervisor
+    graph.add_edge("tool_executor", "supervisor")
+
+    # check_convergence → finalize | update_loop
+    graph.add_conditional_edges(
+        "check_convergence",
+        _check_convergence_with_update,
+        {"finalize": "finalize", "update_loop": "update_loop"},
+    )
+
+    # finalize → consensus | END
+    graph.add_conditional_edges(
+        "finalize",
+        lambda s: END if s.get("skip_consensus", False) else "consensus",
+        {END: END, "consensus": "consensus"},
+    )
+
+    # update_loop → supervisor (not route_entry — supervisor handles re-dispatch)
+    graph.add_edge("update_loop", "supervisor")
 
     # consensus → END
     graph.add_edge("consensus", END)
@@ -262,8 +343,28 @@ def _recursion_limit(max_iterations: int, chain_length: int) -> int:
     """
     Compute a safe LangGraph recursion limit.
 
-    LangGraph counts every node invocation.  With N agents and M iterations:
-      worst case = M × (N agents + 1 convergence + 2 helpers) + buffer
+    Legacy mode: worst case = M × (N agents + helpers) + buffer
+    Supervisor mode: each step adds a supervisor node invocation, plus tool
+    round-trips.  Conservative estimate based on max plan steps per iteration.
     """
+    from ..config.settings import settings as _settings
+
+    if _settings.pipeline_use_supervisor:
+        max_steps = _settings.pipeline_supervisor_max_steps
+        # per iter: supervisor + plan_steps × (supervisor + worker + possible tool pair)
+        # + check_convergence + finalize/update_loop + buffer per iter
+        per_iter = (max_steps * 4) + 12
+        limit = (max_iterations + 2) * per_iter + RECURSION_LIMIT_BUFFER
+        logger.info(
+            "recursion_limit mode=supervisor max_iter=%d max_steps=%d per_iter=%d limit=%d",
+            max_iterations, max_steps, per_iter, limit,
+        )
+        return limit
+
     per_iteration = max(chain_length, MIN_PER_ITERATION_NODES) + PIPELINE_HELPER_NODES
-    return (max_iterations + 1) * per_iteration + RECURSION_LIMIT_BUFFER
+    limit = (max_iterations + 1) * per_iteration + RECURSION_LIMIT_BUFFER
+    logger.info(
+        "recursion_limit mode=legacy max_iter=%d chain=%d per_iter=%d limit=%d",
+        max_iterations, chain_length, per_iteration, limit,
+    )
+    return limit

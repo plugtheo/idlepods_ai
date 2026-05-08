@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(xargs wc -l)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(/c/Users/ksens/AppData/Local/Python/bin/pytest orchestration/tests/test_supervisor.py orchestration/tests/test_planner_with_plan.py -v)",
+      "Bash(/c/Users/ksens/AppData/Local/Python/bin/pytest orchestration/tests/ -v)"
     ]
   }
 }
