@@ -41,5 +41,3 @@ data/
 
 # Scripts
 scripts/eval_reports/
-
-archive_current_task.py

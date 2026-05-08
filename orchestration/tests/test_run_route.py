@@ -3,6 +3,8 @@ Tests for the Orchestration Service /v1/run route.
 
 Context builder, pipeline, and experience recorder are all mocked.
 """
+import asyncio
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
@@ -139,3 +141,109 @@ class TestRunRoute:
         assert saved_task_id == "task-multi-2"
         assert len(saved_history) == 1
         assert saved_history[0]["role"] == "coder"
+
+
+class TestStreamRoute:
+    """SSE smoke test — verifies the supervisor pipeline path through the stream route."""
+
+    def _fake_prepare_result(self, session_id="sse-test"):
+        """Return the tuple that _prepare_pipeline_run normally produces."""
+        initial_state = {
+            "session_id": session_id,
+            "task_id": session_id,
+            "user_prompt": "write f",
+            "agent_chain": ["coder", "review_critic"],
+            "agent_chain_index": 0,
+            "few_shots": [], "repo_snippets": [], "system_hints": "",
+            "current_iteration": 1, "max_iterations": 1, "convergence_threshold": 0.0,
+            "conversation_history": [], "iteration_history": [],
+            "last_output": "", "iteration_scores": [],
+            "best_score": 0.0, "best_output": "",
+            "converged": False, "quality_converged": False,
+            "final_output": "", "final_score": 0.0,
+            "plan": None, "plan_changed": False, "current_step_id": None,
+            "pending_tool_calls": [], "tool_steps_used": 0, "tool_originating_role": "",
+            "supervisor_decisions": [],
+        }
+        return (session_id, "general", "simple", ["coder", "review_critic"],
+                initial_state, 200, True, True)
+
+    def _make_astream(self):
+        """Async generator simulating one supervisor cycle: coder → review_critic → done."""
+
+        async def _gen(*args, **kwargs):
+            yield {"supervisor": {"supervisor_decisions": [
+                {"next_node": "coder", "rule": "R4", "reason": "chain_template_dispatch",
+                 "metadata": None, "ts": "2026-01-01T00:00:00+00:00", "iteration": 1}
+            ]}}
+            yield {"coder": {
+                "iteration_history": [{"role": "coder", "iteration": 1,
+                                        "output": "def f(): pass", "full_output": "def f(): pass",
+                                        "timestamp": "2026-01-01T00:00:00+00:00",
+                                        "failed": False, "validator_failed": False}],
+                "last_output": "def f(): pass", "agent_chain_index": 1,
+            }}
+            yield {"supervisor": {"supervisor_decisions": [
+                {"next_node": "review_critic", "rule": "R5", "reason": "chain_complete_evaluate",
+                 "metadata": None, "ts": "2026-01-01T00:00:00+00:00", "iteration": 1}
+            ]}}
+            yield {"review_critic": {
+                "iteration_history": [
+                    {"role": "reviewer", "iteration": 1, "output": "SCORE: 0.90",
+                     "full_output": "SCORE: 0.90", "timestamp": "2026-01-01T00:00:00+00:00",
+                     "failed": False, "validator_failed": False},
+                    {"role": "critic", "iteration": 1, "output": "Good",
+                     "full_output": "Good", "timestamp": "2026-01-01T00:00:00+00:00",
+                     "failed": False, "validator_failed": False},
+                ],
+                "last_output": "SCORE: 0.90", "agent_chain_index": 2,
+            }}
+            yield {"check_convergence": {}}
+            yield {"finalize": {
+                "converged": True, "quality_converged": True, "skip_consensus": True,
+                "final_output": "def f(): pass", "best_score": 0.90,
+                "best_output": "def f(): pass", "iteration_scores": [0.90],
+            }}
+
+        return _gen
+
+    @pytest.mark.asyncio
+    async def test_supervisor_stream_emits_start_and_done_events(self):
+        """Stream route must emit 'start', 'agent_complete', and 'done' events
+        when routed through the supervisor pipeline."""
+        mock_pipeline = MagicMock()
+        mock_pipeline.astream = self._make_astream()
+
+        with (
+            patch(
+                "services.orchestration.app.routes.run._prepare_pipeline_run",
+                new_callable=AsyncMock,
+                return_value=self._fake_prepare_result(),
+            ),
+            patch("services.orchestration.app.routes.run._get_pipeline", return_value=mock_pipeline),
+            patch("services.orchestration.app.routes.run.recorder.record", new_callable=AsyncMock),
+            patch("services.orchestration.app.routes.run.session_store.save_session", new_callable=AsyncMock),
+        ):
+            from services.orchestration.app.main import app
+            from httpx import AsyncClient, ASGITransport
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                collected_lines: list[str] = []
+                async with ac.stream("POST", "/v1/run/stream", json={"prompt": "write f"}) as resp:
+                    assert resp.status_code == 200
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data:"):
+                            collected_lines.append(line)
+
+        event_types = []
+        for line in collected_lines:
+            try:
+                payload = json.loads(line[len("data:"):].strip())
+                event_types.append(payload.get("type"))
+            except json.JSONDecodeError:
+                pass
+
+        assert "start" in event_types, f"'start' event missing; got: {event_types}"
+        assert "done" in event_types, f"'done' event missing; got: {event_types}"
+        assert "agent_complete" in event_types, f"'agent_complete' event missing; got: {event_types}"

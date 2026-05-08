@@ -173,6 +173,49 @@ class TestSupervisorPipelineIntegration:
         assert "reviewer" in roles_in_history
         assert "critic" in roles_in_history
 
+    async def test_two_iterations_dispatches_worker_in_iter_2(self):
+        """B2 regression — after the loop, supervisor must dispatch a worker in iter 2,
+        not only review_critic.  Verified by checking supervisor_decisions for iter=2
+        entries that route to a non-evaluator worker role."""
+        graph = self._build()
+        # threshold=0.99 forces a second iteration; max_iterations=2 caps it
+        state = _base_state(max_iterations=2, convergence_threshold=0.99)
+        with patch(
+            "orchestration.app.graph.nodes.get_inference_client",
+            return_value=_mock_client(_CODER_OUTPUT),
+        ):
+            result = await graph.ainvoke(state, config={"recursion_limit": 400})
+
+        worker_roles = {"planner", "researcher", "coder", "debugger"}
+        iter2_decisions = [
+            d for d in result.get("supervisor_decisions", [])
+            if d.get("iteration") == 2 and d["next_node"] in worker_roles
+        ]
+        assert iter2_decisions, (
+            "Supervisor must dispatch to a worker role in iteration 2; "
+            f"all iter-2 decisions: {[d for d in result['supervisor_decisions'] if d.get('iteration') == 2]}"
+        )
+
+    async def test_short_chain_skip_consensus_under_supervisor(self):
+        """2-agent chain with quality threshold met must set skip_consensus=True and
+        populate final_output without running the consensus node."""
+        graph = self._build()
+        # convergence_threshold=0.0 means any score suffices; chain <= SHORT_CHAIN_MAX_AGENTS
+        state = _base_state(convergence_threshold=0.0)
+        with patch(
+            "orchestration.app.graph.nodes.get_inference_client",
+            return_value=_mock_client(_CODER_OUTPUT),
+        ):
+            result = await graph.ainvoke(state, config={"recursion_limit": 200})
+
+        assert result.get("skip_consensus") is True, "short chain + quality met must skip consensus"
+        assert result.get("final_output"), "final_output must be populated without consensus node"
+        # consensus must NOT appear in supervisor decisions (never dispatched)
+        consensus_dispatches = [
+            d for d in result.get("supervisor_decisions", []) if d["next_node"] == "consensus"
+        ]
+        assert not consensus_dispatches, "supervisor must never dispatch directly to consensus"
+
 
 # ── Item 2: legacy pipeline integration ──────────────────────────────────────
 

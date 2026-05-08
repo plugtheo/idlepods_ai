@@ -147,3 +147,27 @@ class TestCoreAgentNode:
         assert len(history) == 2
         assert history[0]["role"] == "coder"
         assert history[1]["role"] == "reviewer"
+
+    async def test_tool_originating_role_cleared_after_non_tool_turn(self):
+        """A3 hygiene: after the originating role completes a non-tool turn,
+        tool_originating_role must be cleared so R1.5 cannot mis-fire later."""
+        from services.orchestration.app.graph.nodes import coder_node
+
+        # Enough content to pass validator
+        long_output = "def solution():\n    return 42  # fully implemented answer"
+        mock_client = _mock_inference_client(long_output)
+        mock_client.generate.return_value.tool_calls = None
+
+        state = _base_state(
+            tool_originating_role="coder",
+            pending_tool_calls=[],  # already cleared by tool_executor
+        )
+        with patch(
+            "services.orchestration.app.graph.nodes.get_inference_client",
+            return_value=mock_client,
+        ):
+            delta = await coder_node(state)
+
+        assert delta.get("tool_originating_role") == "", (
+            "tool_originating_role must be cleared to '' after originator completes a non-tool turn"
+        )

@@ -54,13 +54,6 @@ class OrchestrationRequest(BaseModel):
         default=None,
         description="Repo-relative POSIX paths the context builder is permitted to scan. None means unrestricted.",
     )
-    plan_path: Optional[str] = Field(
-        default="plans/current-task.md",
-        description=(
-            "Repo-relative path to the markdown plan file. "
-            "When task_id is None the plan is ephemeral (read-only, not persisted)."
-        ),
-    )
     suppress_few_shots: bool = Field(
         default=False,
         description="When true, builder skips few-shot RAG retrieval. Used to test session isolation.",

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest orchestration/tests/test_supervisor.py orchestration/tests/test_pipeline.py orchestration/tests/test_pipeline_supervisor.py orchestration/tests/test_planner_with_plan.py -x --tb=short)",
+      "Bash(python -m pytest orchestration/tests/test_edges.py orchestration/tests/test_nodes.py orchestration/tests/test_nodes_token_queue.py orchestration/tests/test_run_route.py --tb=short)",
+      "Bash(cat conftest.py)",
+      "Bash(cat orchestration/conftest.py)",
+      "Bash(cat orchestration/tests/conftest.py)",
+      "Bash(python *)",
+      "Bash(git stash *)",
+      "Bash(git rm *)"
+    ]
+  }
+}

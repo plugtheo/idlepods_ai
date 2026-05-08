@@ -127,9 +127,7 @@ async def test_ephemeral_path_does_not_call_set_plan():
         _maybe_writeback_plan(
             final_state, initial_state,
             plan_ephemeral=True,
-            plan_path_str="plans/current-task.md",
             session_id="session-abc",
-            converged=True,
         )
 
     set_plan_mock.assert_not_called()

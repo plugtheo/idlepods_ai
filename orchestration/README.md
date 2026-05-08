@@ -8,7 +8,7 @@ Think of it like a software development team: a planner designs an approach, a c
 
 ## Core Components
 
-- **LangGraph Pipeline** (`graph/pipeline.py`): A state machine that defines the execution flow. It routes from one agent to the next, checks convergence (quality good enough?), and loops if needed. Built using LangGraph, a library for multi-step AI workflows.
+- **LangGraph Pipeline** (`graph/pipeline.py`): A state machine that defines the execution flow. Supports two dispatch modes — see [Pipeline dispatch modes](#pipeline-dispatch-modes) below. Checks convergence after each iteration and loops if needed. Built using LangGraph, a library for multi-step AI workflows.
 
 - **Agent State** (`graph/state.py`): A shared data structure (TypedDict) that flows through all nodes. Contains the original prompt, conversation history, context (code snippets, few-shot examples), iteration tracking, and all agent outputs.
 
@@ -109,3 +109,41 @@ After the pipeline completes, the full run (prompt, all agent outputs, scores, t
 - Retrieval as few-shot examples to help future agents
 
 - Training data for the Training job to fine-tune adapters
+
+## Pipeline dispatch modes
+
+The pipeline can run in two modes, selected by the `ORCHESTRATION__PIPELINE_USE_SUPERVISOR` environment variable (default: `false`).
+
+### Legacy mode (default)
+
+Agents are run in the static order of `agent_chain`, advancing a chain index on each turn. Simple and predictable; no plan awareness.
+
+### Supervisor mode (`PIPELINE_USE_SUPERVISOR=true`)
+
+A `supervisor` node runs before every agent turn and applies a priority-ordered rule set to pick the next node. This enables plan-driven dispatch: the planner produces a step list, and the supervisor routes each step's `owner_role` in sequence, handling tool ReAct loops and convergence automatically.
+
+**Rule priority** (implemented in `graph/supervisor.py:DeterministicSupervisor`):
+
+| Rule | Fires when | Routes to |
+|------|-----------|-----------|
+| R1 | Pending tool calls outstanding | `tool_executor` |
+| R1.5 | Last history entry is a tool result | originating role (consume result) |
+| R2a | Plan has an `in_progress` step | that step's `owner_role` |
+| R2b | Plan has a `pending` step | `planner` (advances step to `in_progress`) |
+| R3 | All plan steps `done`/`blocked` | `review_critic` → `check_convergence` |
+| R4 | No plan — static chain hint | `agent_chain[chain_index]` |
+| R5 | Chain exhausted | `review_critic` → `check_convergence` |
+
+`consensus` is never dispatched by the supervisor; it is reached only via `finalize`.
+
+**Enabling supervisor mode:**
+
+```bash
+# Uncomment in docker/compose.yml under the orchestration service environment:
+ORCHESTRATION__PIPELINE_USE_SUPERVISOR=true
+ORCHESTRATION__PIPELINE_SUPERVISOR_MAX_STEPS=8
+```
+
+See [ARCHITECTURE.md §2.2b](../ARCHITECTURE.md) for the full topology diagram and design notes.
+
+> **Note:** The `DeterministicSupervisor` is the v1 implementation. A future version will replace it with an industry-standard agent dispatch solution for greater flexibility.

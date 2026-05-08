@@ -40,8 +40,7 @@ from ..config.settings import settings
 from ..graph import nodes as _nodes_module
 from ..graph.nodes import AGENT_FRIENDLY
 from ..graph.state import AgentState
-from ..plans.reader import read_plan
-from ..plans.writer import write_plan_atomic, validate_transition
+from ..plans.writer import validate_transition
 from ..plans.schema import Plan
 from ..utils.scoring import score_per_entry
 
@@ -140,28 +139,14 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
         session_id[:8], convergence_threshold, request.convergence_threshold,
     )
 
-    # ── Plan loading ─────────────────────────────────────────────────────────
+    # ── Plan loading (Redis only) ─────────────────────────────────────────────
+    # Plans live exclusively in Redis keyed by task_id. Ephemeral sessions
+    # (task_id == session_id) never persist plan state across requests.
     plan_ephemeral = (task_id == session_id)
     plan_dict: dict | None = None
-    plan_path_str = getattr(request, "plan_path", None) or "plans/current-task.md"
 
     if not plan_ephemeral:
-        raw_plan = await session_store.get_plan(task_id)
-        if raw_plan:
-            plan_dict = raw_plan
-        else:
-            try:
-                plan_obj = read_plan(plan_path_str)
-                plan_dict = plan_obj.model_dump(mode="json") if plan_obj else None
-            except Exception as exc:
-                logger.warning("[%s] plan file unreadable (%s) — proceeding without plan.", session_id[:8], exc)
-    else:
-        logger.debug("[%s] plan ephemeral — task_id not supplied", session_id[:8])
-        try:
-            plan_obj = read_plan(plan_path_str)
-            plan_dict = plan_obj.model_dump(mode="json") if plan_obj else None
-        except Exception:
-            plan_dict = None
+        plan_dict = await session_store.get_plan(task_id)
 
     initial_state: AgentState = {
         "session_id": session_id,
@@ -197,8 +182,7 @@ async def _prepare_pipeline_run(request: OrchestrationRequest) -> tuple:
     rec_limit = _recursion_limit(max_iterations, len(agent_chain))
 
     return (session_id, context_intent, context_complexity, agent_chain,
-            initial_state, rec_limit, redis_healthy,
-            plan_ephemeral, plan_path_str)
+            initial_state, rec_limit, redis_healthy, plan_ephemeral)
 
 
 def _trim_conversation_history(history: list, max_tokens: int) -> tuple[list, int]:
@@ -224,54 +208,31 @@ def _maybe_writeback_plan(
     final_state: AgentState,
     initial_state: AgentState,
     plan_ephemeral: bool,
-    plan_path_str: str,
     session_id: str,
-    converged: bool,
 ) -> None:
-    """On convergence, persist plan to Redis (if non-ephemeral) and write back to markdown."""
+    """Persist updated plan to Redis (non-ephemeral sessions only)."""
     if not final_state.get("plan_changed"):
         return
     plan_dict = final_state.get("plan")
-    if not plan_dict:
+    if not plan_dict or plan_ephemeral:
         return
 
     task_id = initial_state.get("task_id", session_id)
 
-    if not plan_ephemeral:
-        ttl = getattr(settings, "task_state_ttl_s", 7 * 86400)
-        asyncio.create_task(session_store.set_plan(task_id, plan_dict, ttl))
-
-    if converged or not plan_ephemeral:
+    # Validate step transitions before persisting to catch planner bugs early.
+    initial_plan_dict = initial_state.get("plan")
+    if initial_plan_dict:
         try:
-            from pathlib import Path as _P
-            from datetime import datetime as _dt, timezone as _tz
+            old_plan = Plan.model_validate(initial_plan_dict)
+            new_plan = Plan.model_validate(plan_dict)
+            validate_transition(old_plan, new_plan)
+        except ValueError as exc:
+            logger.warning("[%s] Plan transition validation failed — skipping Redis write: %s",
+                           session_id[:8], exc)
+            return
 
-            plan_obj = Plan.model_validate(plan_dict)
-            plan_path = _P(plan_path_str)
-
-            # Validate transitions before writing back
-            initial_plan_dict = initial_state.get("plan")
-            if initial_plan_dict:
-                try:
-                    old_plan = Plan.model_validate(initial_plan_dict)
-                    validate_transition(old_plan, plan_obj)
-                except ValueError as exc:
-                    logger.warning("[%s] Plan transition validation failed: %s", session_id[:8], exc)
-                    return
-
-            write_plan_atomic(plan_path, plan_obj)
-
-            # Archive snapshot
-            archive_dir = _P("plans/archive")
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            stamp = _dt.now(_tz.utc).strftime("%Y%m%d-%H%M%S")
-            from ..plans.writer import render_plan
-            (archive_dir / f"{task_id}-{stamp}.md").write_text(
-                render_plan(plan_obj), encoding="utf-8"
-            )
-            logger.info("[%s] Plan archived to plans/archive/%s-%s.md", session_id[:8], task_id, stamp)
-        except Exception as exc:
-            logger.warning("[%s] Plan writeback failed: %s", session_id[:8], exc)
+    ttl = getattr(settings, "task_state_ttl_s", 7 * 86400)
+    asyncio.create_task(session_store.set_plan(task_id, plan_dict, ttl))
 
 
 # ── HTTP endpoints ─────────────────────────────────────────────────────────
@@ -294,7 +255,7 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
     """
     (session_id, context_intent, context_complexity, agent_chain,
      initial_state, rec_limit, redis_healthy,
-     plan_ephemeral, plan_path_str) = await _prepare_pipeline_run(request)
+     plan_ephemeral) = await _prepare_pipeline_run(request)
 
     try:
         final_state: AgentState = await _get_pipeline().ainvoke(
@@ -332,10 +293,8 @@ async def run_pipeline(request: OrchestrationRequest) -> OrchestrationResponse:
         initial_state["task_id"], combined, settings.redis_session_ttl_s
     ))
 
-    # ── Plan writeback on convergence ─────────────────────────────────────
-    _maybe_writeback_plan(
-        final_state, initial_state, plan_ephemeral, plan_path_str, session_id, converged
-    )
+    # ── Plan writeback ────────────────────────────────────────────────────
+    _maybe_writeback_plan(final_state, initial_state, plan_ephemeral, session_id)
 
     agent_steps = [
         AgentStep(
@@ -427,7 +386,7 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
     """
     (session_id, context_intent, context_complexity, agent_chain,
      initial_state, rec_limit, redis_healthy,
-     plan_ephemeral, plan_path_str) = await _prepare_pipeline_run(request)
+     plan_ephemeral) = await _prepare_pipeline_run(request)
 
     async def _event_stream():
         # Single shared queue for ALL events:
@@ -572,10 +531,9 @@ async def run_pipeline_stream(request: OrchestrationRequest) -> StreamingRespons
                         )
                         inflight.register(asyncio.create_task(recorder.record(event)), event)
 
-                    # Plan writeback on convergence
+                    # Plan writeback
                     _maybe_writeback_plan(
-                        accumulated, initial_state, plan_ephemeral,
-                        plan_path_str, session_id, converged,
+                        accumulated, initial_state, plan_ephemeral, session_id
                     )
 
                 _nodes_module.unregister_token_queue(session_id)

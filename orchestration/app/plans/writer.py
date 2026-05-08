@@ -1,12 +1,8 @@
-"""Atomic markdown write-back for Plan objects."""
+"""Plan rendering and step-transition validation."""
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-from typing import Optional
-
-from .schema import Plan, PlanStep
+from .schema import Plan
 
 _STATUS_EMOJI = {
     "pending": "[ ]",
@@ -56,13 +52,3 @@ def render_plan(plan: Plan) -> str:
     return "\n".join(lines)
 
 
-def write_plan_atomic(path: Path, plan: Plan) -> None:
-    """Write plan markdown atomically using filelock + os.replace."""
-    import filelock
-
-    lock_path = str(path) + ".lock"
-    tmp_path = str(path) + ".tmp"
-
-    with filelock.FileLock(lock_path, timeout=30):
-        Path(tmp_path).write_text(render_plan(plan), encoding="utf-8")
-        os.replace(tmp_path, path)

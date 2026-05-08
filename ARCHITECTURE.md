@@ -100,6 +100,12 @@ sequenceDiagram
 
 ### 2.2 LangGraph pipeline
 
+The pipeline has two dispatch modes, selected by `ORCHESTRATION__PIPELINE_USE_SUPERVISOR`.
+
+#### 2.2a Legacy mode (default, `PIPELINE_USE_SUPERVISOR=false`)
+
+Agents are visited in the static order of `agent_chain`, advancing a chain index on each turn.
+
 ```mermaid
 flowchart TD
     START([START]) -->|route_entry| A1["agent_chain[0]<br/>(planner / coder / debugger / ...)"]
@@ -130,6 +136,69 @@ flowchart TD
     class TOOL tool
 ```
 
+#### 2.2b Supervisor mode (`PIPELINE_USE_SUPERVISOR=true`)
+
+A `supervisor` node runs before every agent turn and applies a priority-ordered rule set to decide which node to visit next.  Every worker and `tool_executor` return to the supervisor after completing, forming a ring topology.  `consensus` is never dispatched directly by the supervisor — it is reached only via `finalize`.
+
+```mermaid
+flowchart TD
+    START([START]) --> SUP[supervisor]
+    SUP -->|R1: pending_tool_calls| TOOL[tool_executor]
+    SUP -->|R1.5: last history = tool result| ORIG["originating role<br/>(coder / debugger / ...)"]
+    SUP -->|R2a: in_progress plan step| WORKER["step owner_role"]
+    SUP -->|R2b: pending plan step| PL[planner]
+    SUP -->|R3: plan all terminal| RC[review_critic]
+    SUP -->|R3 after eval| CC{check_convergence}
+    SUP -->|R4: no plan, chain[i]| CHAIN["chain[i] role"]
+    SUP -->|R5: chain exhausted| RC
+
+    TOOL --> SUP
+    ORIG --> SUP
+    WORKER --> SUP
+    PL --> SUP
+    RC --> SUP
+    CHAIN --> SUP
+
+    CC -->|converged / max_iter| FIN[finalize]
+    CC -->|continue| LOOP[update_loop]
+    LOOP --> SUP
+
+    FIN -->|skip_consensus| END([END])
+    FIN -->|chain > 2| CON[consensus]
+    CON --> END
+
+    classDef agent fill:#e3f2fd,stroke:#1565c0
+    classDef helper fill:#f3e5f5,stroke:#6a1b9a
+    classDef tool fill:#fff3e0,stroke:#e65100
+    classDef sup fill:#e8f5e9,stroke:#2e7d32
+    class WORKER,ORIG,PL,RC,CON,CHAIN agent
+    class CC,FIN,LOOP helper
+    class TOOL tool
+    class SUP sup
+```
+
+**Supervisor rule priority** (`graph/supervisor.py:DeterministicSupervisor.decide`):
+
+| Rule | Condition | Dispatch |
+|------|-----------|----------|
+| R1 | `pending_tool_calls` non-empty | `tool_executor` |
+| R1.5 | Last `iteration_history` entry has `role == "tool"` | `tool_originating_role` (resume after ReAct) |
+| R2a | Plan has an `in_progress` step with a valid `owner_role` | that owner |
+| R2b | Plan has a `pending` step | `planner` (advances step to `in_progress`) |
+| R3 | All plan steps are `done` / `blocked` | `review_critic`, then `check_convergence` |
+| R4 | No plan — use `agent_chain[chain_index]` | that role |
+| R5 | Chain exhausted or no chain | `review_critic`, then `check_convergence` |
+
+`consensus` is excluded from the supervisor's routing targets; the graph wires it only after `finalize`.
+
+**Enabling supervisor mode** (default: off, safe to flip per-request):
+
+```bash
+# compose.yml orchestration environment — already stubbed, uncomment to enable:
+ORCHESTRATION__PIPELINE_USE_SUPERVISOR=true
+ORCHESTRATION__PIPELINE_SUPERVISOR_MAX_STEPS=8   # caps plan steps per iteration
+```
+
 ### 2.3 `_prepare_pipeline_run` (`orchestration/app/routes/run.py`)
 
 1. Resolve `task_id` (falls back to `session_id`); ephemeral plans detected when these are equal.
@@ -151,8 +220,9 @@ flowchart TD
 | --- | --- |
 | `graph/state.py` | `AgentState` TypedDict — JSON-serialisable, no framework objects. |
 | `graph/nodes.py` | One node per role; `_run_agent_node` is the shared core. Builds messages, dispatches inference (blocking or streaming), validates output, extracts structured fields. |
-| `graph/edges.py` | `route_entry`, `next_in_chain`, `check_convergence`, `route_after_tool_user`. |
-| `graph/pipeline.py` | Wires the graph and computes the recursion budget. |
+| `graph/edges.py` | `route_entry`, `next_in_chain`, `check_convergence`, `route_after_tool_user`. Used by legacy pipeline only. |
+| `graph/supervisor.py` | `DeterministicSupervisor` (rules R1–R5), `supervisor_anchor` node, `supervisor_decide` edge fn. Used by supervisor pipeline only. |
+| `graph/pipeline.py` | Builds either legacy or supervisor graph; `_recursion_limit` for both modes. |
 | `utils/scoring.py` | `score_iteration`, `score_per_entry`, `validate_output` — pattern-based, no ML. |
 | `utils/inference_optimizer.py` | Two orthogonal token-saving levers (role-history filter + structured extraction). |
 | `tools/runner.py` | `read_file`, `write_file`, `list_files`, `run_command` (allowlist: pytest/ruff/mypy), `web_search`. Path-traversal + dotfile guards. |
