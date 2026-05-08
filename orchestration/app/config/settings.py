@@ -61,6 +61,30 @@ class OrchestrationSettings(BaseSettings):
         default=0.85,
         description="Quality score (0–1) at which the loop stops early.",
     )
+    plateau_window_iterations: int = Field(
+        default=3,
+        description=(
+            "Number of recent iteration scores compared when checking for a score plateau. "
+            "Set to 0 to disable plateau early-stop entirely. "
+            "Override with ORCHESTRATION__PLATEAU_WINDOW_ITERATIONS."
+        ),
+    )
+    plateau_score_epsilon: float = Field(
+        default=0.02,
+        description=(
+            "Maximum score spread (max − min) across the plateau window that is treated as "
+            "stagnation and triggers an early stop before max_iterations is reached. "
+            "Override with ORCHESTRATION__PLATEAU_SCORE_EPSILON."
+        ),
+    )
+    plateau_min_iterations: int = Field(
+        default=3,
+        description=(
+            "Minimum completed iterations before plateau early-stop becomes eligible. "
+            "Prevents a false stop when only 1–2 scores exist. "
+            "Override with ORCHESTRATION__PLATEAU_MIN_ITERATIONS."
+        ),
+    )
     port: int = Field(default=8001, description="Port this service listens on.")
 
     # ── Inference optimization levers ─────────────────────────────────────

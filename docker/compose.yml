@@ -247,6 +247,9 @@ services:
       # Uncomment to switch ChromaDB to server mode (also uncomment chromadb service above):
       # - ORCHESTRATION__CHROMADB_HOST=chromadb
       # - ORCHESTRATION__CHROMADB_PORT=8000
+      # Supervisor pipeline (default=false — legacy chain-index path):
+      # - ORCHESTRATION__PIPELINE_USE_SUPERVISOR=true
+      # - ORCHESTRATION__PIPELINE_SUPERVISOR_MAX_STEPS=8
     networks:
       - idledev
     ports:

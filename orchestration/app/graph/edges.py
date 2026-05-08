@@ -115,6 +115,20 @@ def check_convergence(state: AgentState) -> str:
         logger.info("[%s] Converged at iter=%d  score=%.3f", session_id, current_iteration, iter_score)
         return "consensus"
 
+    # Plateau early-stop: scores stagnant — no further improvement expected
+    window = settings.plateau_window_iterations
+    if window > 0 and current_iteration >= settings.plateau_min_iterations:
+        prior_scores = state.get("iteration_scores", [])
+        recent = (prior_scores + [iter_score])[-window:]
+        if len(recent) >= window:
+            spread = max(recent) - min(recent)
+            if spread < settings.plateau_score_epsilon:
+                logger.info(
+                    "[%s] Plateau early-stop iter=%d scores=%s spread=%.3f",
+                    session_id, current_iteration, [f"{s:.3f}" for s in recent], spread,
+                )
+                return "consensus"
+
     # Forced stop: reached max iterations
     if current_iteration >= max_iterations:
         logger.info("[%s] Max iterations reached (%d)", session_id, max_iterations)

@@ -3,26 +3,43 @@ LangGraph pipeline
 ===================
 Builds and compiles the multi-agent StateGraph.
 
-Graph topology
---------------
+Two pipeline modes are supported, selected by ``settings.pipeline_use_supervisor``.
 
-START
-  └─[route_entry]─► planner | researcher | coder | debugger | reviewer | critic
-                         │
-                   [next_in_chain] ───► (next agent in chain)
-                         │
-                         └───► check_convergence ─[check_convergence]─► consensus
-                                      │
-                                      └─► (loop back to chain[0])
-consensus ──► END
+Legacy topology (default, pipeline_use_supervisor=False)
+---------------------------------------------------------
+START ─[route_entry]─► planner | researcher | coder | debugger | reviewer | critic
+                              │
+                        [next_in_chain] ───► (next agent in chain)
+                              │
+                              └───► check_convergence ─► finalize | update_loop
+finalize ─► consensus | END
+update_loop ─[route_entry]─► (loop back to chain[0])
+consensus ─► END
 
-There is one node per agent role.  Nodes not in the active agent_chain
-for a given request are simply never routed to — the graph is defined
-statically but only the nodes that the chain selects are executed.
+Nodes not in the active agent_chain for a given request are never routed to
+— the graph is defined statically but only chain-selected nodes execute.
 
-A dedicated `update_loop_state` node (runs after check_convergence when
-looping) increments `current_iteration`, updates `best_score`, and resets
-`agent_chain_index` before routing back to the first agent.
+Supervisor topology (pipeline_use_supervisor=True)
+--------------------------------------------------
+START ─► supervisor ─[supervisor_decide]─► worker | tool_executor | check_convergence
+every worker ─► supervisor          (ring — every agent returns to supervisor)
+tool_executor ─► supervisor
+check_convergence ─► finalize | update_loop
+update_loop ─► supervisor           (supervisor re-dispatches after each iteration)
+finalize ─► consensus | END
+consensus ─► END
+
+The supervisor (DeterministicSupervisor) applies rule priority R1–R5 to decide
+which node to visit next based on plan state, tool-call state, and iteration
+history.  "consensus" is never dispatched directly by the supervisor — it is
+reached only via finalize.
+
+Shared helpers (both modes)
+---------------------------
+``_finalize_state``   — sets converged/quality_converged/skip_consensus flags.
+``_update_loop_state`` — bumps current_iteration, resets chain index, and in
+                         supervisor mode resets the last-done plan step to
+                         pending so iteration ≥ 2 has work-producing dispatches.
 """
 
 from __future__ import annotations
@@ -76,9 +93,13 @@ async def _update_loop_state(state: AgentState) -> dict:
     - Update best_score / best_output from the iteration just completed.
     - Increment current_iteration.
     - Reset agent_chain_index to 0.
+    - In supervisor mode: reset the last-done plan step to pending so the
+      supervisor has work-producing dispatches in iteration ≥ 2 (B2 fix).
 
     Note: this node does NOT call any agent or inference service.
     """
+    import copy as _copy
+
     current_iteration = state.get("current_iteration", 1)
     history = state.get("iteration_history", [])
     best_score = state.get("best_score", 0.0)
@@ -91,13 +112,36 @@ async def _update_loop_state(state: AgentState) -> dict:
         best_score = iter_score
         best_output = last_output
 
-    return {
+    delta: dict = {
         "current_iteration": current_iteration + 1,
         "agent_chain_index": 0,
         "best_score": best_score,
         "best_output": best_output,
         "iteration_scores": list(state.get("iteration_scores", [])) + [iter_score],
     }
+
+    from ..config.settings import settings as _settings
+    plan_dict = state.get("plan")
+    if _settings.pipeline_use_supervisor and plan_dict:
+        steps = plan_dict.get("steps") or []
+        done_steps = [s for s in steps if s.get("status") == "done"]
+        if done_steps:
+            updated = _copy.deepcopy(plan_dict)
+            last_done_id = done_steps[-1]["id"]
+            for s in updated["steps"]:
+                if s["id"] == last_done_id:
+                    s["status"] = "pending"
+                    break
+            from datetime import datetime, timezone as _tz
+            updated["updated_at"] = datetime.now(_tz.utc).isoformat()
+            delta["plan"] = updated
+            delta["plan_changed"] = True
+            logger.info(
+                "update_loop: reset plan step %s to pending for iter %d",
+                last_done_id, current_iteration + 1,
+            )
+
+    return delta
 
 
 async def _finalize_state(state: AgentState) -> dict:

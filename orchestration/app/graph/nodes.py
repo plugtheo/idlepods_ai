@@ -535,11 +535,19 @@ async def _run_agent_node(role: str, state: AgentState) -> dict:
     # Advance the chain index so the edge router moves to the next agent
     next_index = state.get("agent_chain_index", 0) + 1
 
-    return {
+    delta = {
         "iteration_history": updated_history,
         "last_output": output,  # full output — used by convergence scorer
         "agent_chain_index": next_index,
     }
+
+    # Hygiene: clear tool_originating_role once the originator has consumed the
+    # tool result and completed a normal (non-tool-call) turn, so stale role
+    # names don't influence future R1.5 routing decisions.
+    if state.get("tool_originating_role") == role and not native_tool_calls:
+        delta["tool_originating_role"] = ""
+
+    return delta
 
 
 # ── Concrete node functions (one per agent role) ──────────────────────────
@@ -668,6 +676,11 @@ def _maybe_update_plan_step(state: AgentState, delta: dict) -> dict:
         updated["updated_at"] = datetime.now(_tz.utc).isoformat()
         delta["plan"] = updated
         delta["plan_changed"] = True
+        new_status = "blocked" if blocked_m else "done"
+        logger.info(
+            "plan_step_transition step_id=%s status=%s",
+            step_id, new_status,
+        )
     return delta
 
 
