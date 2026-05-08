@@ -90,6 +90,7 @@ REPORTS_DIR = Path(__file__).parent / "eval_reports"
 # uses the exact same strings as training and inference.
 sys.path.insert(0, str(PROJECT_ROOT))
 from shared.contracts.agent_prompts import AGENT_PROMPTS  # noqa: E402
+from shared.contracts.quality_filters import METADATA_LEAKAGE_RE as _METADATA_LEAKAGE_RE  # noqa: E402
 
 def _default_backend_name() -> str:
     try:
@@ -160,16 +161,7 @@ EVALUATOR_REQUIRED_FIELDS: dict[str, list[str]] = {
 # ---------------------------------------------------------------------------
 _SCORE_RE    = re.compile(r"\bSCORE\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
 _CODE_RE     = re.compile(r"```|def |class |import |\bfunction\b|\breturn\b", re.I)
-# Orchestration metadata leakage pattern — adapter outputs pipeline JSON instead of code
-_METADATA_LEAKAGE_RE = re.compile(
-    r"'agent_name'\s*:|\"agent_name\"\s*:|'iteration_number'\s*:|\"iteration_number\"\s*:"
-    r"|'quality_score'\s*:|\"quality_score\"\s*:|'execution_time_ms'\s*:|\"execution_time_ms\"\s*:"
-    r"|'session_id'\s*:|\"session_id\"\s*:|'final_output'\s*:|\"final_output\"\s*:"
-    r"|'agent_chain'\s*:|\"agent_chain\"\s*:|'contributions'\s*:|\"contributions\"\s*:"
-    r"|'iteration_scores'\s*:|\"iteration_scores\"\s*:|'final_score'\s*:|\"final_score\"\s*:"
-    r"|'converged'\s*:|\"converged\"\s*:",
-    re.I,
-)
+
 _STRUCT_RE   = re.compile(
     r"^\s*\d+[.)]\s+\S|^#{1,3}\s+\S|^[A-Z][A-Z ]{2,}:\s*\S",
     re.MULTILINE,

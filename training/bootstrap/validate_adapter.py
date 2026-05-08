@@ -49,7 +49,7 @@ from shared.contracts.training import AdapterRecipe, lookup_recipe
 # ---------------------------------------------------------------------------
 # BPE / contamination patterns (same as e2e_test.py)
 # ---------------------------------------------------------------------------
-_BPE_RE = re.compile(r"[\u0120\u010a\u2581]")
+from shared.contracts.quality_filters import BPE_ARTIFACT_RE as _BPE_RE, METADATA_LEAKAGE_RE
 
 
 def _fix_bpe_artifacts(text: str) -> str:
@@ -78,11 +78,7 @@ def _fix_bpe_artifacts(text: str) -> str:
         return raw.decode("utf-8", errors="replace")
     except Exception:
         return text
-_JSON_META_RE = re.compile(
-    r""""agent_name"\s*:|'agent_name'\s*:|"quality_score"\s*:|'quality_score'\s*:"""
-    r"""|"iteration_number"\s*:|"execution_time_ms"\s*:""",
-    re.I,
-)
+_JSON_META_RE = METADATA_LEAKAGE_RE
 _CODE_RE      = re.compile(r"```|(?<![a-zA-Z])def|(?<![a-zA-Z])class|(?<![a-zA-Z])import|(?<![a-zA-Z])return", re.I)
 _ISSUE_RE     = re.compile(r"\bISSUE\s*:", re.I)
 _FIX_RE       = re.compile(r"\bFIX\s*:", re.I)

@@ -1,15 +1,10 @@
 """
 Shared OpenAI message construction helpers.
-
-ONE source of truth for both training and inference fallback paths.
-The byte-for-byte invariant declared in agent_prompts.py still holds —
-the legacy marker path preserves it; the openai_messages path defers
-byte-equality to the chat template applied identically on both sides.
 """
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 
 def build_openai_messages(
@@ -41,22 +36,3 @@ def build_openai_messages(
                 "content": result.get("content", ""),
             })
     return messages
-
-
-def build_legacy_marker_prompt(
-    role: str,
-    system_prompt: str,
-    user_prompt: str,
-    completion: str,
-) -> Tuple[str, str]:
-    """
-    Return (prompt, completion) for the legacy [SYSTEM]/[USER]/[RESPONSE] format.
-    The prompt ends with the [RESPONSE] delimiter so DataCollatorForCompletionOnlyLM
-    masks only the completion tokens at training time.
-    """
-    prompt = (
-        f"[SYSTEM]\n{system_prompt}\n\n"
-        f"[USER]\n{user_prompt}\n\n"
-        f"[RESPONSE]\n"
-    )
-    return prompt, completion

@@ -46,6 +46,17 @@ class TrainingSettings(BaseSettings):
         0.65,
         description="Minimum quality score for an experience to be included in training data",
     )
+    min_sft_pairs: int = Field(
+        default=10,
+        description=(
+            "Refuse training when fewer than this many SFT pairs remain after quality filtering. "
+            "Near-zero data can corrupt adapter weights — lower this value with caution."
+        ),
+    )
+    max_training_samples: int = Field(
+        default=10_000,
+        description="Cap on total SFT pairs per training run to bound GPU time.",
+    )
 
     # HuggingFace auth
     hf_token: str = Field("", description="HuggingFace Hub token for downloading gated models")

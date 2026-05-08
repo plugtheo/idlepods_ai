@@ -259,7 +259,7 @@ _HAS_CODE_RE = re.compile(
 )
 
 # Signs that a response is actually orchestration metadata leakage
-_LEAKAGE_RE = re.compile(r"'agent_name'|\"agent_name\"|iteration_number|convergence_threshold", re.I)
+from shared.contracts.quality_filters import METADATA_LEAKAGE_RE as _LEAKAGE_RE
 
 # Detects indentation (a real code structural element)
 _INDENT_RE = re.compile(r"^[ \t]{2,}", re.M)

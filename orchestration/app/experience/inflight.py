@@ -31,10 +31,11 @@ import filelock
 from shared.contracts.experience import ExperienceEvent
 
 from . import jsonl_store, recorder
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-_DEDUPE_TAIL_LINES = 100
+_DEDUPE_TAIL_LINES = settings.experience_dedupe_tail_lines
 
 _active: "dict[asyncio.Task, ExperienceEvent]" = {}
 

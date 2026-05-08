@@ -35,7 +35,7 @@ from app.utils.experience_reader import (  # noqa: E402
     iter_after,
     iter_records,
 )
-from shared.contracts.roles import CAPABILITIES  # noqa: E402
+from shared.contracts.roles import TRAINABLE_ROLES  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-8s | %(name)s | %(message)s")
 log = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ def tick() -> None:
 
     # Check diversity across unprocessed records for at least one role
     any_role_ready = False
-    for role in CAPABILITIES:
+    for role in TRAINABLE_ROLES:
         cursor = _read_cursor(role)
         role_records = [
             r for _, _, r in iter_after(cursor)

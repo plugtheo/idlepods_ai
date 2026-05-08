@@ -37,10 +37,12 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 _DENYLIST = {".git", ".env", "secrets"}
-_TOOL_OUTPUT_TRUNCATE_CHARS = 4000
+_TOOL_OUTPUT_TRUNCATE_CHARS = settings.tool_output_truncate_chars
 
 
 class ToolError(Exception):

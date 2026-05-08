@@ -12,7 +12,7 @@ import pytest
 
 @pytest.fixture
 def router():
-    from services.gateway.app.routing.query_router import QueryRouter
+    from shared.routing.query_router import QueryRouter
     return QueryRouter()
 
 
@@ -99,7 +99,7 @@ class TestChainLookup:
 
 class TestRouteDecision:
     def test_returns_route_decision(self, router):
-        from services.gateway.app.routing.query_router import RouteDecision
+        from shared.routing.query_router import RouteDecision
         d = router.route("write a function")
         assert isinstance(d, RouteDecision)
         assert d.intent

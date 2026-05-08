@@ -31,7 +31,13 @@ import json
 import logging
 from typing import AsyncGenerator
 
-from shared.contracts.inference import GenerateRequest, GenerateResponse
+from shared.contracts.inference import (
+    GenerateRequest,
+    GenerateResponse,
+    GRPC_DEFAULT_MAX_TOKENS,
+    GRPC_DEFAULT_TEMPERATURE,
+    GRPC_DEFAULT_TOP_P,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +65,16 @@ _ROLE_TO_ENUM: dict[str, int] = {
     "tool":      3,   # ROLE_TOOL
 }
 
-# Server-side defaults for optional sampling fields.
-# We skip sending a field when the value equals its default: absent on wire.
-# IMPORTANT: these must mirror inference/app/config/settings.py grpc_default_* byte-for-byte.
-# Cross-process drift (e.g. env override applied to one side only) silently corrupts the
-# wire-elision optimisation: the server applies a different default than the client assumed.
-_DEFAULT_MAX_TOKENS  = 1024
-_DEFAULT_TEMPERATURE = 0.2
-_DEFAULT_TOP_P       = 0.95
+# Server-side defaults for optional sampling fields — imported from the shared
+# contract so client and server both read from the same source.  Wire-elision
+# (skipping a field whose value equals the default) relies on both sides agreeing
+# on what "default" means; these constants enforce that agreement at import time.
+# When an operator overrides INFERENCE__GRPC_DEFAULT_* on the server side, the
+# client will still elide using the base defaults — document that both env vars
+# must be changed together when deviating from the shared defaults.
+_DEFAULT_MAX_TOKENS  = GRPC_DEFAULT_MAX_TOKENS
+_DEFAULT_TEMPERATURE = GRPC_DEFAULT_TEMPERATURE
+_DEFAULT_TOP_P       = GRPC_DEFAULT_TOP_P
 
 
 class GrpcInferenceClient:
@@ -128,6 +136,10 @@ class GrpcInferenceClient:
             proto_req.tools_json = json.dumps(
                 [t.model_dump(exclude_none=True) for t in request.tools]
             )
+        if request.thinking_enabled:
+            proto_req.thinking_enabled = True
+        if request.response_schema is not None:
+            proto_req.response_schema_json = json.dumps(request.response_schema)
 
         return proto_req
 
@@ -171,6 +183,7 @@ class GrpcInferenceClient:
             tokens_generated=proto_resp.tokens_generated,
             session_id=request.session_id,
             tool_calls=tool_calls,
+            used_base_fallback=proto_resp.used_base_fallback if proto_resp.HasField("used_base_fallback") else False,
         )
 
     async def generate_stream(

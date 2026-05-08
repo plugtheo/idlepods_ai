@@ -8,41 +8,17 @@ from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 
 from shared.contracts.models import load_registry
 from shared.manifest import read_manifest, write_manifest_locked, LegacyManifestError
 from ..backends.factory import get_backend
+from ..config.settings import settings
+from ..models import AdapterLoadRequest, AdapterUnloadRequest, AdapterSwapRequest, AdapterRollbackRequest
 
 router = APIRouter(prefix="/adapters", tags=["adapters"])
 logger = logging.getLogger(__name__)
 
-# Overridable via INFERENCE__MANIFEST_PATH env; default matches container volume.
-import os as _os
-_MANIFEST_PATH = _os.environ.get(
-    "INFERENCE__MANIFEST_PATH", "/data/lora_checkpoints/manifest.json"
-)
-
-
-class AdapterLoadRequest(BaseModel):
-    backend: str
-    lora_name: str
-    lora_path: str
-
-
-class AdapterUnloadRequest(BaseModel):
-    backend: str
-    lora_name: str
-
-
-class AdapterSwapRequest(BaseModel):
-    backend: str
-    canonical_name: str
-    new_path: str
-
-
-class AdapterRollbackRequest(BaseModel):
-    backend: str
+_MANIFEST_PATH = settings.lora_manifest_path
 
 
 def _get_backend_or_404(backend_name: str):

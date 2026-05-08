@@ -26,18 +26,13 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
 from shared.contracts.inference import GenerateRequest, GenerateResponse
 from shared.contracts.models import load_registry
 from ..backends.factory import get_backend
 from ..backends.local_vllm import get_fallback_counts
 from ..config.settings import settings
-
-
-class _TokenizeBody(BaseModel):
-    backend: str
-    text: str
+from ..models import TokenizeRequest
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +145,7 @@ async def model_info() -> dict:
 
 
 @router.post("/v1/tokenize", summary="Return token count for a text string via a vLLM backend")
-async def tokenize_text(body: _TokenizeBody) -> dict:
+async def tokenize_text(body: TokenizeRequest) -> dict:
     """Proxy a tokenization request to the appropriate vLLM backend."""
     registry = load_registry()
     if body.backend not in registry.backends:

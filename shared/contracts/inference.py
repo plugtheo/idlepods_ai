@@ -17,6 +17,14 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
+# Canonical defaults for gRPC sampling parameters.
+# Both the gRPC client (orchestration) and gRPC server (inference) import these
+# so the wire-elision optimisation (skip field when value equals default) stays
+# consistent even as env-var overrides are applied.
+GRPC_DEFAULT_MAX_TOKENS: int = 1024
+GRPC_DEFAULT_TEMPERATURE: float = 0.2
+GRPC_DEFAULT_TOP_P: float = 0.95
+
 
 class Message(BaseModel):
     """One conversation turn."""
@@ -54,9 +62,9 @@ class GenerateRequest(BaseModel):
             "e.g. 'coding_lora'. Pass None to use the base model."
         ),
     )
-    max_tokens: int = Field(default=1024, ge=1, le=8192)
-    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
-    top_p: float = Field(default=0.95, ge=0.0, le=1.0)
+    max_tokens: int = Field(default=GRPC_DEFAULT_MAX_TOKENS, ge=1, le=8192)
+    temperature: float = Field(default=GRPC_DEFAULT_TEMPERATURE, ge=0.0, le=2.0)
+    top_p: float = Field(default=GRPC_DEFAULT_TOP_P, ge=0.0, le=1.0)
     session_id: Optional[str] = Field(
         default=None,
         description="Opaque string for log correlation across service calls.",

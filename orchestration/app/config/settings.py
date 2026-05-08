@@ -259,8 +259,8 @@ class OrchestrationSettings(BaseSettings):
     )
     role_tools_enabled: Dict[str, List[str]] = Field(
         default_factory=lambda: {
-            "planner":    ["web_search"],
-            "researcher": ["web_search"],
+            "planner":    ["web_search", "list_files"],
+            "researcher": ["web_search", "read_file", "list_files"],
             "coder":      ["read_file", "write_file", "list_files", "run_command"],
             "debugger":   ["read_file", "write_file"],
             "reviewer":   [],
@@ -371,7 +371,17 @@ class OrchestrationSettings(BaseSettings):
         ),
     )
 
+    # ── Tool runner ────────────────────────────────────────────────────────
+    tool_output_truncate_chars: int = Field(
+        default=4000,
+        description="Tool output longer than this many characters is truncated before being passed to the next agent.",
+    )
+
     # ── Experience recording (formerly the Experience Service) ────────────
+    experience_dedupe_tail_lines: int = Field(
+        default=100,
+        description="Number of tail JSONL lines checked when deduplicating experience records on write.",
+    )
     jsonl_dir: str = Field(
         default="/data",
         description="Directory where daily JSONL shards (experiences-YYYYMMDD.jsonl) are written.",

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import httpx
 
-from shared.contracts.roles import CAPABILITIES
+from shared.contracts.roles import TRAINABLE_ROLES
 from .config.settings import settings
 from .utils.experience_reader import check_diversity, load_experiences
 
@@ -99,7 +99,7 @@ def _run_local(records: list[dict]) -> None:
         platform_kwargs["start_new_session"] = True
 
     try:
-        for capability in CAPABILITIES:
+        for capability in TRAINABLE_ROLES:
             base_model = _base_model_for(capability)
             cmd = [
                 sys.executable, "-m", "services.training.app.trainer_entry",

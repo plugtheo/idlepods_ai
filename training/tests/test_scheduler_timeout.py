@@ -38,7 +38,7 @@ def test_run_local_timeout_logs_and_terminates(platform, tmp_path, caplog):
     with (
         patch("training.app.trainer_wrapper.settings") as mock_settings,
         patch("training.app.trainer_wrapper._base_model_for", return_value="base-model"),
-        patch("training.app.trainer_wrapper.CAPABILITIES", ["coder"]),
+        patch("training.app.trainer_wrapper.TRAINABLE_ROLES", ["coder"]),
         patch("training.app.trainer_wrapper.sys") as mock_sys,
         patch("subprocess.run", side_effect=_make_timeout_exc()),
         patch("sys.platform", platform),
@@ -68,7 +68,7 @@ def test_run_local_timeout_does_not_advance_cursor(tmp_path, caplog):
 
     with (
         patch("training.app.trainer_wrapper._base_model_for", return_value="base-model"),
-        patch("training.app.trainer_wrapper.CAPABILITIES", ["coder"]),
+        patch("training.app.trainer_wrapper.TRAINABLE_ROLES", ["coder"]),
         patch("subprocess.run", side_effect=_make_timeout_exc()),
     ):
         import training.app.trainer_wrapper as wrapper

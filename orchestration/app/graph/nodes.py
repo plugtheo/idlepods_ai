@@ -50,13 +50,13 @@ from shared.contracts.evaluator_schemas import EVALUATOR_SCHEMAS
 from ..clients.inference import get_inference_client
 from ..config.settings import AGENT_PROMPTS, settings
 from ..tools.runner import build_tool_schemas, execute_tool_call
-from ..utils.inference_optimizer import InferenceOptimizer
+from ..utils.inference_optimizer import AgentHistoryCompressor
 from ..utils.scoring import validate_output
 from .state import AgentState
 
 # Module-level singleton — shared across all node invocations in this process.
 # Flags read once at startup; change requires service restart (or env reload).
-_optimizer = InferenceOptimizer(
+_optimizer = AgentHistoryCompressor(
     role_history_filter=settings.optimize_role_history_filter,
     structured_extraction=settings.optimize_structured_extraction,
 )

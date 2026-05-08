@@ -10,19 +10,18 @@ Pass/Fail heuristics:
   - FAIL: output contains 'agent_name', 'quality_score', 'iteration_number' (contamination signal)
 """
 import gc
-import re
 import sys
 
 import torch
 from unsloth import FastLanguageModel
 
-ADAPTER_BASE = "/data/lora_checkpoints"
+import re
+_REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from shared.contracts.quality_filters import METADATA_LEAKAGE_RE as CONTAMINATION_RE  # noqa: E402
 
-CONTAMINATION_RE = re.compile(
-    r"'agent_name'\s*:|\"agent_name\"\s*:|'quality_score'\s*:|\"quality_score\"\s*:"
-    r"|'iteration_number'\s*:|\"iteration_number\"\s*:|'execution_time_ms'\s*:",
-    re.I,
-)
+ADAPTER_BASE = "/data/lora_checkpoints"
 CODE_RE = re.compile(r"```|def |class |import |\breturn\b", re.I)
 ISSUE_FIX_RE = re.compile(r"\bISSUE\s*:", re.I)
 

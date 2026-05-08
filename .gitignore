@@ -39,10 +39,6 @@ docker-compose.*.yml
 # Data
 data/
 
-# Claude
-
-plans/archive/
-
 # Scripts
 scripts/eval_reports/
 

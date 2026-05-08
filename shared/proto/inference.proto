@@ -70,6 +70,14 @@ message GenerateRequest {
   // tools_json: JSON-serialised list of OpenAI function tool definitions.
   // Absent when the role does not use tools (saves wire bytes).
   optional string tools_json = 9;
+
+  // thinking_enabled: activates Qwen3 chain-of-thought thinking mode.
+  // Absent (false) by default — only set when the role explicitly enables it.
+  optional bool thinking_enabled = 10;
+
+  // response_schema_json: JSON-serialised JSON Schema for guided decoding.
+  // Absent when the role does not require structured output (saves wire bytes).
+  optional string response_schema_json = 11;
 }
 
 message GenerateResponse {
@@ -78,6 +86,10 @@ message GenerateResponse {
   // tool_calls_json: JSON-serialised list of tool_call objects emitted by the
   // model.  Absent when the model produced plain text with no tool calls.
   optional string tool_calls_json = 3;
+  // used_base_fallback: true when the requested LoRA adapter was unavailable
+  // and the base model served the response instead.  Used by training to
+  // filter experience events that did not use the adapter.
+  optional bool used_base_fallback = 4;
   // model_family, role, session_id intentionally omitted: the caller
   // already has them from the request — echoing wastes wire bytes.
 }

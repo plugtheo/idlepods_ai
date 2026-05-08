@@ -1,10 +1,18 @@
+"""
+Architecture invariant checks — model-naming and backend-registry refactoring.
+
+Run from any directory:
+    python scripts/check_architecture.py
+"""
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-root = Path('.')
+root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(root))
+
 results = []
 
 
@@ -16,8 +24,7 @@ def check(n, name, fn):
         results.append(f'FAIL [{n:02d}] {name} -- {e}')
 
 
-# 1. No banned model-name literals in source
-def c1():
+def check_no_banned_model_literals():
     SCAN_DIRS = ['inference', 'orchestration', 'training', 'shared', 'scripts']
     BANNED = re.compile(r'\b(qwen|deepseek|mistral)\b', re.IGNORECASE)
     ALLOWLIST = {
@@ -44,11 +51,10 @@ def c1():
         raise AssertionError('violations:\n' + '\n'.join(hits[:20]))
 
 
-check(1, 'No banned model-name literals in source', c1)
+check(1, 'No banned model-name literals in source', check_no_banned_model_literals)
 
 
-# 2. No model_family in source (outside contracts)
-def c2():
+def check_no_model_family_in_services():
     hits = []
     for d in ['inference/app', 'orchestration/app', 'training/app', 'training/training', 'scripts']:
         p = root / d
@@ -62,21 +68,19 @@ def c2():
         raise AssertionError('\n'.join(hits[:20]))
 
 
-check(2, 'No model_family in service source', c2)
+check(2, 'No model_family in service source', check_no_model_family_in_services)
 
 
-# 3. CAPABILITY_TO_FAMILY deleted
-def c3():
+def check_capability_to_family_deleted():
     src = (root / 'inference/app/backends/factory.py').read_text()
     assert 'CAPABILITY_TO_FAMILY' not in src
     assert 'get_backend_for_capability' not in src
 
 
-check(3, 'CAPABILITY_TO_FAMILY deleted from factory.py', c3)
+check(3, 'CAPABILITY_TO_FAMILY deleted from factory.py', check_capability_to_family_deleted)
 
 
-# 4. role_model_family fully gone (scan service dirs only, skip this script)
-def c4():
+def check_role_model_family_fully_gone():
     hits = []
     for d in ['inference/app', 'orchestration/app', 'training/app', 'training/training', 'shared', 'scripts']:
         p = root / d
@@ -92,13 +96,12 @@ def c4():
         raise AssertionError('still present in: ' + ', '.join(hits))
 
 
-check(4, 'role_model_family fully renamed', c4)
+check(4, 'role_model_family fully renamed', check_role_model_family_fully_gone)
 
 
-# 5. models.yaml exists and has required fields
-def c5():
+def check_models_yaml_structure():
     import yaml
-    d = yaml.safe_load(open('models.yaml', encoding='utf-8'))
+    d = yaml.safe_load(open(root / 'models.yaml', encoding='utf-8'))
     assert 'default_backend' in d
     assert 'primary' in d['backends']
     p = d['backends']['primary']
@@ -106,23 +109,21 @@ def c5():
         assert field in p, f'missing {field}'
 
 
-check(5, 'models.yaml structure valid', c5)
+check(5, 'models.yaml structure valid', check_models_yaml_structure)
 
 
-# 6. shared/contracts/models.py exports
-def c6():
-    os.environ.setdefault('MODELS_YAML_PATH', 'models.yaml')
+def check_contracts_models_exports():
+    os.environ.setdefault('MODELS_YAML_PATH', str(root / 'models.yaml'))
     from shared.contracts.models import BackendEntry, ModelsRegistry, load_registry, get_backend_entry
     reg = load_registry()
     assert all(k in reg.__class__.__fields__ for k in ['default_backend', 'backends'])
 
 
-check(6, 'shared/contracts/models.py exports OK', c6)
+check(6, 'shared/contracts/models.py exports OK', check_contracts_models_exports)
 
 
-# 7. GenerateRequest/Response use backend field
-def c7():
-    os.environ['MODELS_YAML_PATH'] = 'models.yaml'
+def check_generate_request_uses_backend():
+    os.environ['MODELS_YAML_PATH'] = str(root / 'models.yaml')
     from shared.contracts.inference import GenerateRequest, GenerateResponse, Message
     r = GenerateRequest(
         backend='primary',
@@ -135,12 +136,11 @@ def c7():
     assert resp.backend == 'primary'
 
 
-check(7, 'GenerateRequest/Response use backend field', c7)
+check(7, 'GenerateRequest/Response use backend field', check_generate_request_uses_backend)
 
 
-# 8. Legacy alias shim resolves when flag set
-def c8():
-    os.environ['MODELS_YAML_PATH'] = 'models.yaml'
+def check_legacy_alias_shim():
+    os.environ['MODELS_YAML_PATH'] = str(root / 'models.yaml')
     os.environ['INFERENCE__ACCEPT_LEGACY_BACKEND_NAMES'] = 'true'
     import importlib
     import shared.contracts.inference as inf
@@ -155,11 +155,10 @@ def c8():
     del os.environ['INFERENCE__ACCEPT_LEGACY_BACKEND_NAMES']
 
 
-check(8, 'Legacy alias shim resolves qwen->primary', c8)
+check(8, 'Legacy alias shim resolves qwen->primary', check_legacy_alias_shim)
 
 
-# 9. inference settings: new fields present, old gone
-def c9():
+def check_inference_settings_clean():
     import importlib
     import inference.app.config.settings as m
     importlib.reload(m)
@@ -170,99 +169,89 @@ def c9():
         assert not hasattr(s, old), f'{old} still present'
 
 
-check(9, 'inference/app/config/settings clean', c9)
+check(9, 'inference/app/config/settings clean', check_inference_settings_clean)
 
 
-# 10. orchestration settings: role_backend present
-def c10():
+def check_orchestration_settings_clean():
     from orchestration.app.config.settings import settings
     assert hasattr(settings, 'role_backend'), 'missing role_backend'
     assert not hasattr(settings, 'role_model_family'), 'role_model_family still present'
 
 
-check(10, 'orchestration/app/config/settings clean', c10)
+check(10, 'orchestration/app/config/settings clean', check_orchestration_settings_clean)
 
 
-# 11. training settings: models_yaml_path present, qwen_model gone
-def c11():
+def check_training_settings_clean():
     from training.app.config.settings import settings
     assert hasattr(settings, 'models_yaml_path')
     assert not hasattr(settings, 'qwen_model')
 
 
-check(11, 'training/app/config/settings clean', c11)
+check(11, 'training/app/config/settings clean', check_training_settings_clean)
 
 
-# 12. factory.py uses registry
-def c12():
+def check_factory_uses_registry():
     src = (root / 'inference/app/backends/factory.py').read_text()
     assert 'load_registry' in src
     assert 'BackendEntry' in src or 'entry' in src
 
 
-check(12, 'factory.py uses load_registry', c12)
+check(12, 'factory.py uses load_registry', check_factory_uses_registry)
 
 
-# 13. local_vllm.py: new constructor, no tokenizer hacks
-def c13():
+def check_local_vllm_no_tokenizer_hacks():
     src = (root / 'inference/app/backends/local_vllm.py').read_text(encoding='utf-8')
     assert 'backend_name' in src
     assert '_is_deepseek' not in src
     assert 'Metaspace' not in src
 
 
-check(13, 'local_vllm.py constructor + no hacks', c13)
+check(13, 'local_vllm.py constructor + no hacks', check_local_vllm_no_tokenizer_hacks)
 
 
-# 14. proto field renamed, tag 1 kept
-def c14():
-    src = open('shared/proto/inference.proto', encoding='utf-8').read()
-    # Proto uses alignment spacing: "string              backend       = 1;"
+def check_proto_field_renamed():
+    src = open(root / 'shared/proto/inference.proto', encoding='utf-8').read()
     assert re.search(r'string\s+backend\s*=\s*1', src), 'field not renamed'
-    # model_family must not appear as a field definition (comments are OK)
     non_comment_lines = [l for l in src.splitlines() if not l.strip().startswith('//')]
     assert not any('model_family' in l for l in non_comment_lines), 'model_family field still present'
 
 
-check(14, 'inference.proto field renamed to backend', c14)
+check(14, 'inference.proto field renamed to backend', check_proto_field_renamed)
 
 
-# 15. compose.yml: service renamed, vars present, mounts present
-def c15():
-    src = open('docker/compose.yml').read()
+def check_compose_yml_updated():
+    src = open(root / 'docker/compose.yml').read()
     assert 'vllm-primary' in src
     assert 'vllm-qwen' not in src
     assert 'VLLM_MODEL_ID' in src
     assert '/config/models.yaml' in src
 
 
-check(15, 'docker/compose.yml updated correctly', c15)
+check(15, 'docker/compose.yml updated correctly', check_compose_yml_updated)
 
 
-# 16. render_compose_env.py exists
-def c16():
+def check_render_compose_env_exists():
     assert (root / 'scripts/render_compose_env.py').exists()
 
 
-check(16, 'scripts/render_compose_env.py exists', c16)
+check(16, 'scripts/render_compose_env.py exists', check_render_compose_env_exists)
 
 
-# 17. render_compose_env.py runs and produces output
-def c17():
+def check_render_compose_env_runs():
     r = subprocess.run(
-        [sys.executable, 'scripts/render_compose_env.py'],
+        [sys.executable, str(root / 'scripts/render_compose_env.py')],
         capture_output=True,
-        text=True
+        text=True,
+        cwd=root,
     )
     assert r.returncode == 0, r.stderr[:200]
     assert (root / '.env.vllm').exists() or 'VLLM_' in r.stdout
 
 
-check(17, 'render_compose_env.py runs without error', c17)
+check(17, 'render_compose_env.py runs without error', check_render_compose_env_runs)
 
 
-# 18. No _is_deepseek / tokenizer hacks in training
-def c18():
+def check_no_tokenizer_hacks_in_training():
     for f in [
         'training/training/lora_trainer.py',
         'training/training/validate_adapter.py'
@@ -272,21 +261,19 @@ def c18():
             assert banned not in src, f'{banned} found in {f}'
 
 
-check(18, 'No tokenizer hacks in lora_trainer/validate_adapter', c18)
+check(18, 'No tokenizer hacks in lora_trainer/validate_adapter', check_no_tokenizer_hacks_in_training)
 
 
-# 19. train_gpu_simple.py: no old constants
-def c19():
+def check_train_gpu_simple_old_constants_deleted():
     src = (root / 'training/training/train_gpu_simple.py').read_text()
     for banned in ['DEEPSEEK_ID', 'MISTRAL_ID', '_BOOTSTRAP_MODEL']:
         assert banned not in src, f'{banned} still in train_gpu_simple.py'
 
 
-check(19, 'train_gpu_simple.py old constants deleted', c19)
+check(19, 'train_gpu_simple.py old constants deleted', check_train_gpu_simple_old_constants_deleted)
 
 
-# 20. scripts: no hardcoded model lists
-def c20():
+def check_scripts_no_role_model_family():
     hits = []
     for s in [
         'scripts/seed_adapter_metadata.py',
@@ -303,56 +290,52 @@ def c20():
         raise AssertionError('; '.join(hits))
 
 
-check(20, 'scripts: no ROLE_MODEL_FAMILY', c20)
+check(20, 'scripts: no ROLE_MODEL_FAMILY', check_scripts_no_role_model_family)
 
 
-# 21. test_no_model_literals.py exists
-def c21():
+def check_test_no_model_literals_exists():
     assert (root / 'shared/tests/test_no_model_literals.py').exists()
 
 
-check(21, 'shared/tests/test_no_model_literals.py exists', c21)
+check(21, 'shared/tests/test_no_model_literals.py exists', check_test_no_model_literals_exists)
 
 
-# 22. nodes.py: uses role_backend + load_registry, no qwen literal
-def c22():
+def check_nodes_uses_role_backend_and_registry():
     src = (root / 'orchestration/app/graph/nodes.py').read_text()
     assert 'role_backend' in src
     assert 'load_registry' in src
     assert '"qwen"' not in src and "'qwen'" not in src
 
 
-check(22, 'nodes.py uses role_backend + registry', c22)
+check(22, 'nodes.py uses role_backend + registry', check_nodes_uses_role_backend_and_registry)
 
 
-# 23. gRPC server uses backend field
-def c23():
+def check_grpc_server_uses_backend_field():
     src = (root / 'inference/app/grpc/server.py').read_text()
     assert 'request.backend' in src or '.backend' in src
     assert 'model_family' not in src
 
 
-check(23, 'grpc/server.py uses backend field', c23)
+check(23, 'grpc/server.py uses backend field', check_grpc_server_uses_backend_field)
 
 
-# 24. inference_grpc client uses backend
-def c24():
+def check_inference_grpc_client_uses_backend():
     src = (root / 'orchestration/app/clients/inference_grpc.py').read_text()
     assert 'model_family' not in src
 
 
-check(24, 'inference_grpc.py uses backend field', c24)
+check(24, 'inference_grpc.py uses backend field', check_inference_grpc_client_uses_backend)
 
 
-# 25. All tests importable (dry-run collect)
-def c25():
+def check_test_suite_collects():
     r = subprocess.run(
         [
             sys.executable, '-m', 'pytest', '--collect-only', '-q',
             'inference/tests', 'orchestration/tests', 'shared/tests'
         ],
         capture_output=True,
-        text=True
+        text=True,
+        cwd=root,
     )
     errors = [
         l for l in r.stdout.splitlines() + r.stderr.splitlines()
@@ -363,7 +346,7 @@ def c25():
         raise AssertionError('\n'.join(errors[:10]))
 
 
-check(25, 'Test suite collects without import errors', c25)
+check(25, 'Test suite collects without import errors', check_test_suite_collects)
 
 
 # Print results

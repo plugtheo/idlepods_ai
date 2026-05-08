@@ -114,12 +114,12 @@ _CAPABILITY_TO_ADAPTER: dict[str, str] = {
     "summarizer": "summarizer_lora",
 }
 
-# Safety floors — keep as module constants, do NOT promote to env.
-# These guard against catastrophic LoRA weight corruption; making them easily
-# configurable invites disabling the guard without understanding the risk.
-MIN_QUALITY_SCORE  = 0.65   # minimum score; records below this are excluded from SFT pairs
-MIN_SFT_PAIRS      = 10     # refuse training on fewer pairs; near-zero data destroys adapter weights
-MAX_TRAINING_SAMPLES = 10_000  # cap to keep training runtime bounded
+# Read quality floor from settings — the authoritative value lives in
+# training/app/config/settings.py as min_quality_score.
+# MIN_SFT_PAIRS / MAX_TRAINING_SAMPLES guard against catastrophic weight corruption
+# and are also sourced from settings so they remain visible without reading source.
+MIN_SFT_PAIRS        = _training_settings.min_sft_pairs
+MAX_TRAINING_SAMPLES = _training_settings.max_training_samples
 
 
 def _is_clean_output(text: str) -> bool:
@@ -156,7 +156,7 @@ def _load_sft_pairs(
     data_path: str,
     capability: str,
     recipe: "AdapterRecipe",
-    min_score: float = MIN_QUALITY_SCORE,
+    min_score: float = _training_settings.min_quality_score,
 ) -> List[Dict]:
     """
     Read ExperienceEvent JSONL and produce SFT pairs shaped by recipe.sft_format.
@@ -486,7 +486,7 @@ def main() -> None:
         data_path=args.data_path,
         capability=role_name,
         recipe=recipe,
-        min_score=MIN_QUALITY_SCORE,
+        min_score=_training_settings.min_quality_score,
     )
 
     # Supplement experience-derived pairs with curated bootstrap data.

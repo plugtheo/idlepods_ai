@@ -61,19 +61,18 @@ async def stream_pipeline(request: OrchestrationRequest) -> AsyncIterator[str]:
 
     Yields raw SSE lines (``data: {...}\\n\\n``) as they arrive so the
     gateway can forward them directly to the end user with zero buffering.
-    Uses a dedicated context-managed client so the connection outlives the
-    pooled client lifecycle.
+    Reuses the shared client (base_url already set); the ``async with``
+    is on the response context, not the client, so pooling is preserved.
     """
-    url = f"{settings.orchestration_url.rstrip('/')}/v1/run/stream"
-    async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
-        async with client.stream("POST", url, json=request.model_dump()) as response:
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                logger.error("Orchestration stream error %d", exc.response.status_code)
-                raise
-            async for chunk in response.aiter_bytes():
-                yield chunk
+    client = _get_client()
+    async with client.stream("POST", "/v1/run/stream", json=request.model_dump()) as response:
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error("Orchestration stream error %d", exc.response.status_code)
+            raise
+        async for chunk in response.aiter_bytes():
+            yield chunk
 
 
 async def close() -> None:

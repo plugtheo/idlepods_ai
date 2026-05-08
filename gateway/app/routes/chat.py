@@ -13,38 +13,19 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
 
 from shared.contracts.orchestration import OrchestrationRequest, OrchestrationResponse
 from ..clients.orchestration import run_pipeline, stream_pipeline
-from ..routing.query_router import QueryRouter
+from ..models import ChatRequest, ChatResponse
+from shared.routing.query_router import QueryRouter
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _query_router = QueryRouter()
-
-
-class ChatRequest(BaseModel):
-    prompt: str = Field(..., description="User's natural-language request")
-    session_id: Optional[str] = Field(None, description="Optional session identifier for continuity")
-    task_id: Optional[str] = Field(None, description="Stable identifier scoping multi-turn context state. Defaults to session_id when absent.")
-    suppress_few_shots: bool = False
-    max_iterations: Optional[int] = Field(None, description="Override default max iterations (1–10)")
-    convergence_threshold: Optional[float] = Field(None, description="Override convergence score threshold (0.0–1.0)")
-
-
-class ChatResponse(BaseModel):
-    session_id: str
-    output: str
-    success: bool
-    confidence: float
-    iterations: int
-    converged: bool
 
 
 @router.post(

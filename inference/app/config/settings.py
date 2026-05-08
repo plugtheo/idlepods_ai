@@ -8,6 +8,12 @@ Backend identity is driven by models.yaml (INFERENCE__MODELS_YAML_PATH).
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from shared.contracts.inference import (
+    GRPC_DEFAULT_MAX_TOKENS,
+    GRPC_DEFAULT_TEMPERATURE,
+    GRPC_DEFAULT_TOP_P,
+)
+
 
 class InferenceSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -43,32 +49,41 @@ class InferenceSettings(BaseSettings):
 
     # ── gRPC server-side sampling defaults ────────────────────────────────
     grpc_default_max_tokens: int = Field(
-        default=1024,
+        default=GRPC_DEFAULT_MAX_TOKENS,
         ge=1,
         le=8192,
         description=(
             "Default max_tokens applied by the gRPC server when the proto request "
             "omits the field (HasField check). "
-            "Override with INFERENCE__GRPC_DEFAULT_MAX_TOKENS."
+            "Override with INFERENCE__GRPC_DEFAULT_MAX_TOKENS. "
+            "Must match the gRPC client default in shared/contracts/inference.py."
         ),
     )
     grpc_default_temperature: float = Field(
-        default=0.2,
+        default=GRPC_DEFAULT_TEMPERATURE,
         ge=0.0,
         le=2.0,
         description=(
             "Default temperature applied by the gRPC server when the proto request "
-            "omits the field. Override with INFERENCE__GRPC_DEFAULT_TEMPERATURE."
+            "omits the field. Override with INFERENCE__GRPC_DEFAULT_TEMPERATURE. "
+            "Must match the gRPC client default in shared/contracts/inference.py."
         ),
     )
     grpc_default_top_p: float = Field(
-        default=0.95,
+        default=GRPC_DEFAULT_TOP_P,
         ge=0.0,
         le=1.0,
         description=(
             "Default top_p applied by the gRPC server when the proto request "
-            "omits the field. Override with INFERENCE__GRPC_DEFAULT_TOP_P."
+            "omits the field. Override with INFERENCE__GRPC_DEFAULT_TOP_P. "
+            "Must match the gRPC client default in shared/contracts/inference.py."
         ),
+    )
+
+    # ── Adapter discovery ─────────────────────────────────────────────────
+    adapter_cache_ttl_seconds: int = Field(
+        default=120,
+        description="How often (seconds) to re-query vLLM /v1/models to discover newly trained adapters.",
     )
 
     # ── Adapter bootstrap ─────────────────────────────────────────────────

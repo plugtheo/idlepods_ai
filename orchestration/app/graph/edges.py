@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 
 from .state import AgentState
+from ..config.settings import settings
 from ..utils.scoring import score_iteration
 
 logger = logging.getLogger(__name__)
@@ -97,8 +98,7 @@ def check_convergence(state: AgentState) -> str:
     """
     current_iteration = state.get("current_iteration", 1)
     max_iterations = state.get("max_iterations", 5)
-    # 0.85 fallback is dead in normal flow: routes/run.py always seeds state from settings.convergence_threshold
-    threshold = state.get("convergence_threshold") or 0.85
+    threshold = state.get("convergence_threshold") or settings.convergence_threshold
     history = state.get("iteration_history", [])
     best_score = state.get("best_score", 0.0)
     session_id = state.get("session_id", "")[:8]

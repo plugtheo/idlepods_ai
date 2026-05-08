@@ -15,10 +15,15 @@ Used in three places:
 
 from typing import Dict, Type
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ReviewerOutput(BaseModel):
+    # extra="forbid" emits additionalProperties: false in the JSON Schema so
+    # guided-decoding backends (outlines/xgrammar) compile a closed grammar
+    # that strictly enforces the required key set.
+    model_config = ConfigDict(extra="forbid")
+
     score: float = Field(ge=0.0, le=1.0)
     strengths: list[str]
     issues: list[str]
@@ -26,6 +31,8 @@ class ReviewerOutput(BaseModel):
 
 
 class CriticOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     score: float = Field(ge=0.0, le=1.0)
     verdict: str
     blockers: list[str]

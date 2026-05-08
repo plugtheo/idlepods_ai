@@ -110,8 +110,8 @@ async def _finalize_state(state: AgentState) -> dict:
     """
     current_iteration = state.get("current_iteration", 1)
     history = state.get("iteration_history", [])
-    # 0.85 fallback is dead in normal flow: routes/run.py always seeds state from settings.convergence_threshold
-    threshold = state.get("convergence_threshold", 0.85)
+    from ..config.settings import settings as _settings
+    threshold = state.get("convergence_threshold", _settings.convergence_threshold)
     best_score = state.get("best_score", 0.0)
     best_output = state.get("best_output", "")
     last_output = state.get("last_output", "")

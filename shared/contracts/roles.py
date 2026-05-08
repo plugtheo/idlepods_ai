@@ -7,7 +7,7 @@ wrapper, etc.) should import from here rather than defining its own copy.
 
 from typing import List
 
-CAPABILITIES: List[str] = [
+TRAINABLE_ROLES: List[str] = [
     "coder",
     "debugger",
     "reviewer",

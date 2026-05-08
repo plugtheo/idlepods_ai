@@ -38,7 +38,11 @@ services:
   # ── Local vLLM servers ───────────────────────────────────────────────────
 
   vllm-primary:
-    image: vllm/vllm-openai:latest
+    # Pinned: Qwen3 architecture added in vLLM v0.8.5 (transformers >=4.51).
+    # Engine-level `--guided-decoding-backend` is honored through 0.8.x/0.9.x
+    # (replaced by `--structured-outputs-config` only in 0.10+). xgrammar
+    # >=0.1.10 is bundled and enforces JSON Schema `required` strictly.
+    image: vllm/vllm-openai:${VLLM_VERSION:-v0.8.5}
     runtime: nvidia
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
@@ -52,6 +56,7 @@ services:
       --host 0.0.0.0
       --enable-auto-tool-choice
       --tool-call-parser hermes
+      --guided-decoding-backend xgrammar
       --gpu-memory-utilization 0.9385
       --max-model-len ${VLLM_MAX_MODEL_LEN:-12288}
       --kv-cache-dtype fp8

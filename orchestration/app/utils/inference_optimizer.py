@@ -1,5 +1,5 @@
 """
-InferenceOptimizer
+AgentHistoryCompressor
 ==================
 Switchable token optimization levers for the multi-agent inference pipeline.
 
@@ -88,7 +88,7 @@ _STRUCTURED_FIELDS: Dict[str, List[str]] = {
 # after service restart without code modifications.
 
 
-class InferenceOptimizer:
+class AgentHistoryCompressor:
     """
     Token optimization levers for agent inference calls.
 
@@ -114,7 +114,7 @@ class InferenceOptimizer:
         self.role_history_filter = role_history_filter
         self.structured_extraction = structured_extraction
         logger.info(
-            "InferenceOptimizer initialised: role_history_filter=%s  structured_extraction=%s",
+            "AgentHistoryCompressor initialised: role_history_filter=%s  structured_extraction=%s",
             role_history_filter,
             structured_extraction,
         )

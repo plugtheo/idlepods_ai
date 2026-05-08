@@ -65,6 +65,11 @@ try:
 except ImportError:
     sys.exit("httpx is required — install it with: pip install httpx")
 
+_REPO_ROOT = str(__import__("pathlib").Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from shared.contracts.quality_filters import BPE_ARTIFACT_RE  # noqa: E402
+
 # ─── ANSI colours ────────────────────────────────────────────────────────────
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
@@ -145,7 +150,6 @@ SCENARIOS = [
 
 # ─── Accuracy checks per role ────────────────────────────────────────────────
 
-BPE_ARTIFACT_RE    = re.compile(r"[\u0120\u010a\u2581]")   # Ġ Ċ ▁
 HALLUCINATION_RE   = re.compile(r"###\s*Instruction:|###\s*Response:|\[RESPONSE\]", re.I)
 JSON_METADATA_RE   = re.compile(r'\{\s*["\'](?:score|session_id|pipeline_metadata|iteration_scores|agent_chain)["\']')
 CODE_BLOCK_RE      = re.compile(r"```[\w\s]*\n[\s\S]+?```", re.S)

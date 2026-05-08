@@ -36,7 +36,9 @@ from pathlib import Path
 from typing import AsyncGenerator, Deque, Dict, Optional
 
 import httpx
+from pydantic import ValidationError
 
+from shared.contracts.evaluator_schemas import EVALUATOR_SCHEMAS
 from shared.contracts.inference import GenerateRequest, GenerateResponse
 from shared.contracts.models import BackendEntry
 from ..config.settings import settings
@@ -119,9 +121,7 @@ async def get_max_model_len(base_url: str, client: httpx.AsyncClient) -> int:
     return int(data[0].get("max_model_len", 0))
 
 
-# How often to re-query /v1/models to discover newly trained adapters
-# NOTE: remote_vllm.py imports this symbol directly; promoting to settings requires updating both.
-ADAPTER_CACHE_TTL_SECONDS = 120
+ADAPTER_CACHE_TTL_SECONDS = settings.adapter_cache_ttl_seconds
 
 
 class _AdapterRegistry:
@@ -336,7 +336,6 @@ class LocalVLLMBackend(InferenceBackend):
                     payload["tool_choice"] = "auto"
                 if request.response_schema:
                     payload["guided_json"] = request.response_schema
-                    payload["guided_decoding_backend"] = "xgrammar"
                 resp = await self._client.post(
                     f"{self._base_url}/v1/chat/completions",
                     json=payload,
@@ -362,7 +361,6 @@ class LocalVLLMBackend(InferenceBackend):
                     payload["tool_choice"] = "auto"
                 if request.response_schema:
                     payload["guided_json"] = request.response_schema
-                    payload["guided_decoding_backend"] = "xgrammar"
                 resp = await self._client.post(
                     f"{self._base_url}/v1/chat/completions",
                     json=payload,
@@ -388,12 +386,35 @@ class LocalVLLMBackend(InferenceBackend):
         parsed: Optional[dict] = None
         if request.response_schema and content:
             try:
-                parsed = json.loads(content)
+                parsed = json.loads(content, strict=False)
             except json.JSONDecodeError as exc:
                 logger.warning(
-                    "LocalVLLM guided_json parse failed for role=%s: %s",
-                    request.role, exc,
+                    "LocalVLLM guided_json parse failed for role=%s: %s | content_head=%r",
+                    request.role, exc, content[:400],
                 )
+            else:
+                if isinstance(parsed, dict):
+                    logger.info(
+                        "LocalVLLM parsed keys role=%s keys=%s",
+                        request.role, sorted(parsed.keys()),
+                    )
+                    schema_cls = EVALUATOR_SCHEMAS.get(request.role)
+                    if schema_cls is not None:
+                        try:
+                            schema_cls.model_validate(parsed)
+                        except ValidationError as exc:
+                            missing = [
+                                ".".join(str(p) for p in err["loc"])
+                                for err in exc.errors() if err["type"] == "missing"
+                            ]
+                            other = [
+                                f"{'.'.join(str(p) for p in err['loc'])}({err['type']})"
+                                for err in exc.errors() if err["type"] != "missing"
+                            ]
+                            logger.warning(
+                                "LocalVLLM schema_validation_failed role=%s missing=%s other=%s parsed=%r",
+                                request.role, missing, other, parsed,
+                            )
 
         return GenerateResponse(
             content=content,

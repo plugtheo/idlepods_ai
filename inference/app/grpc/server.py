@@ -88,6 +88,13 @@ def _build_pydantic_request(request: "inference_pb2.GenerateRequest"):  # type: 
         [ToolDefinition(**t) for t in json.loads(request.tools_json)]
         if request.HasField("tools_json") else None
     )
+    thinking_enabled = (
+        request.thinking_enabled if request.HasField("thinking_enabled") else False
+    )
+    response_schema = (
+        json.loads(request.response_schema_json)
+        if request.HasField("response_schema_json") else None
+    )
 
     return GenerateRequest(
         backend=request.backend,
@@ -99,6 +106,8 @@ def _build_pydantic_request(request: "inference_pb2.GenerateRequest"):  # type: 
         top_p=top_p,
         session_id=request.session_id or None,
         tools=tools,
+        thinking_enabled=thinking_enabled,
+        response_schema=response_schema,
     )
 
 
@@ -120,6 +129,7 @@ if _GRPC_AVAILABLE:
                 resp_kwargs = {
                     "content": response.content,
                     "tokens_generated": response.tokens_generated,
+                    "used_base_fallback": response.used_base_fallback,
                 }
                 if response.tool_calls:
                     resp_kwargs["tool_calls_json"] = json.dumps(response.tool_calls)

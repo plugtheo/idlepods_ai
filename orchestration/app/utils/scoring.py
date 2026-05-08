@@ -23,24 +23,13 @@ import re
 from typing import Any, Dict, List
 
 from shared.contracts.evaluator_schemas import EVALUATOR_SCHEMAS
+from shared.contracts.quality_filters import METADATA_LEAKAGE_RE as _METADATA_LEAKAGE_RE
 
 # Regex to extract "SCORE: 0.82" style annotations from reviewer / critic output.
 _SCORE_RE = re.compile(r"\bSCORE\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
 
 # Structural markers for code presence — used to reward coder/debugger outputs
 _CODE_PRESENT_RE = re.compile(r"```|def |class |import |\bfunction\b|\breturn\b", re.I)
-
-# Orchestration metadata leakage — adapter trained on pipeline experience data
-# outputs score/metrics JSON instead of code.  Detect and heavily penalise.
-_METADATA_LEAKAGE_RE = re.compile(
-    r"'agent_name'\s*:|\"agent_name\"\s*:|'iteration_number'\s*:|\"iteration_number\"\s*:"
-    r"|'quality_score'\s*:|\"quality_score\"\s*:|'execution_time_ms'\s*:|\"execution_time_ms\"\s*:"
-    r"|'session_id'\s*:|\"session_id\"\s*:|'final_output'\s*:|\"final_output\"\s*:"
-    r"|'agent_chain'\s*:|\"agent_chain\"\s*:|'contributions'\s*:|\"contributions\"\s*:"
-    r"|'iteration_scores'\s*:|\"iteration_scores\"\s*:|'final_score'\s*:|\"final_score\"\s*:"
-    r"|'converged'\s*:|\"converged\"\s*:",
-    re.I,
-)
 
 # Negative signals that lower the heuristic score
 _BLOCKER_PATTERNS = [
@@ -80,7 +69,7 @@ def _required_fields_present(text: str, role: str) -> bool:
     schema_cls = EVALUATOR_SCHEMAS.get(role)
     if schema_cls is not None:
         try:
-            obj = json.loads(text)
+            obj = json.loads(text, strict=False)
             if isinstance(obj, dict):
                 schema_cls.model_validate(obj)
                 return True
@@ -97,7 +86,7 @@ def extract_score_from_text(text: str) -> float | None:
     Returns the float if found and in [0, 1], otherwise None.
     """
     try:
-        obj = json.loads(text)
+        obj = json.loads(text, strict=False)
         if isinstance(obj, dict) and "score" in obj:
             value = float(obj["score"])
             if 0.0 <= value <= 1.0:

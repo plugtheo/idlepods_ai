@@ -1,5 +1,10 @@
 """Quick inspection of training datasets to check for contamination."""
 import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from shared.contracts.quality_filters import METADATA_LEAKAGE_RE  # noqa: E402
 
 roles = ["coding", "debugging", "criticism", "planning", "research", "review"]
 
@@ -28,7 +33,7 @@ for role in roles:
     for line in lines:
         d = json.loads(line)
         resp = d.get("response", "")
-        if any(k in resp for k in ['"agent_name"', '"iteration_number"', '"quality_score"', '"execution_time_ms"', "'agent_name'"]):
+        if METADATA_LEAKAGE_RE.search(resp):
             orches_count += 1
         if "Projects\\" in resp or "C:\\Users" in resp:
             path_count += 1
