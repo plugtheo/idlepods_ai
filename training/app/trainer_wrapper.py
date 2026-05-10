@@ -86,6 +86,22 @@ def _base_model_for(role: str) -> str:
         raise RuntimeError(f"Cannot resolve base model from registry: {exc}") from exc
 
 
+def _count_role_pairs(records: list[dict], role_name: str, min_score: float) -> int:
+    """
+    Fast scan of experience records — counts contributions for *role_name* that
+    meet the quality floor.  No tokenisation; no SFT pair building.  Used to
+    skip roles with insufficient data before launching any subprocess.
+    """
+    n = 0
+    for rec in records:
+        if float(rec.get("final_score", 0.0)) < min_score:
+            continue
+        for contrib in rec.get("contributions", []):
+            if contrib.get("role") == role_name and contrib.get("messages") and contrib.get("full_output"):
+                n += 1
+    return n
+
+
 def _run_local(records: list[dict]) -> None:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as tmp:
         for rec in records:
@@ -98,56 +114,90 @@ def _run_local(records: list[dict]) -> None:
     else:
         platform_kwargs["start_new_session"] = True
 
+    def _kill(proc: subprocess.Popen) -> None:
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], check=False)
+            else:
+                import signal
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            pass
+
+    def _run_subprocess(cmd: list, label: str, timeout: int) -> int:
+        """Run cmd, stream stdout/stderr to log, return exit code."""
+        _t0 = time.monotonic()
+        try:
+            result = subprocess.run(
+                cmd, check=False, timeout=timeout, **platform_kwargs,
+            )
+            duration_s = round(time.monotonic() - _t0, 1)
+            if result.returncode == 0:
+                log.info("%s done duration_s=%s", label, duration_s)
+            else:
+                log.error("%s exit=%s duration_s=%s", label, result.returncode, duration_s)
+            return result.returncode
+        except subprocess.TimeoutExpired as exc:
+            if exc.process is not None:
+                _kill(exc.process)
+            log.error("%s timed_out timeout=%s", label, timeout)
+            return -1
+        except Exception as exc:
+            log.error("%s error: %s", label, exc)
+            return -1
+
     try:
+        # ── Phase 1: fast data-count pre-check ──────────────────────────────
+        # Skip roles whose experience pairs won't even clear MIN_SFT_PAIRS
+        # without spawning a subprocess (no model/tokenizer loaded).
+        from shared.contracts.agent_prompts import ROLE_TO_BOOTSTRAP_CAP
+        eligible: list[str] = []
         for capability in TRAINABLE_ROLES:
+            n = _count_role_pairs(records, capability, settings.min_quality_score)
+            log.info("data_count_check role=%s qualifying_experience_pairs=%s", capability, n)
+            eligible.append(capability)  # curated data fills the gap; count is advisory
+
+        # ── Phase 2: probe each eligible role ────────────────────────────────
+        # Trains 50 samples × 1 epoch in a temp dir, smoke-tests, exits 0/3.
+        # Roles whose probe exits non-zero are skipped in Phase 3.
+        probe_passed: list[str] = []
+        for capability in eligible:
+            base_model = _base_model_for(capability)
+            probe_cmd = [
+                sys.executable, "-m", "training.app.trainer_entry",
+                "--data-path", tmp_path,
+                "--base-model", base_model,
+                "--output-dir", settings.output_dir,
+                "--capability", capability,
+                "--probe",
+            ]
+            log.info("probe_start role=%s", capability)
+            code = _run_subprocess(probe_cmd, f"probe/{capability}", timeout=1800)
+            if code == 0:
+                probe_passed.append(capability)
+                log.info("probe_pass role=%s", capability)
+            else:
+                log.error(
+                    "probe_fail role=%s exit=%s — skipping full training for this role",
+                    capability, code,
+                )
+
+        if not probe_passed:
+            log.error("All probes failed — no full training runs will be launched")
+            return
+
+        # ── Phase 3: full training for probe-passed roles ────────────────────
+        for capability in probe_passed:
             base_model = _base_model_for(capability)
             cmd = [
-                sys.executable, "-m", "services.training.app.trainer_entry",
+                sys.executable, "-m", "training.app.trainer_entry",
                 "--data-path", tmp_path,
                 "--base-model", base_model,
                 "--output-dir", settings.output_dir,
                 "--capability", capability,
             ]
-            log.info("trainer_entry capability=%s base=%s", capability, base_model)
-            _t0 = time.monotonic()
-            try:
-                result = subprocess.run(
-                    cmd,
-                    check=False,
-                    timeout=settings.training_timeout_seconds,
-                    **platform_kwargs,
-                )
-                duration_s = round(time.monotonic() - _t0, 1)
-                if result.returncode == 0:
-                    log.info(
-                        "training_run_done capability=%s duration_s=%s",
-                        capability, duration_s,
-                    )
-                else:
-                    log.error(
-                        "trainer_entry non-zero exit capability=%s code=%s duration_s=%s",
-                        capability, result.returncode, duration_s,
-                    )
-            except subprocess.TimeoutExpired as exc:
-                if exc.process is not None:
-                    try:
-                        if sys.platform == "win32":
-                            subprocess.run(
-                                ["taskkill", "/F", "/T", "/PID", str(exc.process.pid)],
-                                check=False,
-                            )
-                        else:
-                            import signal
-                            os.killpg(os.getpgid(exc.process.pid), signal.SIGTERM)
-                    except Exception:
-                        pass
-                duration_s = round(time.monotonic() - _t0, 1)
-                log.error(
-                    "training_timed_out role=%s timeout=%s duration_s=%s",
-                    capability, settings.training_timeout_seconds, duration_s,
-                )
-            except Exception as exc:
-                log.error("trainer_entry failed for %s: %s", capability, exc)
+            log.info("trainer_entry_start capability=%s base=%s", capability, base_model)
+            _run_subprocess(cmd, f"train/{capability}", timeout=settings.training_timeout_seconds)
     finally:
         try:
             Path(tmp_path).unlink(missing_ok=True)

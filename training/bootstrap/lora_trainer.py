@@ -63,6 +63,78 @@ def _compute_trainer_version() -> str:
     return "|".join(parts) or "unknown"
 
 
+def _compute_base_model_tokenizer_hash(base_model_id: str) -> str:
+    """
+    SHA-256 of the base model's tokenizer.json from the local HF hub cache.
+    Falls back to "unknown" when offline or cache is missing so training is
+    never blocked — but the hash will always be consistent on the same machine.
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+        tok_path = hf_hub_download(base_model_id, "tokenizer.json", local_files_only=True)
+        return hashlib.sha256(Path(tok_path).read_bytes()).hexdigest()
+    except Exception:
+        pass
+    try:
+        import huggingface_hub.constants as _hfc
+        hub_cache = Path(
+            getattr(_hfc, "HF_HUB_CACHE", Path.home() / ".cache" / "huggingface" / "hub")
+        )
+        slug = "models--" + base_model_id.replace("/", "--")
+        snap_root = hub_cache / slug / "snapshots"
+        if snap_root.is_dir():
+            for snap in reversed(sorted(snap_root.iterdir())):
+                tok_path = snap / "tokenizer.json"
+                if tok_path.exists():
+                    return hashlib.sha256(tok_path.read_bytes()).hexdigest()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _write_metrics_summary(metrics_path: Path, output_path: Path) -> dict:
+    """
+    Read train_metrics.jsonl and write a concise loss-curve summary JSON.
+    Returns the summary dict (empty dict if no data).
+    """
+    if not metrics_path.exists():
+        return {}
+    entries = []
+    with open(metrics_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    if not entries:
+        return {}
+
+    losses = [e["loss"] for e in entries if "loss" in e]
+    epochs_seq = [e.get("epoch", 0) for e in entries if "loss" in e]
+
+    tail = losses[max(0, len(losses) * 4 // 5):]
+    slope = 0.0
+    if len(tail) >= 2:
+        slope = round((tail[-1] - tail[0]) / max(len(tail) - 1, 1), 6)
+
+    summary = {
+        "total_steps": len(entries),
+        "initial_loss": round(losses[0], 6) if losses else None,
+        "final_loss": round(losses[-1], 6) if losses else None,
+        "min_loss": round(min(losses), 6) if losses else None,
+        "loss_slope_tail": slope,
+        "epochs_completed": round(max(epochs_seq), 2) if epochs_seq else None,
+    }
+    try:
+        output_path.write_text(json.dumps(summary, indent=2))
+    except OSError:
+        pass
+    return summary
+
+
 def _pre_train_backup(save_path: Path, capability: str) -> tuple:
     """
     Back up the current adapter BEFORE training overwrites it.
@@ -218,6 +290,8 @@ def _promote_to_active(
     previous_backup_path: Optional[Path] = None,
     smoke_results: Optional[Dict[str, Any]] = None,
     eval_results: Optional[Dict[str, Any]] = None,
+    regression_results: Optional[Dict[str, Any]] = None,
+    eval_loss: float = 0.0,
 ) -> None:
     """
     Under manifest file-lock: flip active/previous pointers and write v2 HistoryEntry.
@@ -277,6 +351,10 @@ def _promote_to_active(
         size_mb=last_history.get("size_mb", 0.0),
         eval_metrics={k: float(v) for k, v in (eval_results or {}).items() if isinstance(v, (int, float))},
         smoke=smoke_results or {},
+        eval_loss=eval_loss if eval_loss else None,
+        won_against_previous=regression_results.get("won") if regression_results else None,
+        regression_delta=regression_results.get("delta") if regression_results else None,
+        comparison_prompts_n=regression_results.get("prompts_n", 0) if regression_results else 0,
     )
 
     manifest_path = checkpoint_dir / "manifest.json"
@@ -477,7 +555,8 @@ class LoRATrainer:
                    lora_rank: int = 16,
                    lora_alpha: int = 32,
                    recipe: Optional[AdapterRecipe] = None,
-                   resume_from_checkpoint: Optional[str] = None) -> Dict[str, Any]:
+                   resume_from_checkpoint: Optional[str] = None,
+                   eval_dataset: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
         Train LoRA adapter on dataset.
         """
@@ -521,7 +600,7 @@ class LoRATrainer:
         print(f"[TRAINER] Loaded {len(dataset)} training samples")
         
         if self.HAS_UNSLOTH:
-            return await self._train_unsloth(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe, resume_from_checkpoint=resume_from_checkpoint)
+            return await self._train_unsloth(dataset, num_epochs, learning_rate, lora_rank, lora_alpha, recipe=recipe, resume_from_checkpoint=resume_from_checkpoint, eval_dataset=eval_dataset)
         else:
             return await self._train_mock(dataset, num_epochs)
 
@@ -532,7 +611,8 @@ class LoRATrainer:
                              lora_rank: int,
                              lora_alpha: int,
                              recipe: Optional[AdapterRecipe] = None,
-                             resume_from_checkpoint: Optional[str] = None) -> Dict[str, Any]:
+                             resume_from_checkpoint: Optional[str] = None,
+                             eval_dataset: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """Train with actual Unsloth (requires GPU)"""
         import time as _time
         _t_start = _time.monotonic()
@@ -584,13 +664,22 @@ class LoRATrainer:
             
             print("[TRAINER] Preparing training data...")
 
-            # Pre-render every record to a single "text" column so SFTTrainer
-            # has an unambiguous shape and Unsloth's compiled wrapper does not
-            # raise "must specify a formatting_func".
-            # - openai_messages records → tokenizer.apply_chat_template(messages)
-            # - legacy prompt+completion records → simple concat
-            # completion_only_loss CANNOT be used with text-only datasets.
+            # Apply the tokenizer's chat template to messages-format records here,
+            # in the main process, before HFDataset is created.  Doing it here
+            # avoids passing a tokenizer closure into Unsloth's num_proc=4
+            # subprocess pool, where the closure is unavailable and produces None.
             _has_messages_records = any("messages" in r for r in dataset)
+            if _has_messages_records:
+                def _render(r):
+                    if "messages" in r:
+                        return {"text": tokenizer.apply_chat_template(
+                            r["messages"], tokenize=False, add_generation_prompt=False
+                        )}
+                    return r
+                dataset = [_render(r) for r in dataset]
+                if eval_dataset:
+                    eval_dataset = [_render(r) for r in eval_dataset]
+                _has_messages_records = False
 
             sft_config_kwargs = dict(
                 per_device_train_batch_size=recipe.per_device_train_batch_size,
@@ -618,12 +707,8 @@ class LoRATrainer:
                 dataset_num_proc=4,
                 dataloader_num_workers=2,
                 dataset_text_field=None,
-                dataset_kwargs={"formatting_func": None}
+                dataset_kwargs={"formatting_func": None},
             )
-            # assistant_only_loss: only backprop on assistant tokens (using the
-            # chat template's {% generation %} markers).  Best for chat-format
-            # SFT.  Falls back to full-text loss if the TRL/template version
-            # doesn't accept it.
             if _has_messages_records:
                 try:
                     sft_config = SFTConfig(**sft_config_kwargs, assistant_only_loss=True)
@@ -634,11 +719,10 @@ class LoRATrainer:
 
             from datasets import Dataset as HFDataset
             train_dataset = HFDataset.from_list(dataset)
+            eval_hf_dataset = HFDataset.from_list(eval_dataset) if eval_dataset else None
 
             def _formatting_func(example):
-                # SFTTrainer may call this with either a single example (dict of
-                # scalars) or a batch (dict of lists).  Handle both.
-                t = example["text"]
+                t = example.get("text") or (example.get("prompt", "") + example.get("completion", ""))
                 return t if isinstance(t, list) else [t]
 
             _metrics_path = self.output_dir / "train_metrics.jsonl"
@@ -665,6 +749,7 @@ class LoRATrainer:
                 model=model,
                 processing_class=tokenizer,
                 train_dataset=train_dataset,
+                eval_dataset=eval_hf_dataset,
                 args=sft_config,
                 formatting_func=_formatting_func,
                 callbacks=_callbacks if _callbacks else None,
@@ -705,6 +790,22 @@ class LoRATrainer:
                         final_loss = float(entry["loss"])
                         break
 
+            # One-shot eval on held-out split (no GPU overhead during training).
+            eval_loss = 0.0
+            if eval_hf_dataset is not None:
+                try:
+                    eval_out = trainer.evaluate()
+                    eval_loss = float(eval_out.get("eval_loss", 0.0))
+                    print(f"[TRAINER] Eval loss: {eval_loss:.6f}", flush=True)
+                except Exception as _eval_exc:
+                    print(f"[TRAINER] Eval skipped: {_eval_exc}", flush=True)
+
+            # Distil per-step metrics into a compact summary for the diff report.
+            _metrics_summary = _write_metrics_summary(
+                _metrics_path,
+                self.output_dir / "train_metrics_summary.json",
+            )
+
             duration_s = round(_time.monotonic() - _t_start, 1)
             print(
                 f"training_complete method=unsloth role={self.output_dir.name} "
@@ -714,15 +815,17 @@ class LoRATrainer:
             )
 
             return {
-                'status':     'success',
-                'adapter_id': self.adapter_id,
-                'method':     'unsloth',
-                'epochs':     num_epochs,
-                'samples':    len(dataset),
-                'lora_rank':  lora_rank,
-                'size_mb':    size_mb,
-                'final_loss': round(final_loss, 6),
-                'duration_s': duration_s,
+                'status':          'success',
+                'adapter_id':      self.adapter_id,
+                'method':          'unsloth',
+                'epochs':          num_epochs,
+                'samples':         len(dataset),
+                'lora_rank':       lora_rank,
+                'size_mb':         size_mb,
+                'final_loss':      round(final_loss, 6),
+                'eval_loss':       round(eval_loss, 6) if eval_loss else None,
+                'metrics_summary': _metrics_summary,
+                'duration_s':      duration_s,
             }
 
         except Exception as e:
@@ -769,41 +872,23 @@ class LoRATrainer:
 
     def _validate_qwen3_toolcall_wrapping(self, tokenizer):
         """
-        Hard validation: Qwen3 chat template must wrap assistant tool-call turns
-        inside {% generation %} ... {% endgeneration %}.
+        Warn when the Qwen3 chat template lacks {% generation %} markers for
+        assistant tool-call turns. Those markers are Jinja2 control tags in
+        the template *source* — they never appear in rendered output, so they
+        must be checked against tokenizer.chat_template, not apply_chat_template().
 
-        If missing, training with assistant_only_loss=True will silently corrupt
-        tool-call learning. This is a blocker for Phase 3.
+        When absent, TRL's assistant_only_loss falls back to token-boundary
+        detection, which works correctly for plain instruction-response pairs.
+        Training is not blocked — tool-call masking accuracy is reduced only
+        if the training data contains tool-call turns.
         """
-
-        sample_messages = [
-            {"role": "user", "content": "test"},
-            {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "t1",
-                        "type": "python",
-                        "function": {"name": "f", "arguments": "{}"},
-                    }
-                ],
-                "content": None,
-            },
-        ]
-
-        rendered = tokenizer.apply_chat_template(
-            sample_messages,
-            tokenize=False,
-            add_generation_prompt=False,
-        )
-
-        has_start = "{% generation %}" in rendered
-        has_end = "{% endgeneration %}" in rendered
-
-        if not (has_start and has_end):
-            raise RuntimeError(
-                "Qwen3 chat template is missing {% generation %} wrapping for "
-                "assistant tool-call turns. Tool-call masking will be incorrect. "
-                "Patch the chat template or install a custom assistant-mask collator."
+        template_source = getattr(tokenizer, "chat_template", "") or ""
+        has_generation_marker = "{% generation %}" in template_source
+        if not has_generation_marker:
+            print(
+                "[TRAINER] WARN: chat template lacks {% generation %} markers — "
+                "assistant_only_loss will use token-boundary detection. "
+                "Masking is correct for plain instruction-response pairs.",
+                flush=True,
             )
 

@@ -9,6 +9,8 @@
   Any extra arguments are passed through to train_gpu_simple.py.
 
 .EXAMPLE
+  .\run_bootstrap.ps1 --probe                         # preflight: 50 samples x 1 epoch - exit 0/3
+  .\run_bootstrap.ps1 --probe --capability coding     # probe a specific capability
   .\run_bootstrap.ps1                                 # train all 6 capabilities
   .\run_bootstrap.ps1 --capability coding             # single capability
   .\run_bootstrap.ps1 --capability coding --validate  # train + smoke test
@@ -64,9 +66,14 @@ if (Test-Path "$ProjectRoot\recipes.yaml") {
 
 $RunArgs += $Image
 $RunArgs += "python", "/app/training/bootstrap/train_gpu_simple.py"
-$RunArgs += $args   # pass-through any CLI flags (--capability, --validate, etc.)
+$RunArgs += $args   # pass-through any CLI flags (--capability, --validate, --probe, etc.)
 
+$IsProbe = $args -contains "--probe"
 Write-Host ""
-Write-Host "==> Running bootstrap training (GPU)..."
+if ($IsProbe) {
+    Write-Host "==> Running preflight probe (50 samples x 1 epoch - exit 0=pass, 3=fail)..."
+} else {
+    Write-Host "==> Running bootstrap training (GPU)..."
+}
 docker @RunArgs
 exit $LASTEXITCODE

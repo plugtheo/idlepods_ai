@@ -42,7 +42,7 @@ if str(_REPO_ROOT) not in sys.path:
 # lora_trainer.py and generate_data.py live in the same directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from generate_data import generate_datasets, TARGET_DIR as DATA_DIR
-from lora_trainer import LoRATrainer, _pre_train_backup, _post_train_version
+from lora_trainer import LoRATrainer, _pre_train_backup, _post_train_version, _post_train_stage, _promote_to_active, _mark_failed
 from shared.contracts.agent_prompts import AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE
 from shared.contracts.training import lookup_recipe
 from shared.contracts.experience import AgentContribution
@@ -209,6 +209,7 @@ async def train_capability(
     capability: str,
     checkpoint_dir: Path,
     fresh: bool = False,
+    validate: bool = False,
 ) -> Dict[str, Any]:
     """
     Prepare the dataset JSONL, delegate all GPU training to LoRATrainer
@@ -285,12 +286,12 @@ async def train_capability(
     finally:
         dataset_path.unlink(missing_ok=True)
 
-    # ── Post-training: version bump, weight validation, manifest update ───────
-    final_loss  = result.get("final_loss", 0.0)
-    note        = "incremental" if has_existing else "fresh"
-    new_version = _post_train_version(
+    # ── Post-training: stage → validate (if --validate) → promote / fail ─────
+    final_loss = result.get("final_loss", 0.0)
+    note       = "incremental" if has_existing else "fresh"
+
+    new_meta = _post_train_stage(
         save_path=save_path,
-        checkpoint_dir=checkpoint_dir,
         capability=capability,
         old_version=old_version,
         base_model_id=model_id,
@@ -302,6 +303,36 @@ async def train_capability(
         final_loss=final_loss,
         note=note,
     )
+    new_version = new_meta["version"]
+
+    # The validate flag is passed down from the caller (main → train_capability).
+    # If validation runs and fails, mark failed instead of promoting.
+    validation_status = "SKIP"
+    if validate:
+        val = await validate_adapter(capability, checkpoint_dir)
+        validation_status = val["status"]
+        if validation_status == "FAIL":
+            _mark_failed(
+                checkpoint_dir, capability, new_version,
+                smoke_results={"pass": False, "reason": val.get("detail", "validate_adapter failed")},
+            )
+            size_mb = result.get("size_mb", 0.0)
+            print(f"  [FAIL] v{new_version}  validate_adapter FAILED — adapter NOT promoted  ({size_mb:.1f} MB)")
+            return {
+                "capability":   capability,
+                "adapter_path": str(save_path),
+                "version":      new_version,
+                "samples":      len(pairs),
+                "epochs":       recipe.num_epochs,
+                "final_loss":   final_loss,
+                "status":       "FAILED",
+                "validation":   "FAIL",
+            }
+
+    old_slug = old_version.replace(".", "_")
+    guessed_backup = checkpoint_dir / f"{capability}_lora_v{old_slug}"
+    previous_backup = guessed_backup if guessed_backup.exists() else None
+    _promote_to_active(checkpoint_dir, capability, new_meta, previous_backup_path=previous_backup)
 
     size_mb = result.get("size_mb", 0.0)
     print(f"  [OK] v{new_version}  ({size_mb:.1f} MB)  → {save_path}")
@@ -310,9 +341,10 @@ async def train_capability(
         "adapter_path": str(save_path),
         "version":      new_version,
         "samples":      len(pairs),
-        "epochs":       NUM_EPOCHS,
+        "epochs":       recipe.num_epochs,
         "final_loss":   final_loss,
         "status":       "SUCCESS",
+        "validation":   validation_status,
     }
 
 
@@ -398,6 +430,12 @@ async def main():
                         help="After each adapter is trained, spawn validate_adapter.py to "
                              "load the adapter, run a capability-specific prompt, and verify "
                              "output quality. Catches corrupted saves before they reach production.")
+    parser.add_argument("--probe", action="store_true",
+                        help="Preflight check: train 50 samples × 1 epoch for the first "
+                             "capability in a temp dir, validate weight files exist, run "
+                             "validate_adapter.py on the probe weights, then exit 0 (pass) "
+                             "or 3 (fail). Run before a long bootstrap to catch broken "
+                             "recipes, OOM conditions, or data issues early.")
     args = parser.parse_args()
 
     # --capability (singular) is a shorthand for --capabilities with one value.
@@ -461,6 +499,91 @@ async def main():
     else:
         print("\n  [--skip-data-gen] Using existing JSONL files.")
 
+    # ── Step 1b: preflight probe ─────────────────────────────────────────────
+    # Trains 50 samples × 1 epoch in an isolated temp dir using the FIRST
+    # capability, validates weight files exist, then runs validate_adapter.py
+    # on the probe adapter.  Exits 0 on pass, 3 on fail.
+    # Use this before committing a multi-hour full bootstrap run.
+    if args.probe:
+        probe_cap = capabilities[0]
+        probe_recipe = _resolve_recipe(probe_cap)
+        probe_model_id, probe_sys_prompt = AGENT_SPECS[probe_cap]
+
+        print("\n" + "="*70)
+        print(f"  PREFLIGHT PROBE  (capability={probe_cap}, 50 samples × 1 epoch)")
+        print("="*70)
+
+        probe_pairs = load_sft_pairs(probe_cap, probe_sys_prompt, probe_recipe)[:50]
+        if not probe_pairs:
+            print(f"  [PROBE] FAIL: no training pairs found for '{probe_cap}'")
+            sys.exit(3)
+        print(f"  [PROBE] {len(probe_pairs)} samples loaded")
+
+        import time as _ptime
+        _pt0 = _ptime.monotonic()
+
+        with tempfile.TemporaryDirectory(prefix="bootstrap_probe_") as _tdir:
+            _probe_save = Path(_tdir) / f"{probe_cap}_lora"
+            _probe_save.mkdir(parents=True, exist_ok=True)
+
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
+            ) as _tmp:
+                for p in probe_pairs:
+                    _tmp.write(json.dumps(p) + "\n")
+                _probe_dataset = Path(_tmp.name)
+
+            try:
+                _probe_trainer = LoRATrainer(
+                    base_model=probe_model_id, output_dir=str(_probe_save)
+                )
+                _probe_result = await _probe_trainer.train(
+                    dataset_path=_probe_dataset,
+                    num_epochs=1,
+                    learning_rate=probe_recipe.learning_rate,
+                    lora_rank=probe_recipe.r,
+                    lora_alpha=probe_recipe.alpha,
+                    recipe=probe_recipe,
+                )
+            except Exception as exc:
+                print(f"  [PROBE] FAIL: training error: {exc}")
+                sys.exit(3)
+            finally:
+                _probe_dataset.unlink(missing_ok=True)
+
+            _PROBE_WEIGHT_FILES = ("adapter_model.safetensors", "adapter_model.bin")
+            _pw = next(
+                (_probe_save / f for f in _PROBE_WEIGHT_FILES if (_probe_save / f).exists()),
+                None,
+            )
+            if _pw is None or _pw.stat().st_size == 0:
+                print("  [PROBE] FAIL: no adapter weight file written after probe training")
+                sys.exit(3)
+            print(
+                f"  [PROBE] Weights OK: {_pw.name}  ({_pw.stat().st_size / 1e6:.1f} MB)"
+                f"  loss={_probe_result.get('final_loss', 'n/a')}"
+            )
+
+            val = await validate_adapter(probe_cap, Path(_tdir))
+            _probe_dur = round(_ptime.monotonic() - _pt0, 1)
+            print(f"  [PROBE] validate_adapter: {val['status']}"
+                  + (f"  ({val.get('detail', '')})" if val.get("detail") else ""))
+
+            if val["status"] == "FAIL":
+                print(
+                    f"  [PROBE] FAIL — environment not ready for full bootstrap "
+                    f"(duration {_probe_dur}s).  Fix the issue then re-run."
+                )
+                sys.exit(3)
+            # Temp dir cleaned up on context exit.
+
+        print(
+            f"  [PROBE] PASS ({_probe_dur}s) — GPU, recipe, and data pipeline verified.\n"
+            "  Re-run without --probe to start full training."
+        )
+        print("="*70 + "\n")
+        sys.exit(0)
+
     # ── Step 2: training ─────────────────────────────────────────────────────
     print("\n" + "="*70)
     print("  STEP 2: LORA TRAINING")
@@ -476,14 +599,8 @@ async def main():
                 capability=cap,
                 checkpoint_dir=checkpoint_dir,
                 fresh=(cap in fresh_caps),
+                validate=args.validate,
             )
-            # ── Post-train validation ─────────────────────────────────────────
-            if args.validate:
-                val = await validate_adapter(cap, checkpoint_dir)
-                result["validation"] = val["status"]
-                if val["status"] == "FAIL":
-                    detail = val.get("detail", "")
-                    print(f"  [VALIDATE] FAIL for '{cap}': {detail}")
             all_results.append(result)
         except Exception as exc:
             import traceback

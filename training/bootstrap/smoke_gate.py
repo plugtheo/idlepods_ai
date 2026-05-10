@@ -184,3 +184,144 @@ def run_smoke(
             return {"pass": False, "reason": f"shape_fail role={role}", "response_len": len(text)}
 
         return {"pass": True, "reason": "ok", "response_len": len(text)}
+
+
+# ---------------------------------------------------------------------------
+# Regression comparison — new vs previous active adapter
+# ---------------------------------------------------------------------------
+
+REGRESSION_TOLERANCE: float = 0.02  # allow up to 2 % drop before blocking promotion
+
+
+def _score_response(role: str, text: str) -> float:
+    """Heuristic 0.0–1.0 quality score for a single smoke response."""
+    if not text or not text.strip():
+        return 0.0
+    if _has_bpe_artifacts(text):
+        return 0.1
+    if not _is_clean_output(text):
+        return 0.1
+    score = 0.5
+    if _shape_ok(role, text):
+        score += 0.3
+    ln = len(text.strip())
+    if 80 <= ln <= 600:
+        score += 0.2
+    elif ln > 600:
+        score += 0.1
+    return min(score, 1.0)
+
+
+def run_regression_comparison(
+    inference_url: str,
+    role: str,
+    previous_name: Optional[str],
+    new_name: str,
+    recipe: Optional[AdapterRecipe] = None,
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    """
+    Run the canonical smoke prompts against both the previous active adapter and
+    the new candidate and return a comparison dict for HistoryEntry / diff report.
+
+    Cold-start (previous_name=None): skips previous query; won=True, delta=None.
+    Any query failure returns score=0.0 for that adapter — the delta is still
+    computed so a persistent inference error shows as a large regression.
+    """
+    user_prompt = _SMOKE_PROMPTS.get(role, "Say hello.")
+    sys_prompt = AGENT_PROMPTS.get(role, "You are a helpful AI assistant.")
+    use_tool_path = recipe is not None and recipe.tool_call_style != "none"
+
+    def _query(adapter_name: str) -> tuple:
+        if use_tool_path:
+            payload = {
+                "model": adapter_name,
+                "messages": [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "tools": _MINIMAL_TOOL_SCHEMAS,
+                "tool_choice": "auto",
+            }
+            try:
+                r = httpx.post(
+                    f"{inference_url}/v1/chat/completions",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=timeout,
+                )
+                r.raise_for_status()
+                rj = r.json()
+                ok = _tool_call_shape_ok(rj)
+                raw = str(rj.get("choices", [{}])[0].get("message", ""))
+                return (0.9 if ok else 0.2), raw
+            except Exception as exc:
+                return 0.0, f"error:{exc}"
+        else:
+            payload = {
+                "model": adapter_name,
+                "prompt": (
+                    f"[SYSTEM]\n{sys_prompt}\n\n"
+                    f"[USER]\n{user_prompt}\n\n"
+                    f"[RESPONSE]\n"
+                ),
+                "max_tokens": 128,
+                "temperature": 0.0,
+            }
+            try:
+                r = httpx.post(
+                    f"{inference_url}/v1/completions",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=timeout,
+                )
+                r.raise_for_status()
+                text = r.json()["choices"][0]["text"]
+                return _score_response(role, text), text
+            except Exception as exc:
+                return 0.0, f"error:{exc}"
+
+    new_score, new_text = _query(new_name)
+
+    if not previous_name:
+        logger.info(
+            "regression_comparison role=%s cold_start=True new_score=%.3f",
+            role, new_score,
+        )
+        return {
+            "previous_score": None,
+            "new_score": round(new_score, 4),
+            "delta": None,
+            "won": True,
+            "prompts_n": 1,
+            "details": [{"prompt": user_prompt, "new_score": round(new_score, 4)}],
+            "cold_start": True,
+        }
+
+    prev_score, prev_text = _query(previous_name)
+    delta = round(new_score - prev_score, 4)
+    won = delta >= -REGRESSION_TOLERANCE
+
+    logger.info(
+        "regression_comparison role=%s prev_score=%.3f new_score=%.3f delta=%+.4f won=%s",
+        role, prev_score, new_score, delta, won,
+    )
+    return {
+        "previous_score": round(prev_score, 4),
+        "new_score": round(new_score, 4),
+        "delta": delta,
+        "won": won,
+        "prompts_n": 1,
+        "details": [
+            {
+                "prompt": user_prompt,
+                "prev_score": round(prev_score, 4),
+                "prev_len": len(prev_text),
+                "new_score": round(new_score, 4),
+                "new_len": len(new_text),
+            }
+        ],
+        "cold_start": False,
+    }

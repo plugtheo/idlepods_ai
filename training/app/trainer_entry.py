@@ -39,6 +39,8 @@ JSONL schema (ExperienceEvent, written by orchestration/app/routes/run.py):
 
 Each contribution that has both `messages` and `full_output` becomes one SFT pair.
 Falls back to (prompt → final_output) for older records without per-contribution messages.
+
+TODO: Need to use synthesized data + experience data for retraining and not curated examples (or maybe partially curated).  The current curated datasets are just for bootstrapping and are not maintained as the single source of truth, so they may become stale and diverge from the live experience distribution.  Once we have the synthesis pipeline in place, we can write high-quality synthetic examples that mirror the live data distribution, and those will be more effective for retraining than the static curated datasets.
 """
 
 from __future__ import annotations
@@ -46,8 +48,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -73,8 +77,10 @@ from training.bootstrap.lora_trainer import (
     _post_train_stage,
     _promote_to_active,
     _mark_failed,
+    _compute_base_model_tokenizer_hash,
+    _write_metrics_summary,
 )
-from training.bootstrap.smoke_gate import run_smoke
+from training.bootstrap.smoke_gate import run_smoke, run_regression_comparison
 from shared.contracts.training import AdapterRecipe, lookup_recipe
 
 # System prompts — imported from the single source of truth so that training and
@@ -384,6 +390,94 @@ def _save_sft_pairs(pairs: List[Dict[str, str]], output_dir: Path) -> Path:
     return out_path
 
 
+def _resolve_registry_default() -> str:
+    try:
+        from shared.contracts.models import load_registry
+        return load_registry().default_backend
+    except Exception:
+        return "primary"
+
+
+def _write_adapter_diff_report(
+    *,
+    checkpoint_dir: Path,
+    adapter_name: str,
+    cap_label: str,
+    prev_version: str,
+    new_meta: Dict[str, Any],
+    promoted: bool,
+    training_result: Dict[str, Any],
+    smoke: Dict[str, Any],
+    regression: Dict[str, Any],
+    n_train_samples: int,
+    n_eval_samples: int,
+    training_duration_s: float,
+) -> Path:
+    """
+    Write a human-readable JSON comparison report to:
+      <checkpoint_dir>/<adapter_name>/reports/adapter_diff_<timestamp>.json
+
+    Captures all metrics needed to audit a promotion decision:
+    version delta, loss trajectory, eval loss, smoke result, regression delta.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    new_version = new_meta.get("version", "unknown")
+
+    # Extract prev version's final_loss from preserved history in new_meta.
+    prev_final_loss: Optional[float] = None
+    for h in new_meta.get("history", []):
+        if h.get("version") == prev_version:
+            prev_final_loss = h.get("final_loss")
+            break
+
+    metrics_summary: Dict[str, Any] = training_result.get("metrics_summary") or {}
+
+    report = {
+        "generated_at": now.isoformat(),
+        "role": cap_label,
+        "adapter_name": adapter_name,
+        # ── Version delta ────────────────────────────────────────────────────
+        "prev_version": prev_version,
+        "new_version": new_version,
+        "promoted": promoted,
+        # ── Training loss ────────────────────────────────────────────────────
+        "prev_final_loss": prev_final_loss,
+        "new_final_loss": training_result.get("final_loss"),
+        "loss_delta": (
+            round(training_result.get("final_loss", 0.0) - (prev_final_loss or 0.0), 6)
+            if prev_final_loss is not None else None
+        ),
+        # ── Eval loss (held-out 5 %) ─────────────────────────────────────────
+        "new_eval_loss": training_result.get("eval_loss"),
+        # ── Training metadata ────────────────────────────────────────────────
+        "n_train_samples": n_train_samples,
+        "n_eval_samples": n_eval_samples,
+        "training_duration_s": training_duration_s,
+        "metrics_summary": metrics_summary,
+        # ── Smoke gate ───────────────────────────────────────────────────────
+        "smoke": smoke,
+        # ── Regression comparison ────────────────────────────────────────────
+        "regression": regression,
+        # ── Decision explanation ─────────────────────────────────────────────
+        "decision": (
+            "promoted" if promoted
+            else ("regression_blocked" if not regression.get("won", True) else "smoke_failed")
+        ),
+    }
+
+    reports_dir = checkpoint_dir / adapter_name / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    ts = now.strftime("%Y%m%d_%H%M%S")
+    out_path = reports_dir / f"adapter_diff_{ts}.json"
+    try:
+        out_path.write_text(json.dumps(report, indent=2, default=str))
+        print(f"[trainer-entry] Diff report: {out_path}", flush=True)
+    except OSError as exc:
+        print(f"[trainer-entry] Could not write diff report: {exc}", flush=True)
+    return out_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run LoRA training from experience JSONL")
     parser.add_argument("--data-path",   required=True,  help="Path to ExperienceEvent JSONL")
@@ -473,6 +567,10 @@ def main() -> None:
         flush=True,
     )
 
+    # Resolve backend key and inference URL early — both probe and full training need them.
+    backend_key = _resolve_registry_default()
+    inference_url = os.environ.get("TRAINING__INFERENCE_URL", "http://inference:8010")
+
     # Resolve the adapter directory name.
     # _CAPABILITY_TO_ADAPTER keys are role names ("coder" → "coding_lora").
     adapter_name = _CAPABILITY_TO_ADAPTER.get(role_name, f"{cap_label}_lora")
@@ -530,13 +628,6 @@ def main() -> None:
         )
         sys.exit(0)
 
-    if args.probe:
-        pairs = pairs[:50]
-        print(
-            f"[trainer-entry] --probe mode: capped to {len(pairs)} samples, 1 epoch",
-            flush=True,
-        )
-
     if len(pairs) < MIN_SFT_PAIRS:
         print(
             f"[trainer-entry] Only {len(pairs)} SFT pairs — below minimum {MIN_SFT_PAIRS}. "
@@ -545,7 +636,113 @@ def main() -> None:
         )
         sys.exit(0)
 
-    data_file = _save_sft_pairs(pairs, Path(args.output_dir) / "datasets")
+    # ── Preflight probe ──────────────────────────────────────────────────────
+    # Trains 50 samples × 1 epoch in an isolated temp dir, loads the probe
+    # adapter into vLLM, runs the smoke gate, then tears everything down.
+    # Exit 0 = preflight passed; exit 3 = blocked (trainer_wrapper skips full run).
+    # This catches broken recipes, OOM conditions, and corrupt weight saves
+    # before committing hours of GPU time to a full training run.
+    if args.probe:
+        probe_pairs = pairs[:50]
+        print(
+            f"[trainer-entry] --probe: {len(probe_pairs)} samples × 1 epoch in isolated temp dir",
+            flush=True,
+        )
+        import time as _ptime
+        _pt0 = _ptime.monotonic()
+        with tempfile.TemporaryDirectory(prefix="lora_probe_") as _probe_dir:
+            _probe_data_file = _save_sft_pairs(probe_pairs, Path(args.output_dir) / "datasets")
+            _probe_trainer = LoRATrainer(base_model=args.base_model, output_dir=_probe_dir)
+            _probe_result: Dict[str, Any] = {}
+            try:
+                _probe_result = asyncio.run(_probe_trainer.train(
+                    dataset_path=str(_probe_data_file),
+                    num_epochs=1,
+                    learning_rate=recipe.learning_rate,
+                    lora_rank=recipe.r,
+                    lora_alpha=recipe.alpha,
+                    recipe=recipe,
+                ))
+            except Exception as _probe_exc:
+                print(f"[trainer-entry] --probe FAIL: training error: {_probe_exc}", flush=True)
+                sys.exit(3)
+            finally:
+                try:
+                    _probe_data_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+            _PROBE_WEIGHT_FILES = ("adapter_model.safetensors", "adapter_model.bin")
+            _probe_weight = next(
+                (Path(_probe_dir) / f for f in _PROBE_WEIGHT_FILES
+                 if (Path(_probe_dir) / f).exists()),
+                None,
+            )
+            if _probe_weight is None or _probe_weight.stat().st_size == 0:
+                print(
+                    "[trainer-entry] --probe FAIL: no adapter weight file after probe training",
+                    flush=True,
+                )
+                sys.exit(3)
+            print(
+                f"[trainer-entry] --probe weights OK: {_probe_weight.name} "
+                f"({_probe_weight.stat().st_size / 1e6:.1f} MB)",
+                flush=True,
+            )
+
+            _probe_name = f"{adapter_name}__probe"
+            _probe_smoke: Dict[str, Any] = {"pass": False, "reason": "not_attempted"}
+            try:
+                _load_r = httpx.post(
+                    f"{inference_url}/adapters/load",
+                    json={"backend": backend_key, "lora_name": _probe_name, "lora_path": _probe_dir},
+                    timeout=60.0,
+                )
+                _load_r.raise_for_status()
+                _probe_smoke = run_smoke(inference_url, role_name, _probe_name, recipe=recipe)
+            except Exception as _sm_exc:
+                _probe_smoke = {"pass": False, "reason": f"probe_smoke_error:{_sm_exc}"}
+            finally:
+                try:
+                    httpx.post(
+                        f"{inference_url}/adapters/unload",
+                        json={"backend": backend_key, "lora_name": _probe_name},
+                        timeout=30.0,
+                    )
+                except Exception:
+                    pass
+
+            _probe_dur = round(_ptime.monotonic() - _pt0, 1)
+            print(f"[trainer-entry] --probe smoke: {_probe_smoke}", flush=True)
+            if not _probe_smoke["pass"]:
+                print(
+                    f"[trainer-entry] --probe FAIL reason={_probe_smoke.get('reason')} "
+                    f"duration_s={_probe_dur} — full training blocked",
+                    flush=True,
+                )
+                sys.exit(3)
+            # Temp dir cleaned up on context exit.
+
+        print(
+            f"[trainer-entry] --probe PASS: weights_ok=True smoke_ok=True "
+            f"loss={_probe_result.get('final_loss', 'n/a')} duration_s={_probe_dur}",
+            flush=True,
+        )
+        sys.exit(0)
+    # ── End probe ────────────────────────────────────────────────────────────
+
+    # Carve a 5 % held-out eval split (deterministic — tail after shuffle).
+    # train_pairs feeds the SFT JSONL; eval_pairs passed directly to LoRATrainer
+    # for a post-train evaluate() call so we get an unbiased eval_loss.
+    _eval_n = max(1, math.ceil(len(pairs) * 0.05))
+    eval_pairs = pairs[-_eval_n:]
+    train_pairs = pairs[:-_eval_n]
+    print(
+        f"[trainer-entry] Dataset split: {len(train_pairs)} train  {len(eval_pairs)} eval (5%)",
+        flush=True,
+    )
+
+    data_file = _save_sft_pairs(train_pairs, Path(args.output_dir) / "datasets")
 
     # Compute dataset_hash from sorted SFT pair lines BEFORE training.
     import hashlib as _hashlib
@@ -586,15 +783,15 @@ def main() -> None:
     try:
         result = asyncio.run(trainer.train(
             dataset_path=str(data_file),
-            num_epochs=probe_epochs,
+            num_epochs=recipe.num_epochs,
             learning_rate=recipe.learning_rate,
             lora_rank=recipe.r,
             lora_alpha=recipe.alpha,
             recipe=recipe,
             resume_from_checkpoint=resume_from_checkpoint,
+            eval_dataset=eval_pairs,
         ))
     finally:
-        # Always clean up the temp dataset file, even if training fails.
         try:
             data_file.unlink(missing_ok=True)
         except OSError:
@@ -603,30 +800,20 @@ def main() -> None:
     _run_duration_s = round(_time.monotonic() - _t_run_start, 1)
     print(
         f"trainer_entry_done capability={args.capability} role={role_name} "
-        f"method={result.get('method')} samples={len(pairs)} "
-        f"epochs={probe_epochs} final_loss={result.get('final_loss', 'n/a')} "
+        f"method={result.get('method')} train_samples={len(train_pairs)} "
+        f"eval_samples={len(eval_pairs)} epochs={recipe.num_epochs} "
+        f"final_loss={result.get('final_loss', 'n/a')} "
+        f"eval_loss={result.get('eval_loss', 'n/a')} "
         f"duration_s={_run_duration_s}",
         flush=True,
     )
 
-    if args.probe:
-        print(
-            f"[trainer-entry] --probe complete: method={result.get('method')} "
-            f"final_loss={result.get('final_loss', 'n/a')} "
-            f"samples={len(pairs)} epochs=1 duration_s={_run_duration_s}",
-            flush=True,
-        )
-        sys.exit(0)
-
     # Post-training: stage → smoke gate → swap+promote (or mark failed).
     # Skip entirely in mock mode (no GPU, no weights written).
     if result.get("method") != "mock":
-        # Compute tokenizer_hash from the tokenizer.json saved by unsloth/PEFT.
-        _tok_path = adapter_dir / "tokenizer.json"
-        if _tok_path.exists():
-            tokenizer_hash = _hashlib.sha256(_tok_path.read_bytes()).hexdigest()
-        else:
-            tokenizer_hash = "unknown"
+        # Hash the base-model's tokenizer.json from the HF hub cache — stable
+        # across runs and not affected by what PEFT saves (or doesn't save).
+        tokenizer_hash = _compute_base_model_tokenizer_hash(args.base_model)
 
         _WEIGHT_FILES = ("adapter_model.safetensors", "adapter_model.bin")
         weight_file = next((adapter_dir / f for f in _WEIGHT_FILES if (adapter_dir / f).exists()), None)
@@ -650,7 +837,7 @@ def main() -> None:
             capability=cap_label,
             old_version=old_version,
             base_model_id=args.base_model,
-            n_samples=len(pairs),
+            n_samples=len(train_pairs),
             num_epochs=recipe.num_epochs,
             learning_rate=recipe.learning_rate,
             lora_r=recipe.r,
@@ -660,13 +847,12 @@ def main() -> None:
             dataset_hash=dataset_hash,
             tokenizer_hash=tokenizer_hash,
         )
-        # Persist full recipe dict into the history entry (Plan C consumes this).
+        # Persist full recipe dict and eval_loss into the history entry.
         if new_meta.get("history"):
             new_meta["history"][-1]["recipe"] = recipe.model_dump()
+            new_meta["history"][-1]["eval_loss"] = result.get("eval_loss")
         new_version  = new_meta["version"]
-        backend_key  = new_meta.get("backend", _resolve_registry_default())
         staging_name = f"{adapter_name}__staging"
-        inference_url = os.environ.get("TRAINING__INFERENCE_URL", "http://inference:8010")
 
         # Load staged adapter onto vLLM for smoke test.
         # All inference-service adapter routes use `backend` (opaque registry key),
@@ -686,11 +872,64 @@ def main() -> None:
             )
             sys.exit(2)
 
-        smoke = run_smoke(inference_url, role_name, staging_name)
+        smoke = run_smoke(inference_url, role_name, staging_name, recipe=recipe)
         print(f"[trainer-entry] Smoke gate result: {smoke}", flush=True)
 
         if smoke["pass"]:
-            # Swap: unload old canonical, load new canonical, unload staging
+            # ── Regression gate ─────────────────────────────────────────────
+            # Compare new (staging) vs previous active adapter on the same prompts.
+            # Cold start (no backup_path) ⟹ no previous adapter to compare against.
+            _prev_name_for_regression = adapter_name if backup_path else None
+            regression = run_regression_comparison(
+                inference_url=inference_url,
+                role=role_name,
+                previous_name=_prev_name_for_regression,
+                new_name=staging_name,
+                recipe=recipe,
+            )
+            print(
+                f"[trainer-entry] Regression: prev={regression.get('previous_score')} "
+                f"new={regression['new_score']} delta={regression.get('delta')} "
+                f"won={regression['won']} cold_start={regression.get('cold_start')}",
+                flush=True,
+            )
+
+            if not regression["won"]:
+                # New adapter is measurably worse — unload staging, leave old active.
+                try:
+                    httpx.post(
+                        f"{inference_url}/adapters/unload",
+                        json={"backend": backend_key, "lora_name": staging_name},
+                        timeout=30.0,
+                    )
+                except Exception:
+                    pass
+                _mark_failed(
+                    Path(args.output_dir), cap_label, new_version,
+                    smoke_results={**smoke, "regression": regression},
+                )
+                _write_adapter_diff_report(
+                    checkpoint_dir=Path(args.output_dir),
+                    adapter_name=adapter_name,
+                    cap_label=cap_label,
+                    prev_version=old_version,
+                    new_meta=new_meta,
+                    promoted=False,
+                    training_result=result,
+                    smoke=smoke,
+                    regression=regression,
+                    n_train_samples=len(train_pairs),
+                    n_eval_samples=len(eval_pairs),
+                    training_duration_s=_run_duration_s,
+                )
+                print(
+                    f"[trainer-entry] REGRESSION BLOCKED v{new_version} — "
+                    f"delta={regression.get('delta'):.4f} below tolerance — not promoted",
+                    flush=True,
+                )
+                sys.exit(2)
+
+            # Smoke passed + regression passed: swap and promote.
             try:
                 swap_resp = httpx.post(
                     f"{inference_url}/adapters/swap",
@@ -718,13 +957,31 @@ def main() -> None:
                 previous_backup_path=backup_path,
                 smoke_results=smoke,
                 eval_results=eval_metrics,
+                regression_results=regression,
+                eval_loss=result.get("eval_loss") or 0.0,
+            )
+            _write_adapter_diff_report(
+                checkpoint_dir=Path(args.output_dir),
+                adapter_name=adapter_name,
+                cap_label=cap_label,
+                prev_version=old_version,
+                new_meta=new_meta,
+                promoted=True,
+                training_result=result,
+                smoke=smoke,
+                regression=regression,
+                n_train_samples=len(train_pairs),
+                n_eval_samples=len(eval_pairs),
+                training_duration_s=_run_duration_s,
             )
             print(
-                f"[trainer-entry] Adapter v{new_version} active: {adapter_output_dir}",
+                f"[trainer-entry] Adapter v{new_version} PROMOTED: {adapter_output_dir}  "
+                f"eval_loss={result.get('eval_loss', 'n/a')}  "
+                f"regression_delta={regression.get('delta')}",
                 flush=True,
             )
         else:
-            # Unload staging, leave old adapter in place, mark failed
+            # Smoke failed — unload staging, leave old adapter in place.
             try:
                 httpx.post(
                     f"{inference_url}/adapters/unload",
@@ -735,7 +992,7 @@ def main() -> None:
                 pass
             _mark_failed(Path(args.output_dir), cap_label, new_version, smoke_results=smoke)
             print(
-                f"[trainer-entry] Smoke gate failed — v{new_version} not promoted",
+                f"[trainer-entry] Smoke gate FAILED — v{new_version} not promoted",
                 flush=True,
             )
             sys.exit(2)

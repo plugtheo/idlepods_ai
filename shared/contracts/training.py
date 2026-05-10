@@ -48,7 +48,7 @@ class AdapterRecipe(BaseModel):
     ])
     use_rslora: bool = False
     use_dora: bool = False
-    resume_from_prev_adapter: bool = False
+    resume_from_prev_adapter: bool = True
     # Optional path to a synthetic-data JSONL for this role.  Mixed in with
     # experience + curated pairs in trainer_entry.py.  Future synthesis pipeline
     # writes here; missing/empty path is a no-op so this is safe to ship now.

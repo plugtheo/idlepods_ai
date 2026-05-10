@@ -32,6 +32,11 @@ class HistoryEntry(BaseModel):
     eval_metrics: Dict[str, float] = Field(default_factory=dict)
     smoke: Dict[str, Any] = Field(default_factory=dict)
     used_base_fallback_aggregate: float = 0.0
+    # Evaluation and regression fields — populated by trainer_entry; None for bootstrap/legacy entries.
+    eval_loss: Optional[float] = None
+    won_against_previous: Optional[bool] = None
+    regression_delta: Optional[float] = None
+    comparison_prompts_n: int = 0
 
 
 class AdapterEntry(BaseModel):
