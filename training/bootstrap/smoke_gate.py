@@ -279,6 +279,72 @@ def run_smoke(
 
 REGRESSION_TOLERANCE: float = 0.02  # allow up to 2 % drop before blocking promotion
 
+# ---------------------------------------------------------------------------
+# Base-skill check (item 6) — short probes verifying the adapter hasn't
+# forgotten general reasoning.  Runs after the smoke gate in trainer_entry.py.
+# ---------------------------------------------------------------------------
+_BASE_SKILL_PROMPTS: list[tuple[str, str]] = [
+    ("What is 7 × 8?",                             "56"),
+    ("What is the capital of France?",              "paris"),
+    ("Is Python interpreted or compiled? One word.", "interpret"),
+    ("Write PASS in all capitals.",                 "PASS"),
+    ("What does HTTP stand for?",                   "hypertext"),
+]
+
+BASE_SKILL_TOLERANCE: float = 0.80  # fraction of probes that must pass
+
+
+def run_base_skill_check(
+    inference_url: str,
+    staging_name: str,
+    timeout: float = 30.0,
+) -> dict:
+    """
+    Run short general-knowledge probes against the staged adapter via the
+    inference service.  Returns pass/fail with per-probe detail.
+
+    Uses the base-model system prompt ("You are a helpful AI assistant.") so
+    results reflect retention of general abilities, not capability-specific tuning.
+    """
+    sys_prompt = "You are a helpful AI assistant."
+    results = []
+    for user_prompt, expected_fragment in _BASE_SKILL_PROMPTS:
+        payload = {
+            "model": staging_name,
+            "messages": [
+                {"role": "system",  "content": sys_prompt},
+                {"role": "user",    "content": user_prompt},
+            ],
+            "max_tokens": 32,
+            "temperature": 0.0,
+        }
+        rj, err = _post_chat(inference_url, payload, timeout)
+        if err:
+            results.append({"prompt": user_prompt, "pass": False, "reason": err})
+            continue
+        content = (rj or {}).get("choices", [{}])[0].get("message", {}).get("content") or ""
+        ok = expected_fragment.lower() in content.lower()
+        results.append({"prompt": user_prompt, "pass": ok, "response_snippet": content[:80]})
+
+    pass_count = sum(1 for r in results if r["pass"])
+    pass_rate  = pass_count / len(results) if results else 0.0
+    passed     = pass_rate >= BASE_SKILL_TOLERANCE
+    logger.info(
+        "base_skill_check staging=%s pass_rate=%.2f passed=%s",
+        staging_name, pass_rate, passed,
+    )
+    return {
+        "pass":       passed,
+        "pass_rate":  round(pass_rate, 4),
+        "pass_count": pass_count,
+        "total":      len(results),
+        "message": (
+            f"Base-skill: {pass_count}/{len(results)} probes passed ({pass_rate:.0%})."
+            + (" General reasoning retained." if passed else " Possible catastrophic forgetting — review before deploying.")
+        ),
+        "details": results,
+    }
+
 
 def _score_response(role: str, text: str) -> float:
     """Heuristic 0.0–1.0 quality score for a plain-text smoke response."""

@@ -18,15 +18,15 @@ Score bands
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Dict, List
 
-from shared.contracts.evaluator_schemas import EVALUATOR_SCHEMAS
+from shared.contracts.evaluator_schemas import (
+    EVALUATOR_REQUIRED_PROSE_FIELDS as _EVALUATOR_REQUIRED_FIELDS,
+    evaluator_required_fields_present as _required_fields_present,
+    extract_score as extract_score_from_text,
+)
 from shared.contracts.quality_filters import METADATA_LEAKAGE_RE as _METADATA_LEAKAGE_RE
-
-# Regex to extract "SCORE: 0.82" style annotations from reviewer / critic output.
-_SCORE_RE = re.compile(r"\bSCORE\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
 
 # Structural markers for code presence — used to reward coder/debugger outputs
 _CODE_PRESENT_RE = re.compile(r"```|def |class |import |\bfunction\b|\breturn\b", re.I)
@@ -52,55 +52,6 @@ _POSITIVE_PATTERNS = [
         r"\bBLOCKERS?\s*[:=]\s*(?:None|none|N\/A)\b",
     ]
 ]
-
-
-_EVALUATOR_REQUIRED_FIELDS: Dict[str, List[str]] = {
-    "reviewer": ["ISSUES", "SUGGESTIONS"],
-    "critic":   ["BLOCKERS", "IMPROVEMENT"],
-}
-
-
-def _required_fields_present(text: str, role: str) -> bool:
-    """Return True if all required fields for *role* appear in *text*.
-
-    Tries the JSON path first (post-guided-decoding output) and falls back to the
-    legacy SCORE:/ISSUES: regex format so older adapter outputs continue scoring.
-    """
-    schema_cls = EVALUATOR_SCHEMAS.get(role)
-    if schema_cls is not None:
-        try:
-            obj = json.loads(text, strict=False)
-            if isinstance(obj, dict):
-                schema_cls.model_validate(obj)
-                return True
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
-    fields = _EVALUATOR_REQUIRED_FIELDS.get(role, [])
-    return all(re.search(rf"(?mi)^{field}:", text) for field in fields)
-
-
-def extract_score_from_text(text: str) -> float | None:
-    """
-    Try to read an explicit SCORE annotation from *text*.
-
-    Returns the float if found and in [0, 1], otherwise None.
-    """
-    try:
-        obj = json.loads(text, strict=False)
-        if isinstance(obj, dict) and "score" in obj:
-            value = float(obj["score"])
-            if 0.0 <= value <= 1.0:
-                return value
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
-    match = _SCORE_RE.search(text)
-    if match:
-        value = float(match.group(1))
-        if 0.0 <= value <= 1.0:
-            return value
-        if 0 < value <= 10:
-            return value / 10.0  # convert 0–10 scale to 0–1
-    return None
 
 
 # Heuristic baseline scores — module constants so the values are searchable

@@ -28,8 +28,10 @@ def _build_contributions(history: list) -> List[AgentContribution]:
     """
     Build a list of AgentContribution objects from the pipeline history.
 
-    role='tool' entries are execution scaffolding — they are skipped here and
-    instead surfaced via tool_turns on the preceding agent contribution.
+    role='tool' entries are execution scaffolding — they are folded into the
+    preceding agent's contribution as `tool_results`, paired with that agent's
+    `tool_calls`. sft_builder reconstructs the tool-role messages from these
+    two fields, so callers never need a separate `tool_turns` representation.
     """
     contributions = []
     for i, h in enumerate(history):

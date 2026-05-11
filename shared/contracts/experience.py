@@ -30,22 +30,21 @@ class AgentContribution(BaseModel):
             "supervised fine-tuning example for future from-scratch training."
         ),
     )
-    tool_turns: Optional[List[Dict[str, Any]]] = Field(
-        default=None,
-        description=(
-            "Interleaved tool-call/tool-result message dicts emitted during this "
-            "agent's ReAct loop. Each entry is an OpenAI-format message dict "
-            "(role='assistant' with tool_calls, or role='tool' with tool_call_id). "
-            "None for agents that did not invoke any tools."
-        ),
-    )
     tool_calls: Optional[List[Dict[str, Any]]] = Field(
         default=None,
-        description="assistant→tool_calls round captured from iteration_history.",
+        description=(
+            "assistant→tool_calls round captured from iteration_history. "
+            "OpenAI-native tool_call dicts (id/type/function)."
+        ),
     )
     tool_results: Optional[List[Dict[str, Any]]] = Field(
         default=None,
-        description="tool→content rounds paired with tool_calls.",
+        description=(
+            "tool→content rounds paired with tool_calls. Each entry: "
+            "{tool_call_id, content, name?}. sft_builder reconstructs the "
+            "tool-role messages from these — they are the single source of "
+            "truth for this agent's tool turns."
+        ),
     )
     used_base_fallback: bool = Field(
         default=False,

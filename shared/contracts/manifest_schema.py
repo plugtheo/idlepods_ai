@@ -34,6 +34,8 @@ class HistoryEntry(BaseModel):
     used_base_fallback_aggregate: float = 0.0
     # Evaluation and regression fields — populated by trainer_entry; None for bootstrap/legacy entries.
     eval_loss: Optional[float] = None
+    perplexity: Optional[float] = None
+    assistant_masking_enabled: Optional[bool] = None
     won_against_previous: Optional[bool] = None
     regression_delta: Optional[float] = None
     comparison_prompts_n: int = 0

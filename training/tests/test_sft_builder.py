@@ -29,8 +29,8 @@ def test_openai_messages_no_tool_calls():
     contrib = _make_contribution()
     result = build_sft_pair(contrib, _openai_recipe(), "coder",
                             system_prompt="You are a coder.", user_prompt="Write add().")
-    assert "messages" in result
-    msgs = result["messages"]
+    assert isinstance(result, list) and len(result) == 1
+    msgs = result[0]["messages"]
     roles = [m["role"] for m in msgs]
     assert roles[0] == "system"
     assert roles[1] == "user"

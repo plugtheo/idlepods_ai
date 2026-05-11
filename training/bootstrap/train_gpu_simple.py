@@ -164,7 +164,12 @@ def load_sft_pairs(capability: str, system_prompt: str, recipe) -> List[Dict]:
                 "",
             )
             if messages and response:
-                full_messages = [{"role": "system", "content": system_prompt}] + messages
+                # generate_data.save_jsonl now bakes the system prompt in as the
+                # first message.  Only prepend if it's missing (e.g. old-format JSONL).
+                if messages[0].get("role") != "system":
+                    full_messages = [{"role": "system", "content": system_prompt}] + messages
+                else:
+                    full_messages = messages
                 contrib = AgentContribution(
                     role=role_name,
                     output=response,
@@ -172,8 +177,7 @@ def load_sft_pairs(capability: str, system_prompt: str, recipe) -> List[Dict]:
                     iteration=1,
                     messages=full_messages,
                 )
-                sft_pair = build_sft_pair(contrib, recipe, role_name)
-                pairs.append(sft_pair)
+                pairs.extend(build_sft_pair(contrib, recipe, role_name))
     return pairs
 
 
@@ -332,7 +336,12 @@ async def train_capability(
     old_slug = old_version.replace(".", "_")
     guessed_backup = checkpoint_dir / f"{capability}_lora_v{old_slug}"
     previous_backup = guessed_backup if guessed_backup.exists() else None
-    _promote_to_active(checkpoint_dir, capability, new_meta, previous_backup_path=previous_backup)
+    _promote_to_active(
+        checkpoint_dir, capability, new_meta,
+        previous_backup_path=previous_backup,
+        perplexity=result.get("perplexity"),
+        assistant_masking_enabled=result.get("assistant_masking_enabled"),
+    )
 
     size_mb = result.get("size_mb", 0.0)
     print(f"  [OK] v{new_version}  ({size_mb:.1f} MB)  → {save_path}")
@@ -528,11 +537,16 @@ async def main():
         print(f"  PREFLIGHT PROBE  (capability={probe_cap}, 50 samples × 1 epoch)")
         print("="*70)
 
-        probe_pairs = load_sft_pairs(probe_cap, probe_sys_prompt, probe_recipe)[:50]
+        # 9a: Use 200 samples × 2 epochs so there are enough optimiser steps to
+        # produce a measurable loss decrease.  50 × 1 (old default) gave ~6 steps —
+        # too few to distinguish a working training loop from random noise.
+        _PROBE_SAMPLES = 200
+        _PROBE_EPOCHS  = 2
+        probe_pairs = load_sft_pairs(probe_cap, probe_sys_prompt, probe_recipe)[:_PROBE_SAMPLES]
         if not probe_pairs:
             print(f"  [PROBE] FAIL: no training pairs found for '{probe_cap}'")
             sys.exit(3)
-        print(f"  [PROBE] {len(probe_pairs)} samples loaded")
+        print(f"  [PROBE] {len(probe_pairs)} samples loaded (target={_PROBE_SAMPLES})")
 
         import time as _ptime
         _pt0 = _ptime.monotonic()
@@ -554,7 +568,7 @@ async def main():
                 )
                 _probe_result = await _probe_trainer.train(
                     dataset_path=_probe_dataset,
-                    num_epochs=1,
+                    num_epochs=_PROBE_EPOCHS,
                     learning_rate=probe_recipe.learning_rate,
                     lora_rank=probe_recipe.r,
                     lora_alpha=probe_recipe.alpha,
@@ -578,6 +592,39 @@ async def main():
                 f"  [PROBE] Weights OK: {_pw.name}  ({_pw.stat().st_size / 1e6:.1f} MB)"
                 f"  loss={_probe_result.get('final_loss', 'n/a')}"
             )
+
+            # 9a: Loss-drop assertion — confirm training signal is real.
+            # Reads the per-step metrics file written by _MetricsStreamCallback.
+            _probe_metrics = _probe_save / "train_metrics.jsonl"
+            if _probe_metrics.exists():
+                import json as _json
+                _steps = []
+                with open(_probe_metrics, encoding="utf-8") as _mf:
+                    for _ml in _mf:
+                        try:
+                            _e = _json.loads(_ml.strip())
+                            if "loss" in _e:
+                                _steps.append(_e["loss"])
+                        except Exception:
+                            pass
+                if len(_steps) >= 4:
+                    _init_loss = _steps[0]
+                    _final_loss = _steps[-1]
+                    _drop_ratio = _final_loss / _init_loss if _init_loss else 1.0
+                    print(
+                        f"  [PROBE] Loss trajectory: {_init_loss:.4f} → {_final_loss:.4f}"
+                        f"  (ratio={_drop_ratio:.3f}, threshold<0.85)"
+                    )
+                    if _drop_ratio >= 0.85:
+                        print(
+                            f"  [PROBE] FAIL: loss did not decrease enough ({_drop_ratio:.3f} ≥ 0.85) — "
+                            "possible broken recipe, mask bug, or corrupt data."
+                        )
+                        sys.exit(3)
+                else:
+                    print(f"  [PROBE] Loss-drop check skipped: only {len(_steps)} steps logged.")
+            else:
+                print("  [PROBE] Loss-drop check skipped: train_metrics.jsonl not found.")
 
             val = await validate_adapter(probe_cap, Path(_tdir))
             _probe_dur = round(_ptime.monotonic() - _pt0, 1)

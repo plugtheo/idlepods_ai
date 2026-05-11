@@ -80,7 +80,7 @@ from training.bootstrap.lora_trainer import (
     _compute_base_model_tokenizer_hash,
     _write_metrics_summary,
 )
-from training.bootstrap.smoke_gate import run_smoke, run_regression_comparison
+from training.bootstrap.smoke_gate import run_smoke, run_regression_comparison, run_base_skill_check
 from shared.contracts.training import AdapterRecipe, lookup_recipe
 
 # System prompts — imported from the single source of truth so that training and
@@ -204,24 +204,20 @@ def _load_sft_pairs(
                             flush=True,
                         )
                         continue
-                    # role-agnostic: any role with tool_turns produces tool-call SFT pairs
-                    tool_turns = contribution.get("tool_turns") or []
+                    # tool_calls/tool_results are the single source of truth for
+                    # this agent's tool turns; sft_builder reconstructs the
+                    # tool-role messages so callers don't merge them by hand.
                     contrib = AgentContribution(
                         role=capability,
                         output=full_output,
                         quality_score=score,
                         iteration=contribution.get("iteration", 1),
-                        messages=list(messages) + tool_turns,
+                        messages=list(messages),
                         tool_calls=contribution.get("tool_calls") or None,
                         tool_results=contribution.get("tool_results") or None,
                     )
-                    sft_pair = build_sft_pair(contrib, recipe, capability)
-                    # build_sft_pair may return a single dict or a list of dicts (tool-call + full)
-                    if isinstance(sft_pair, list):
-                        for rec in sft_pair:
-                            pairs.append({**rec, "score": score})
-                    else:
-                        pairs.append({**sft_pair, "score": score})
+                    for rec in build_sft_pair(contrib, recipe, capability):
+                        pairs.append({**rec, "score": score})
 
                     added += 1
 
@@ -285,8 +281,13 @@ def _load_curated_pairs(capability: str, data_root: Path, max_samples: int, reci
                 "",
             )
             if messages and response:
-                sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
-                full_messages = [{"role": "system", "content": sys_prompt}] + messages
+                # Prepend system prompt only when the curated record doesn't already
+                # include one (generate_data.save_jsonl now bakes it in).
+                if messages and messages[0].get("role") != "system":
+                    sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
+                    full_messages = [{"role": "system", "content": sys_prompt}] + messages
+                else:
+                    full_messages = messages
                 contrib = AgentContribution(
                     role=capability,
                     output=response,
@@ -294,12 +295,8 @@ def _load_curated_pairs(capability: str, data_root: Path, max_samples: int, reci
                     iteration=1,
                     messages=full_messages,
                 )
-                sft_pair = build_sft_pair(contrib, recipe, capability)
-                if isinstance(sft_pair, list):
-                    for rec in sft_pair:
-                        pairs.append({**rec, "score": 1.0})
-                else:
-                    pairs.append({**sft_pair, "score": 1.0})
+                for rec in build_sft_pair(contrib, recipe, capability):
+                    pairs.append({**rec, "score": 1.0})
 
     if len(pairs) > max_samples:
         import random
@@ -351,8 +348,11 @@ def _load_synthetic_pairs(capability: str, recipe: "AdapterRecipe", max_samples:
                 "",
             )
             if messages and response:
-                sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
-                full_messages = [{"role": "system", "content": sys_prompt}] + messages
+                if messages and messages[0].get("role") != "system":
+                    sys_prompt = _CAPABILITY_SYSTEM_PROMPTS.get(capability, "You are a helpful AI assistant.")
+                    full_messages = [{"role": "system", "content": sys_prompt}] + messages
+                else:
+                    full_messages = messages
                 contrib = AgentContribution(
                     role=capability,
                     output=response,
@@ -360,12 +360,8 @@ def _load_synthetic_pairs(capability: str, recipe: "AdapterRecipe", max_samples:
                     iteration=1,
                     messages=full_messages,
                 )
-                sft_pair = build_sft_pair(contrib, recipe, capability)
-                if isinstance(sft_pair, list):
-                    for rec in sft_pair:
-                        pairs.append({**rec, "score": 1.0})
-                else:
-                    pairs.append({**sft_pair, "score": 1.0})
+                for rec in build_sft_pair(contrib, recipe, capability):
+                    pairs.append({**rec, "score": 1.0})
 
     if len(pairs) > max_samples:
         import random
@@ -412,6 +408,7 @@ def _write_adapter_diff_report(
     n_train_samples: int,
     n_eval_samples: int,
     training_duration_s: float,
+    base_skill: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """
     Write a human-readable JSON comparison report to:
@@ -433,37 +430,76 @@ def _write_adapter_diff_report(
 
     metrics_summary: Dict[str, Any] = training_result.get("metrics_summary") or {}
 
+    _new_final_loss = training_result.get("final_loss")
+    _loss_delta = (
+        round(_new_final_loss - prev_final_loss, 6)
+        if (_new_final_loss is not None and prev_final_loss is not None) else None
+    )
+    _decision = (
+        "promoted" if promoted
+        else ("regression_blocked" if not regression.get("won", True) else "smoke_failed")
+    )
+    _regression_delta = regression.get("delta")
+    _regression_message = (
+        "New adapter matched or improved on previous adapter."
+        if regression.get("won")
+        else f"New adapter scored {_regression_delta:+.4f} vs previous — below tolerance, not promoted."
+        if _regression_delta is not None
+        else "No previous adapter to compare against (cold start)."
+    )
+
     report = {
         "generated_at": now.isoformat(),
         "role": cap_label,
         "adapter_name": adapter_name,
-        # ── Version delta ────────────────────────────────────────────────────
+
+        # ── Version ──────────────────────────────────────────────────────────
         "prev_version": prev_version,
         "new_version": new_version,
         "promoted": promoted,
-        # ── Training loss ────────────────────────────────────────────────────
-        "prev_final_loss": prev_final_loss,
-        "new_final_loss": training_result.get("final_loss"),
-        "loss_delta": (
-            round(training_result.get("final_loss", 0.0) - (prev_final_loss or 0.0), 6)
-            if prev_final_loss is not None else None
+        "decision": _decision,
+        "decision_message": (
+            f"Adapter v{new_version} promoted successfully."
+            if promoted else
+            f"Adapter v{new_version} NOT promoted: {_decision.replace('_', ' ')}."
         ),
-        # ── Eval loss (held-out 5 %) ─────────────────────────────────────────
-        "new_eval_loss": training_result.get("eval_loss"),
-        # ── Training metadata ────────────────────────────────────────────────
-        "n_train_samples": n_train_samples,
-        "n_eval_samples": n_eval_samples,
-        "training_duration_s": training_duration_s,
-        "metrics_summary": metrics_summary,
-        # ── Smoke gate ───────────────────────────────────────────────────────
-        "smoke": smoke,
-        # ── Regression comparison ────────────────────────────────────────────
-        "regression": regression,
-        # ── Decision explanation ─────────────────────────────────────────────
-        "decision": (
-            "promoted" if promoted
-            else ("regression_blocked" if not regression.get("won", True) else "smoke_failed")
-        ),
+
+        # ── Training loss ─────────────────────────────────────────────────────
+        "training": {
+            "prev_final_loss": prev_final_loss,
+            "new_final_loss": _new_final_loss,
+            "loss_delta": _loss_delta,
+            "loss_delta_message": (
+                f"Loss {'improved' if (_loss_delta or 0) < 0 else 'worsened'} by {abs(_loss_delta or 0):.6f}."
+                if _loss_delta is not None else "No previous loss to compare."
+            ),
+            "eval_loss": training_result.get("eval_loss"),
+            "perplexity": training_result.get("perplexity"),
+            "n_train_samples": n_train_samples,
+            "n_eval_samples": n_eval_samples,
+            "duration_s": training_duration_s,
+            "assistant_masking_enabled": training_result.get("assistant_masking_enabled"),
+            "loss_curve": metrics_summary,
+        },
+
+        # ── Smoke gate ────────────────────────────────────────────────────────
+        "smoke": {
+            **smoke,
+            "message": (
+                f"Smoke test passed ({smoke.get('reason', 'ok')})."
+                if smoke.get("pass") else
+                f"Smoke test FAILED: {smoke.get('reason', 'unknown')}."
+            ),
+        },
+
+        # ── Base-skill gate ────────────────────────────────────────────────────
+        "base_skill": base_skill or {"pass": None, "message": "Not run."},
+
+        # ── Regression comparison ─────────────────────────────────────────────
+        "regression": {
+            **regression,
+            "message": _regression_message,
+        },
     }
 
     reports_dir = checkpoint_dir / adapter_name / "reports"
@@ -643,9 +679,15 @@ def main() -> None:
     # This catches broken recipes, OOM conditions, and corrupt weight saves
     # before committing hours of GPU time to a full training run.
     if args.probe:
-        probe_pairs = pairs[:50]
+        # 9a: 200 samples × 2 epochs → ~25 optimiser steps at default batch/accum
+        # settings. Large enough to produce a measurable loss decrease without
+        # taking prohibitive time. 50 × 1 (old) was only ~6 steps — too few to
+        # distinguish a working loop from random weight initialisation.
+        _PROBE_SAMPLES = 200
+        _PROBE_EPOCHS  = 2
+        probe_pairs = pairs[:_PROBE_SAMPLES]
         print(
-            f"[trainer-entry] --probe: {len(probe_pairs)} samples × 1 epoch in isolated temp dir",
+            f"[trainer-entry] --probe: {len(probe_pairs)} samples × {_PROBE_EPOCHS} epochs in isolated temp dir",
             flush=True,
         )
         import time as _ptime
@@ -657,7 +699,7 @@ def main() -> None:
             try:
                 _probe_result = asyncio.run(_probe_trainer.train(
                     dataset_path=str(_probe_data_file),
-                    num_epochs=1,
+                    num_epochs=_PROBE_EPOCHS,
                     learning_rate=recipe.learning_rate,
                     lora_rank=recipe.r,
                     lora_alpha=recipe.alpha,
@@ -689,6 +731,37 @@ def main() -> None:
                 f"({_probe_weight.stat().st_size / 1e6:.1f} MB)",
                 flush=True,
             )
+
+            # 9a: Loss-drop assertion
+            _probe_metrics_path = Path(_probe_dir) / "train_metrics.jsonl"
+            if _probe_metrics_path.exists():
+                _probe_steps = []
+                with open(_probe_metrics_path, encoding="utf-8") as _pmf:
+                    for _pml in _pmf:
+                        try:
+                            _pe = json.loads(_pml.strip())
+                            if "loss" in _pe:
+                                _probe_steps.append(_pe["loss"])
+                        except Exception:
+                            pass
+                if len(_probe_steps) >= 4:
+                    _p_init  = _probe_steps[0]
+                    _p_final = _probe_steps[-1]
+                    _p_ratio = _p_final / _p_init if _p_init else 1.0
+                    print(
+                        f"[trainer-entry] --probe loss: {_p_init:.4f} → {_p_final:.4f}"
+                        f"  (ratio={_p_ratio:.3f}, threshold<0.85)",
+                        flush=True,
+                    )
+                    if _p_ratio >= 0.85:
+                        print(
+                            f"[trainer-entry] --probe FAIL: loss did not decrease enough "
+                            f"({_p_ratio:.3f} ≥ 0.85) — broken recipe, mask bug, or corrupt data",
+                            flush=True,
+                        )
+                        sys.exit(3)
+                else:
+                    print(f"[trainer-entry] --probe: loss-drop check skipped ({len(_probe_steps)} steps)", flush=True)
 
             _probe_name = f"{adapter_name}__probe"
             _probe_smoke: Dict[str, Any] = {"pass": False, "reason": "not_attempted"}
@@ -851,6 +924,8 @@ def main() -> None:
         if new_meta.get("history"):
             new_meta["history"][-1]["recipe"] = recipe.model_dump()
             new_meta["history"][-1]["eval_loss"] = result.get("eval_loss")
+            new_meta["history"][-1]["perplexity"] = result.get("perplexity")
+            new_meta["history"][-1]["assistant_masking_enabled"] = result.get("assistant_masking_enabled")
         new_version  = new_meta["version"]
         staging_name = f"{adapter_name}__staging"
 
@@ -875,7 +950,10 @@ def main() -> None:
         smoke = run_smoke(inference_url, role_name, staging_name, recipe=recipe)
         print(f"[trainer-entry] Smoke gate result: {smoke}", flush=True)
 
-        if smoke["pass"]:
+        base_skill = run_base_skill_check(inference_url, staging_name)
+        print(f"[trainer-entry] Base-skill check: {base_skill.get('message')}", flush=True)
+
+        if smoke["pass"] and base_skill["pass"]:
             # ── Regression gate ─────────────────────────────────────────────
             # Compare new (staging) vs previous active adapter on the same prompts.
             # Cold start (no backup_path) ⟹ no previous adapter to compare against.
@@ -918,6 +996,7 @@ def main() -> None:
                     training_result=result,
                     smoke=smoke,
                     regression=regression,
+                    base_skill=base_skill,
                     n_train_samples=len(train_pairs),
                     n_eval_samples=len(eval_pairs),
                     training_duration_s=_run_duration_s,
@@ -959,6 +1038,8 @@ def main() -> None:
                 eval_results=eval_metrics,
                 regression_results=regression,
                 eval_loss=result.get("eval_loss") or 0.0,
+                perplexity=result.get("perplexity"),
+                assistant_masking_enabled=result.get("assistant_masking_enabled"),
             )
             _write_adapter_diff_report(
                 checkpoint_dir=Path(args.output_dir),
@@ -970,6 +1051,7 @@ def main() -> None:
                 training_result=result,
                 smoke=smoke,
                 regression=regression,
+                base_skill=base_skill,
                 n_train_samples=len(train_pairs),
                 n_eval_samples=len(eval_pairs),
                 training_duration_s=_run_duration_s,
@@ -981,7 +1063,7 @@ def main() -> None:
                 flush=True,
             )
         else:
-            # Smoke failed — unload staging, leave old adapter in place.
+            # Smoke or base-skill failed — unload staging, leave old adapter in place.
             try:
                 httpx.post(
                     f"{inference_url}/adapters/unload",
@@ -990,9 +1072,14 @@ def main() -> None:
                 )
             except Exception:
                 pass
-            _mark_failed(Path(args.output_dir), cap_label, new_version, smoke_results=smoke)
+            _failure_reason = (
+                smoke if not smoke["pass"]
+                else {**base_skill, "reason": f"base_skill_failed:{base_skill.get('message', '')}"}
+            )
+            _mark_failed(Path(args.output_dir), cap_label, new_version, smoke_results=_failure_reason)
+            _gate_name = "Smoke gate" if not smoke["pass"] else "Base-skill gate"
             print(
-                f"[trainer-entry] Smoke gate FAILED — v{new_version} not promoted",
+                f"[trainer-entry] {_gate_name} FAILED — v{new_version} not promoted",
                 flush=True,
             )
             sys.exit(2)

@@ -59,6 +59,8 @@ import os
 from pathlib import Path
 from typing import List, Dict, Optional
 
+from shared.contracts.agent_prompts import AGENT_PROMPTS as _AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE as _BOOTSTRAP_CAP_TO_ROLE
+
 os.environ.setdefault("HF_DATASETS_CACHE", str(Path.home() / ".cache" / "huggingface" / "datasets"))
 
 try:
@@ -143,18 +145,23 @@ _BPE_ARTIFACT_RE = re.compile(
     re.UNICODE,
 )
 
-# Runs of whitespace that are not a single newline or space — e.g. many
-# consecutive spaces produced when BPE-merged whitespace tokens are decoded.
-_EXCESS_SPACE_RE = re.compile(r"[ \t]{3,}")
+# Mid-line runs of 3+ spaces/tabs — a hallmark of BPE whitespace-merge
+# decoding (e.g. "this    is    spaced"). The lookbehind requires a
+# non-whitespace char immediately before the run, so LINE-LEADING
+# indentation (4-, 8-, 12-space code indents) is preserved verbatim.
+# Without the lookbehind, every nested code block in the training data
+# would be flattened to 1 space and the model would learn broken syntax.
+_EXCESS_SPACE_RE = re.compile(r"(?<=\S)[ \t]{3,}")
 
 
 def _fix_bpe_artifacts(text: str) -> str:
     """Remove BPE/sentencepiece decode artifacts from a text field.
 
     1. Strip known problematic Unicode control/replacement chars.
-    2. Collapse runs of 3+ spaces/tabs to a single space (a hallmark of
-       BPE whitespace-merge decoding).
-    3. Strip leading/trailing whitespace.
+    2. Collapse MID-LINE runs of 3+ spaces/tabs to a single space
+       (a hallmark of BPE whitespace-merge decoding). Line-leading
+       indentation is preserved — critical for code samples.
+    3. Strip leading/trailing whitespace of the whole field.
     """
     text = _BPE_ARTIFACT_RE.sub("", text)
     text = _EXCESS_SPACE_RE.sub(" ", text)
@@ -352,12 +359,23 @@ def _estimate_quality_score(text: str) -> float:
         return 0.65
     return round(min(0.92, max(0.30, 0.35 + (pos / total) * 0.60)), 2)
 
-def _wrap_assistant_only_loss_format(item: Dict) -> Dict:
-    """Wrap an assistant-only loss item in the required format."""
+def _build_training_record(item: Dict) -> Dict:
+    """
+    Build the canonical training record for a curated sample.
+
+    Bakes in the system prompt for the capability so that:
+    - downstream load_sft_pairs / _load_curated_pairs never need to prepend it
+    - the system prompt seen during training is byte-identical to inference
+    - build_sft_pair receives a complete messages list and passes through unchanged
+    """
+    capability = item.get("capability", "")
+    role       = _BOOTSTRAP_CAP_TO_ROLE.get(capability, capability)
+    sys_prompt = _AGENT_PROMPTS.get(role, "You are a helpful AI assistant.")
     return {
         "messages": [
-            {"role": "user", "content": item["instruction"]},
-            {"role": "assistant", "content": item["response"]}
+            {"role": "system",    "content": sys_prompt},
+            {"role": "user",      "content": item["instruction"]},
+            {"role": "assistant", "content": item["response"]},
         ]
     }
 
@@ -531,8 +549,9 @@ def load_coding(target: int = _CAP_MAX.get("coding", MAX_SAMPLES)) -> List[Dict]
     samples: List[Dict] = []
 
     # --- ise-uiuc/Magicoder-OSS-Instruct-75K  (MIT, grounded in real OSS code — best source) ---
-    # Cap raised from 4k → 7k: this is the highest-quality source because responses
-    # are derived from actual GitHub code rather than GPT-4 generation chains.
+    # Cap raised 7k → 10k: highest-quality source (responses derived from actual GitHub code).
+    # Larger cap needed because ~30-40% of rows are filtered out by DEBUG/REVIEW keywords
+    # and code-structure checks, so without headroom the final count falls short of target.
     try:
         ds = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K",
                           split="train")
@@ -548,13 +567,14 @@ def load_coding(target: int = _CAP_MAX.get("coding", MAX_SAMPLES)) -> List[Dict]
                     r.update(source="Magicoder-OSS-Instruct-75K", capability="coding")
                     samples.append(r)
                     added += 1
-                    if added >= 7_000:
+                    if added >= 10_000:
                         break
         print(f"  Magicoder-OSS-Instruct-75K: +{added} → {len(samples)} total")
     except Exception as e:
         print(f"  [WARN] Magicoder-OSS-Instruct-75K: {e}")
 
     # --- ise-uiuc/Magicoder-Evol-Instruct-110K  (MIT, 110k, 30+ languages) ---
+    # Cap raised 5k → 7k: supplements OSS-Instruct with broader language diversity.
     try:
         ds = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K",
                           split="train")
@@ -570,16 +590,16 @@ def load_coding(target: int = _CAP_MAX.get("coding", MAX_SAMPLES)) -> List[Dict]
                     r.update(source="Magicoder-Evol-Instruct-110K", capability="coding")
                     samples.append(r)
                     added += 1
-                    if added >= 5_000:
+                    if added >= 7_000:
                         break
         print(f"  Magicoder-Evol-Instruct-110K: +{added} → {len(samples)} total")
     except Exception as e:
         print(f"  [WARN] Magicoder-Evol-Instruct-110K: {e}")
 
     # --- nampdn-ai/stack-exchange-instruction  (CC-BY-SA-4.0, real Stack Overflow Q&A) ---
-    # Human-authored questions and answers covering real-world API usage, environment
-    # issues, and debugging patterns that the synthetic Magicoder sources lack.
-    # Filtered to programming-related tags by keyword matching on the instruction.
+    # Cap raised 3k → 5k: human-authored SO answers differ structurally from synthetic
+    # Magicoder pairs. Many non-code answers pass filter only if code is present, so
+    # a larger iteration window is needed to collect 5k qualifying samples.
     try:
         ds = load_dataset("nampdn-ai/stack-exchange-instruction",
                           split="train")
@@ -598,15 +618,14 @@ def load_coding(target: int = _CAP_MAX.get("coding", MAX_SAMPLES)) -> List[Dict]
                     r.update(source="stack-exchange-instruction", capability="coding")
                     samples.append(r)
                     added += 1
-                    if added >= 3_000:
+                    if added >= 5_000:
                         break
         print(f"  stack-exchange-instruction: +{added} → {len(samples)} total")
     except Exception as e:
         print(f"  [WARN] stack-exchange-instruction: {e}")
 
     # --- iamtarun/python_code_instructions_18k_alpaca  (Apache-2.0, idiomatic Python) ---
-    # Replaces nampdn-ai/tiny-codes which used a synthetic "write code in N minutes"
-    # style inconsistent with real instruction-following training distribution.
+    # Cap raised 3k → 5k: idiomatic Python coverage complements multi-language sources.
     try:
         ds = load_dataset("iamtarun/python_code_instructions_18k_alpaca",
                           split="train")
@@ -622,7 +641,7 @@ def load_coding(target: int = _CAP_MAX.get("coding", MAX_SAMPLES)) -> List[Dict]
                     r.update(source="python_code_instructions_18k", capability="coding")
                     samples.append(r)
                     added += 1
-                    if added >= 3_000:
+                    if added >= 5_000:
                         break
         print(f"  python_code_instructions_18k: +{added} → {len(samples)} total")
     except Exception as e:
@@ -1180,7 +1199,7 @@ def save_jsonl(data: List[Dict], capability: str) -> Path:
     out = TARGET_DIR / f"{capability}_dataset.jsonl"
     with open(out, "w", encoding="utf-8") as f:
         for item in data:
-            f.write(json.dumps(_wrap_assistant_only_loss_format(item), ensure_ascii=False) + "\n")
+            f.write(json.dumps(_build_training_record(item), ensure_ascii=False) + "\n")
     size_mb = out.stat().st_size / 1e6
     print(f"  → Saved {len(data):,} samples to {out}  ({size_mb:.1f} MB)")
 
@@ -1196,7 +1215,8 @@ def save_jsonl(data: List[Dict], capability: str) -> Path:
             try:
                 rec = json.loads(line)
                 msgs = rec.get("messages") or []
-                if not (isinstance(msgs, list) and len(msgs) >= 2
+                if not (isinstance(msgs, list) and len(msgs) >= 3
+                        and any(m.get("role") == "system" and m.get("content") for m in msgs)
                         and any(m.get("role") == "user" and m.get("content") for m in msgs)
                         and any(m.get("role") == "assistant" and m.get("content") for m in msgs)):
                     bad_lines += 1
@@ -1331,11 +1351,7 @@ def load_from_experiences(capability: Optional[str] = None, target: Optional[int
                     if _ts_ev < _cutover_dt:
                         continue
                 try:
-                    _pairs = _build_sft_pair(_contrib, _recipe, _contrib.role)
-                    if isinstance(_pairs, list):
-                        records.extend(_pairs)
-                    else:
-                        records.append(_pairs)
+                    records.extend(_build_sft_pair(_contrib, _recipe, _contrib.role))
                 except Exception as _exc:
                     _log.warning("load_from_experiences: build_sft_pair failed — %s", _exc)
 

@@ -292,6 +292,8 @@ def _promote_to_active(
     eval_results: Optional[Dict[str, Any]] = None,
     regression_results: Optional[Dict[str, Any]] = None,
     eval_loss: float = 0.0,
+    perplexity: Optional[float] = None,
+    assistant_masking_enabled: Optional[bool] = None,
 ) -> None:
     """
     Under manifest file-lock: flip active/previous pointers and write v2 HistoryEntry.
@@ -352,6 +354,8 @@ def _promote_to_active(
         eval_metrics={k: float(v) for k, v in (eval_results or {}).items() if isinstance(v, (int, float))},
         smoke=smoke_results or {},
         eval_loss=eval_loss if eval_loss else None,
+        perplexity=perplexity,
+        assistant_masking_enabled=assistant_masking_enabled,
         won_against_previous=regression_results.get("won") if regression_results else None,
         regression_delta=regression_results.get("delta") if regression_results else None,
         comparison_prompts_n=regression_results.get("prompts_n", 0) if regression_results else 0,
@@ -624,11 +628,12 @@ class LoRATrainer:
             if recipe is None or not hasattr(recipe, "max_seq_length") or recipe.max_seq_length is None:
                 raise RuntimeError("LoRATrainer.train() requires a recipe with max_seq_length override")
 
+            # packing is reported below at the point it's resolved against the
+            # dataset shape — keep this header focused on recipe-time params.
             print(
                 f"\n[TRAINER] batch_size={recipe.per_device_train_batch_size} "
                 f"grad_accum={recipe.gradient_accumulation_steps} "
                 f"effective_batch={recipe.per_device_train_batch_size * recipe.gradient_accumulation_steps} "
-                f"packing={recipe.packing} "
                 f"max_seq_length={recipe.max_seq_length} "
                 f"load_in_4bit={recipe.load_in_4bit}",
                 flush=True,
@@ -645,8 +650,42 @@ class LoRATrainer:
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
 
-            # One-shot validation: render a sample tool-call record through tokenizer.apply_chat_template and inspect for the markers - hard fail
-            self._validate_qwen3_toolcall_wrapping(tokenizer)
+            # 9b: Tokenizer / model vocab-size parity check — catches wrong tokenizer
+            # revision or missing special tokens before any training begins.
+            _model_vocab = getattr(getattr(model, "config", None), "vocab_size", None)
+            if _model_vocab and tokenizer.vocab_size != _model_vocab:
+                print(
+                    f"[TRAINER] WARN: tokenizer.vocab_size={tokenizer.vocab_size} != "
+                    f"model.vocab_size={_model_vocab} — possible tokenizer mismatch",
+                    flush=True,
+                )
+
+            # 9e: OOM headroom — verify GPU memory is < 85% after model load so a
+            # full training run at max_seq_length won't OOM mid-epoch.
+            try:
+                import torch as _torch
+                _used_frac = (
+                    _torch.cuda.memory_allocated()
+                    / _torch.cuda.get_device_properties(0).total_memory
+                )
+                print(f"[TRAINER] GPU memory after model load: {_used_frac:.1%} used", flush=True)
+                if _used_frac > 0.85:
+                    print(
+                        f"[TRAINER] WARN: GPU at {_used_frac:.1%} — high OOM risk at "
+                        f"max_seq_length={recipe.max_seq_length}. Consider reducing batch size.",
+                        flush=True,
+                    )
+            except Exception as _oom_e:
+                print(f"[TRAINER] OOM headroom check skipped: {_oom_e}", flush=True)
+
+            # Apply model-family patched chat template (adds {%- generation %} markers
+            # for proper assistant-only loss masking).  Falls back gracefully when no
+            # patch exists for the current model so future model changes don't break
+            # training — they just lose the masking.
+            _patched = LoRATrainer._load_patched_template(self.base_model)
+            if _patched:
+                tokenizer.chat_template = _patched
+            _use_assistant_masking = LoRATrainer._log_masking_support(tokenizer)
 
             # Apply LoRA via recipe (preferred) or explicit rank/alpha fallback.
             if recipe is not None:
@@ -664,22 +703,42 @@ class LoRATrainer:
             
             print("[TRAINER] Preparing training data...")
 
-            # Apply the tokenizer's chat template to messages-format records here,
-            # in the main process, before HFDataset is created.  Doing it here
-            # avoids passing a tokenizer closure into Unsloth's num_proc=4
-            # subprocess pool, where the closure is unavailable and produces None.
-            _has_messages_records = any("messages" in r for r in dataset)
-            if _has_messages_records:
-                def _render(r):
-                    if "messages" in r:
-                        return {"text": tokenizer.apply_chat_template(
-                            r["messages"], tokenize=False, add_generation_prompt=False
-                        )}
-                    return r
-                dataset = [_render(r) for r in dataset]
-                if eval_dataset:
-                    eval_dataset = [_render(r) for r in eval_dataset]
-                _has_messages_records = False
+            # Unsloth (2026.x) requires a `text` column or `formatting_func`
+            # even when TRL 0.24 would auto-render the conversational format.
+            # Pre-render each record's `messages` with the (already patched)
+            # chat template into a flat `text` column.  Assistant-only masking
+            # is then re-introduced AFTER trainer construction via
+            # unsloth.chat_templates.train_on_responses_only, which operates
+            # on tokenized text by matching the model-family role markers.
+            _is_conversational = bool(dataset and "messages" in dataset[0])
+            if _is_conversational:
+                _rendered: List[Dict[str, Any]] = []
+                for _r in dataset:
+                    _msgs = _r.get("messages") or []
+                    if not _msgs:
+                        continue
+                    _rendered.append({
+                        "text": tokenizer.apply_chat_template(_msgs, tokenize=False),
+                    })
+                dataset = _rendered
+                print(
+                    f"[TRAINER] Pre-rendered {len(dataset)} conversational records "
+                    "into text column via apply_chat_template",
+                    flush=True,
+                )
+
+            # Packing must be off when masking is on, because
+            # train_on_responses_only matches role markers per example — packed
+            # sequences would cross example boundaries and break the mask.
+            _effective_packing = bool(recipe.packing) and not _use_assistant_masking
+            if recipe.packing and not _effective_packing:
+                print(
+                    f"[TRAINER] packing: False (recipe={recipe.packing}, overridden — "
+                    "train_on_responses_only requires per-example boundaries)",
+                    flush=True,
+                )
+            else:
+                print(f"[TRAINER] packing: {_effective_packing}", flush=True)
 
             sft_config_kwargs = dict(
                 per_device_train_batch_size=recipe.per_device_train_batch_size,
@@ -700,30 +759,32 @@ class LoRATrainer:
                 # SFTTrainer dumps ~200 MB checkpoint dirs every 500 steps
                 # (7+ times per capability), consuming ~1.4 GB of wasted disk.
                 save_strategy="no",
-                packing=recipe.packing,
+                packing=_effective_packing,
                 # Suppress wandb / tensorboard init — not needed in training
                 # containers and causes hangs if wandb credentials are absent.
                 report_to="none",
                 dataset_num_proc=4,
                 dataloader_num_workers=2,
-                dataset_text_field=None,
-                dataset_kwargs={"formatting_func": None},
             )
-            if _has_messages_records:
-                try:
-                    sft_config = SFTConfig(**sft_config_kwargs, assistant_only_loss=True)
-                except TypeError:
-                    sft_config = SFTConfig(**sft_config_kwargs)
-            else:
-                sft_config = SFTConfig(**sft_config_kwargs)
+            if _is_conversational:
+                sft_config_kwargs["dataset_text_field"] = "text"
+            # assistant_only_loss is computed post-tokenization by
+            # train_on_responses_only (applied to the trainer below) when the
+            # model family has known role markers — leaving it off here.
+            sft_config = SFTConfig(**sft_config_kwargs)
 
             from datasets import Dataset as HFDataset
+            # Pre-render eval_dataset the same way train data was rendered so
+            # the column schema matches what dataset_text_field expects.
+            _eval_for_hf = eval_dataset
+            if _is_conversational and eval_dataset:
+                _eval_for_hf = [
+                    {"text": tokenizer.apply_chat_template(_r.get("messages") or [], tokenize=False)}
+                    for _r in eval_dataset
+                    if _r.get("messages")
+                ]
             train_dataset = HFDataset.from_list(dataset)
-            eval_hf_dataset = HFDataset.from_list(eval_dataset) if eval_dataset else None
-
-            def _formatting_func(example):
-                t = example.get("text") or (example.get("prompt", "") + example.get("completion", ""))
-                return t if isinstance(t, list) else [t]
+            eval_hf_dataset = HFDataset.from_list(_eval_for_hf) if _eval_for_hf else None
 
             _metrics_path = self.output_dir / "train_metrics.jsonl"
             _callbacks = []
@@ -751,9 +812,45 @@ class LoRATrainer:
                 train_dataset=train_dataset,
                 eval_dataset=eval_hf_dataset,
                 args=sft_config,
-                formatting_func=_formatting_func,
                 callbacks=_callbacks if _callbacks else None,
             )
+
+            # Re-introduce assistant-only loss by zeroing the labels for
+            # everything outside the assistant response span.  This is the
+            # canonical Unsloth pattern for pre-rendered text + chat templates
+            # and is equivalent in effect to TRL's assistant_only_loss=True on
+            # a conversational dataset, but compatible with Unsloth's stricter
+            # SFTTrainer wrapper.
+            _markers = LoRATrainer._response_markers(self.base_model)
+            if _use_assistant_masking and _markers:
+                try:
+                    from unsloth.chat_templates import train_on_responses_only
+                    trainer = train_on_responses_only(
+                        trainer,
+                        instruction_part=_markers[0],
+                        response_part=_markers[1],
+                    )
+                    print(
+                        f"[TRAINER] assistant-only masking applied via "
+                        f"train_on_responses_only (instruction={_markers[0]!r}, "
+                        f"response={_markers[1]!r})",
+                        flush=True,
+                    )
+                except Exception as _wrap_exc:
+                    print(
+                        f"[TRAINER] WARN: train_on_responses_only unavailable "
+                        f"({_wrap_exc}) — training on full sequence loss",
+                        flush=True,
+                    )
+                    _use_assistant_masking = False
+            elif _use_assistant_masking:
+                print(
+                    "[TRAINER] WARN: assistant masking template detected but no "
+                    "response markers registered for this model family — "
+                    "training on full sequence loss",
+                    flush=True,
+                )
+                _use_assistant_masking = False
 
             print("[TRAINER] Starting Unsloth training...")
             if resume_from_checkpoint:
@@ -814,6 +911,7 @@ class LoRATrainer:
                 flush=True,
             )
 
+            import math as _math
             return {
                 'status':          'success',
                 'adapter_id':      self.adapter_id,
@@ -824,8 +922,10 @@ class LoRATrainer:
                 'size_mb':         size_mb,
                 'final_loss':      round(final_loss, 6),
                 'eval_loss':       round(eval_loss, 6) if eval_loss else None,
+                'perplexity':      round(_math.exp(eval_loss), 4) if eval_loss else None,
                 'metrics_summary': _metrics_summary,
                 'duration_s':      duration_s,
+                'assistant_masking_enabled': _use_assistant_masking,
             }
 
         except Exception as e:
@@ -870,25 +970,77 @@ class LoRATrainer:
             'samples': len(dataset),
         }
 
-    def _validate_qwen3_toolcall_wrapping(self, tokenizer):
+    @staticmethod
+    def _load_patched_template(model_id: str) -> "Optional[str]":
         """
-        Warn when the Qwen3 chat template lacks {% generation %} markers for
-        assistant tool-call turns. Those markers are Jinja2 control tags in
-        the template *source* — they never appear in rendered output, so they
-        must be checked against tokenizer.chat_template, not apply_chat_template().
+        Load a chat template patched with {%- generation %}/{%- endgeneration %}
+        markers for the given model.  Falls back to None so callers can disable
+        assistant_only_loss gracefully when no patch exists.
 
-        When absent, TRL's assistant_only_loss falls back to token-boundary
-        detection, which works correctly for plain instruction-response pairs.
-        Training is not blocked — tool-call masking accuracy is reduced only
-        if the training data contains tool-call turns.
+        Template files live at training/bootstrap/templates/{ModelFamily}.jinja.
+        Match is by substring: "Qwen3-8B" matches "Qwen3.jinja".  Adding support
+        for a new model family requires only dropping a new .jinja file — no code
+        change.
+        """
+        templates_dir = Path(__file__).parent / "templates"
+        if not templates_dir.is_dir():
+            return None
+        # Search the full model_id string (not just the last component) so that
+        # local HF cache paths like /cache/models--Qwen--Qwen3-8B/snapshots/abc123
+        # still match.  "qwen3" appears in the path slug even when the last
+        # component is a commit hash.
+        model_id_lower = model_id.lower()
+        for tmpl in templates_dir.glob("*.jinja"):
+            if tmpl.stem.lower() in model_id_lower:
+                return tmpl.read_text(encoding="utf-8")
+        return None
+
+    # Role markers used by train_on_responses_only to locate the assistant
+    # response span in a pre-rendered chat. Substring-matched against the
+    # base model id, mirroring _load_patched_template. Extend by adding a
+    # new entry when supporting a new model family.
+    _RESPONSE_MARKERS: Dict[str, tuple] = {
+        "qwen3":  ("<|im_start|>user\n", "<|im_start|>assistant\n"),
+        "qwen2":  ("<|im_start|>user\n", "<|im_start|>assistant\n"),
+        "qwen":   ("<|im_start|>user\n", "<|im_start|>assistant\n"),
+        "llama":  ("<|start_header_id|>user<|end_header_id|>\n\n",
+                   "<|start_header_id|>assistant<|end_header_id|>\n\n"),
+    }
+
+    @staticmethod
+    def _response_markers(model_id: str) -> "Optional[tuple]":
+        """Return (instruction_part, response_part) for *model_id* or None.
+
+        Mirrors _load_patched_template's substring match so adding a model
+        family requires updating only the _RESPONSE_MARKERS table.
+        """
+        mid = model_id.lower()
+        for key, markers in LoRATrainer._RESPONSE_MARKERS.items():
+            if key in mid:
+                return markers
+        return None
+
+    @staticmethod
+    def _log_masking_support(tokenizer) -> bool:
+        """
+        Check whether the active chat template has {%- generation %} markers and
+        log the result.  Returns True when assistant-only loss masking is safe to
+        enable.
+
+        NOTE: TRL 0.24 raises RuntimeError when assistant_only_loss=True is used
+        with a template that lacks these markers — there is NO token-boundary
+        fallback.  This method MUST be called after any template patch is applied.
         """
         template_source = getattr(tokenizer, "chat_template", "") or ""
-        has_generation_marker = "{% generation %}" in template_source
-        if not has_generation_marker:
+        has_marker = "{% generation %}" in template_source or "{%- generation %}" in template_source
+        if has_marker:
+            print("[TRAINER] chat template has {%- generation %} markers — assistant_only_loss enabled.", flush=True)
+        else:
             print(
-                "[TRAINER] WARN: chat template lacks {% generation %} markers — "
-                "assistant_only_loss will use token-boundary detection. "
-                "Masking is correct for plain instruction-response pairs.",
+                "[TRAINER] WARN: chat template lacks {%- generation %} markers — "
+                "assistant_only_loss disabled (full-sequence loss). "
+                "Add a patched template to training/bootstrap/templates/ to enable masking.",
                 flush=True,
             )
+        return has_marker
 
