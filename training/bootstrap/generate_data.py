@@ -260,6 +260,10 @@ _HAS_CODE_RE = re.compile(
 
 # Signs that a response is actually orchestration metadata leakage
 from shared.contracts.quality_filters import METADATA_LEAKAGE_RE as _LEAKAGE_RE
+# Evaluator JSON schemas — reviewer/critic curated pairs must match the
+# Pydantic shape that vLLM guided decoding enforces at inference time.
+from shared.contracts.evaluator_schemas import ReviewerOutput, CriticOutput
+from pydantic import ValidationError
 
 # Detects indentation (a real code structural element)
 _INDENT_RE = re.compile(r"^[ \t]{2,}", re.M)
@@ -358,7 +362,7 @@ def _wrap_assistant_only_loss_format(item: Dict) -> Dict:
     }
 
 def _wrap_reviewer_format(text: str) -> str:
-    """Ensure reviewer response has SCORE:/STRENGTHS:/ISSUES:/SUGGESTIONS: structure.
+    """Build a ReviewerOutput JSON string from review prose.
 
     If the response already has a SCORE: header, return it as-is.
     If the response is rich enough (≥ 3 sentences or a code block suggesting
@@ -368,9 +372,6 @@ def _wrap_reviewer_format(text: str) -> str:
     Returns the original or structured text, or empty string to signal rejection.
     """
     stripped = text.strip()
-    if re.search(r'^SCORE\s*:', stripped, re.M | re.I):
-        return stripped  # already structured
-
     # Require minimum content richness: either a code block or ≥ 3 sentences.
     sentence_count = len(re.split(r'(?<=[.!?])\s+', stripped))
     has_code_block = "```" in stripped
@@ -381,30 +382,33 @@ def _wrap_reviewer_format(text: str) -> str:
     sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+|\n[-\u2022*]\s*', stripped)
              if len(s.strip()) > 15]
 
-    strengths = [s for s in sents if any(w in s.lower() for w in [
+    strengths = [s[:150] for s in sents if any(w in s.lower() for w in [
         "correct", " good ", "clean", "efficient", "readable", "well", "clear",
-        "handles", "structured", "simple"])]
-    issues = [s for s in sents if any(w in s.lower() for w in [
+        "handles", "structured", "simple"])][:3]
+    issues = [s[:150] for s in sents if any(w in s.lower() for w in [
         "issue", "bug", "problem", "error", "improve", "missing", "should",
-        "could", "consider", "vulnerability", "security", "performance"])]
-    suggestions = [s for s in sents if s not in strengths and s not in issues]
+        "could", "consider", "vulnerability", "security", "performance"])][:4]
+    suggestions = [s[:150] for s in sents
+                   if s not in strengths and s not in issues][:3]
 
-    parts = [f"SCORE: {score}"]
-    parts.append("STRENGTHS:\n" + ("\n".join(f"- {s[:150]}" for s in strengths[:3])
-                                   if strengths else "- None identified"))
-    parts.append("ISSUES:\n" + ("\n".join(f"- {s[:150]}" for s in issues[:4])
-                                if issues else "  None"))
-    if suggestions:
-        parts.append("SUGGESTIONS:\n" + "\n".join(f"- {s[:150]}" for s in suggestions[:3]))
-    elif issues:
-        parts.append("SUGGESTIONS:\n- Address the identified issues")
-    else:
-        parts.append("SUGGESTIONS:\n- Consider adding unit tests")
-    return "\n".join(parts)
+    if not strengths:
+        strengths = ["None identified"]
+    if not suggestions:
+        suggestions = ["Address the identified issues" if issues else "Consider adding unit tests"]
+
+    try:
+        return ReviewerOutput.model_validate({
+            "score":       score,
+            "strengths":   strengths,
+            "issues":      issues,
+            "suggestions": suggestions,
+        }).model_dump_json()
+    except ValidationError:
+        return ""
 
 
 def _wrap_critic_format(text: str) -> str:
-    """Ensure critic response has SCORE:/VERDICT:/BLOCKERS:/IMPROVEMENT: structure.
+    """Build a CriticOutput JSON string from critic prose.
 
     If already structured, return as-is.
     Require ≥ 3 sentences OR a code block for meaningful content — reject terse
@@ -415,9 +419,6 @@ def _wrap_critic_format(text: str) -> str:
     Returns the structured text, or empty string to signal rejection.
     """
     stripped = text.strip()
-    if re.search(r'^SCORE\s*:', stripped, re.M | re.I):
-        return stripped  # already structured
-
     # Require minimum content richness.
     sentence_count = len(re.split(r'(?<=[.!?])\s+', stripped))
     has_code_block = "```" in stripped
@@ -446,14 +447,15 @@ def _wrap_critic_format(text: str) -> str:
     if not improvement:
         return ""  # No actionable content — reject rather than fabricate
 
-    parts = [
-        f"SCORE: {score}",
-        f"VERDICT: {first_sentence}",
-        "BLOCKERS:\n" + ("\n".join(f"- {s[:150]}" for s in blockers[:3])
-                        if blockers else "  None"),
-        f"IMPROVEMENT: {improvement}",
-    ]
-    return "\n".join(parts)
+    try:
+        return CriticOutput.model_validate({
+            "score":       score,
+            "verdict":     first_sentence,
+            "blockers":    [b[:150] for b in blockers[:3]],
+            "improvement": improvement,
+        }).model_dump_json()
+    except ValidationError:
+        return ""
 
 
 def _wrap_debugger_format(instruction: str, response: str) -> str:

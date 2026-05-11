@@ -436,7 +436,22 @@ async def main():
                              "validate_adapter.py on the probe weights, then exit 0 (pass) "
                              "or 3 (fail). Run before a long bootstrap to catch broken "
                              "recipes, OOM conditions, or data issues early.")
+    parser.add_argument("--validate-only",
+                        metavar="CAP",
+                        help="Run validate_adapter.py on an existing adapter without training")
     args = parser.parse_args()
+    
+    if args.validate_only:
+        cap = args.validate_only
+        if cap not in AGENT_SPECS:
+            parser.error(f"Unknown capability '{cap}'")
+
+        checkpoint_dir = Path(os.environ.get("TRAINING__OUTPUT_DIR", "/data/lora_checkpoints"))
+        result = await validate_adapter(cap, checkpoint_dir)
+
+        print(f"\n[VALIDATE-ONLY] {cap}: {result}")
+        sys.exit(0 if result["status"] == "PASS" else 3)
+
 
     # --capability (singular) is a shorthand for --capabilities with one value.
     # If both are given, --capability takes precedence with a warning.
