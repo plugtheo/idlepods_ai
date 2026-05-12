@@ -743,15 +743,28 @@ class LoRATrainer:
             sft_config_kwargs = dict(
                 per_device_train_batch_size=recipe.per_device_train_batch_size,
                 gradient_accumulation_steps=recipe.gradient_accumulation_steps,
-                warmup_ratio=0.05,
+                # 10% warmup over the run gives the optimizer enough steps to
+                # find a stable trajectory before hitting peak LR. 5% was too
+                # aggressive — instability hit right as warmup peaked on the
+                # 15k-sample coder run.
+                warmup_ratio=0.10,
                 num_train_epochs=num_epochs,
                 learning_rate=learning_rate,
+                # Clip per-step gradient norm. Without this, a single bad batch
+                # produced grad_norm > 200 mid-run on the coder bootstrap and
+                # applied a destructive weight update. 1.0 is the value used by
+                # Llama/Mistral/Qwen reference recipes and is safe across all
+                # capabilities.
+                max_grad_norm=1.0,
                 fp16=False,
                 bf16=True,
                 logging_steps=10,
                 optim="adamw_8bit",
                 weight_decay=0.01,
-                lr_scheduler_type="linear",
+                # Cosine decay is smoother than linear for long runs (7k+ steps),
+                # avoids the late-training "LR cliff", and matches Llama/Mistral/
+                # Qwen reference recipes.
+                lr_scheduler_type="cosine",
                 output_dir=str(self.output_dir / "checkpoint"),
                 max_seq_length=recipe.max_seq_length,
                 # Never write HF checkpoints during training — we do a single

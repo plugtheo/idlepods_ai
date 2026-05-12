@@ -5,9 +5,17 @@ default:
   alpha: 64
   dropout: 0.0
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
-  learning_rate: 2e-4
+  # 2e-4 caused gradient explosions (grad_norm >200) on the 15k-sample coder
+  # run, with loss plateauing in 0.6-0.8 instead of converging. 1e-4 is the
+  # conservative-safe value for rsLora rank=32 on Qwen3-8B; raise only after
+  # a clean run completes with grad_norm consistently < 5.
+  learning_rate: 1e-4
   num_epochs: 3
-  max_seq_length: 10240
+  # 8192 covers all current curated records (p99 ~1.2k tokens) with
+  # ample headroom for multi-turn experience records captured during
+  # online retraining. Larger values reserve unused VRAM and slow
+  # padding-free packing on heterogeneous batches without quality gain.
+  max_seq_length: 8192
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 8
   packing: true
@@ -17,7 +25,7 @@ default:
   resume_from_prev_adapter: true
 
 by_role:
-  coder:    {r: 32, alpha: 64, num_epochs: 4, dropout: 0.05}
+  coder:    {r: 32, alpha: 64, num_epochs: 3, dropout: 0.05}
   debugger: {r: 32, alpha: 64, num_epochs: 3, dropout: 0.05}
   consensus: {peft_type: none}
 
