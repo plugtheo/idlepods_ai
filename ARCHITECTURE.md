@@ -468,3 +468,143 @@ A post-training adapter is loaded as `<adapter>__staging` and run through fixed 
 - `training` mounts the host docker socket so the scheduler can launch sibling containers via `docker compose run`.
 - Health checks: every FastAPI service exposes `GET /health` returning `{"status": "ok", "service": "<name>"}` plus optional component statuses.
 - gRPC stubs (`shared/grpc_stubs/`) are generated from `.proto` via `scripts/generate_protos.py` and committed.
+
+## 9. Adaptive LoRA Rank Policy
+
+  ### Decision
+
+  Each per-role adapter grows its LoRA rank organically as the dataset matures.
+  When an adapter saturates at the configured cap and plateau signals confirm
+  it has stopped learning, the policy **freezes** it. A frozen adapter continues
+  to serve inference but is excluded from further retraining, leaving it ready
+  to be merged with the shared base into a standalone per-agent model.
+
+  This route was chosen over the alternative of merging adapters into the shared
+  base mid-lifecycle. With multiple agents retraining at uneven cadences,
+  merging any one of them back into the shared base would bias that base toward
+  the most active role and corrupt the others. Per-adapter caps with eventual
+  out-of-band merge to a separate per-agent model preserves the shared base as
+  a neutral anchor for every role.
+
+  ### Why r=256 is the cap
+
+  - r=8–16: style/format shifts only.
+  - r=32–64: task specialization sweet spot (~80–90% of full-FT quality).
+  - r=128: real knowledge injection, useful past ~50K high-quality pairs.
+  - **r=256**: ~95% of full-FT quality; the practical 3090 ceiling in bf16.
+  - r=512+: returns diminish sharply; merge-to-base is more efficient than
+    continuing to grow the adapter at this point.
+
+  `AdapterRecipe.max_r_cap=256` matches `vllm-primary --max-lora-rank 256` in
+  `docker/compose.yml`. Raising one requires raising the other.
+
+  ### Lifecycle
+
+  bootstrap (r=YAML default, e.g. 32)
+          │
+          ▼
+  retrain → retrain → retrain   (each round produces an adapter_diff_*.json)
+          │
+          ▼
+  plateau signals fire ─────► auto-promote: r doubles, alpha:r ratio preserved,
+          │                    zero-pad warm-start expands prior weights into
+          │                    new rank slots (ΔW preserved bit-identically
+          │                    at step 0; old slots keep refining, new slots
+          │                    fill from zero).
+          ▼
+  retrain at promoted rank → ... → plateau again → promote again ...
+          │
+          ▼
+  rank reaches max_r_cap (256)
+          │
+          ▼
+  plateau signals fire AT cap ───► auto-freeze: wrapper skips this role on
+                                    every future tick. Adapter still serves
+                                    inference; ready for operator-driven
+                                    merge-to-base into a standalone per-agent
+                                    model.
+
+  ### Plateau signals
+
+  All three must fire across a smoothing window of 3 consecutive
+  `adapter_diff_*.json` reports for the policy to act:
+
+  1. **Loss reduction per round < 2%** — adapter no longer improves on its
+     current capacity.
+  2. **Regression delta < 0.005** — new versions barely beat the previous
+     active adapter.
+  3. **Dataset growth ≥ 1.5×** since the last bump — enough new data has
+     accumulated that the current rank cannot absorb it at convergence.
+
+  Same signal set drives both promotion (when below cap) and freeze (at cap).
+  After a rank bump, signal #1 naturally blocks freeze for the first 1–2
+  rounds at the new rank because comparing r=new vs r=prev shows large loss
+  reduction — built-in warm-up period before freeze becomes eligible.
+
+  ### Per-role retrain trigger
+
+  Each role has its own `last_trained_experience_timestamp` cursor written to
+  its adapter's `metadata.json` on every successful promotion. The training
+  wrapper counts qualifying contributions **since the cursor** per role; a
+  role is eligible for this tick only when:
+
+  - `is_frozen(adapter_dir)` is **False**, AND
+  - new qualifying experiences ≥ `min_new_experiences_per_role` (default 100).
+
+  High-traffic roles progress independently of quiet ones. Failed retrains
+  leave the cursor intact so the next tick retries.
+
+  ### Guards
+
+  | Guard | Purpose |
+  |---|---|
+  | `rank_promotion_cooldown=2` | Two consecutive successful promotions required between rank bumps. Prevents one noisy round
+  driving a permanent capacity decision. |
+  | `_SMOOTHING_WINDOW=3` | Three consecutive `adapter_diff` reports required before any signal can fire. Filters single-round
+  noise. |
+  | History-anchored effective rank | `maybe_promote_rank` reads `metadata.history[-1].lora_r` as ground truth. Stale YAML
+  defaults passed in by callers cannot trigger double-bumps. |
+  | Zero-pad warm-start | Bumping rank from r=N to r=2N expands B with zero columns and A with zero rows. `B_new @ A_new == B_old
+  @ A_old` at init, so prior learning is preserved bit-identically. |
+  | `base_model_hash` anchoring | Every adapter version records the HuggingFace snapshot commit it trained against. Drift between
+  consecutive versions emits a `base_model_drift` warning in history so the merge tool can audit. |
+  | `tokenizer_hash` anchoring | SHA-256 of the base tokenizer.json, cross-resolved against the local HF cache. Detects silent
+  tokenizer changes that would corrupt the adapter's learned token mappings. |
+  | Regression gate | New adapter must match or improve the previous active adapter on a fixed prompt set. Failures mark the run
+  failed and leave the old adapter live. |
+  | Smoke + base-skill gates | Catastrophic failures (broken recipe, OOM, corrupt save, base skill regression) block promotion
+  before swap. |
+  | Manifest file-lock | All `manifest.json` mutations go through `write_manifest_locked`. Pre-existing concurrency invariant. |
+  | Override file isolation | `recipes.yaml` is read-only intent. Auto-applied state lives in `runtime_recipe_override.json` per
+  adapter. Recipe text never mutates. |
+
+  ### File map
+
+  | File | Role |
+  |---|---|
+  | `shared/contracts/training.py` | `AdapterRecipe` with `max_r_cap`, `rank_promotion_cooldown`. |
+  | `training/app/rank_policy.py` | `maybe_promote_rank`, `maybe_freeze_at_cap`, `is_frozen`, `apply_override`. |
+  | `training/app/trainer_wrapper.py` | Phase-1 gate: skip frozen roles + per-role cursor + threshold check. |
+  | `training/app/trainer_entry.py` | Apply override → freeze check (exit if frozen) → promote check → re-apply override → train
+  at effective rank. Zero-pad warm-start when promoted rank > saved rank. |
+  | `training/bootstrap/lora_trainer.py` | `_zero_pad_adapter_to_rank`, `_compute_base_model_hash`,
+  `_compute_base_model_tokenizer_hash`, `_post_train_stage` (drift detection), `_promote_to_active` (cursor advance). |
+  | `training/bootstrap/backfill_hashes.py` | Idempotent CLI to backfill `tokenizer_hash` + `base_model_hash` on legacy adapters
+  without retraining. |
+  | `docker/compose.yml` | `vllm-primary --max-lora-rank 256 --max-loras 8`. Must match `AdapterRecipe.max_r_cap`. |
+  | `<adapter_dir>/runtime_recipe_override.json` | Per-adapter auto-applied state: `r`, `alpha`, promotion provenance, `frozen`
+  flag, freeze provenance. |
+  | `<adapter_dir>/metadata.json` | Per-adapter manifest entry: status, version, lora_r/alpha, hashes, cursor, full history. |
+  | `<adapter_dir>/reports/adapter_diff_*.json` | Per-run audit reports consumed by the policy as signal input. |
+
+  ### Operational notes
+
+  - **Inspect freeze state**: `grep -l '"frozen": true' data/lora_checkpoints/*/runtime_recipe_override.json`
+  - **Unfreeze**: set `"frozen": false` in the override file *while keeping `r`/`alpha`*. Deleting the file entirely will fall
+  back to YAML rank and cause a shape mismatch against the high-rank saved weights — only do that as part of a clean reset after
+  merging the adapter into a per-agent base model.
+  - **Raise the cap beyond 256**: update both `AdapterRecipe.max_r_cap` and `vllm-primary --max-lora-rank` in `docker/compose.yml`
+   together. At r=512+ on a 3090, expect to need `load_in_4bit=true` in the recipe (QLoRA) to fit.
+  - **Backfill legacy adapters**: `python -m training.bootstrap.backfill_hashes --checkpoint-dir data/lora_checkpoints` adds
+  `tokenizer_hash` and `base_model_hash` to existing metadata without retraining. `dataset_hash` is marked unrecoverable for
+  pre-existing entries (the bootstrap dataset was unlinked at train time).

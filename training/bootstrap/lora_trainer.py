@@ -63,18 +63,99 @@ def _compute_trainer_version() -> str:
     return "|".join(parts) or "unknown"
 
 
+def _compute_base_model_hash(base_model_id: str) -> str:
+    """
+    Resolve the HuggingFace commit hash (snapshot revision) of the base model.
+
+    The snapshot revision uniquely pins the base weights; an adapter only has
+    meaning relative to the exact base it was trained against. A mismatch on
+    consecutive training rounds means the base drifted under us and the
+    adapter's prior learning may no longer compose correctly — this is the
+    invariant that protects future merge-to-base.
+
+    Resolution order:
+      1. If *base_model_id* is a filesystem path containing
+         ".../snapshots/<hash>/", extract <hash> directly (offline-safe).
+      2. Otherwise look up the local HF hub cache for the model id and
+         return the snapshot directory name.
+      3. Fall back to "unknown" when neither path resolves.
+    """
+    normalized = base_model_id.replace("\\", "/")
+    if "/snapshots/" in normalized:
+        commit = normalized.split("/snapshots/", 1)[1].split("/", 1)[0]
+        if commit and commit not in {"main", "master"}:
+            return commit
+
+    try:
+        import huggingface_hub.constants as _hfc
+        hub_cache = Path(
+            getattr(_hfc, "HF_HUB_CACHE", Path.home() / ".cache" / "huggingface" / "hub")
+        )
+        slug = "models--" + base_model_id.replace("/", "--")
+        snap_root = hub_cache / slug / "snapshots"
+        if snap_root.is_dir():
+            for snap in reversed(sorted(snap_root.iterdir())):
+                if snap.is_dir() and (snap / "config.json").exists():
+                    return snap.name
+    except Exception:
+        pass
+
+    return "unknown"
+
+
 def _compute_base_model_tokenizer_hash(base_model_id: str) -> str:
     """
     SHA-256 of the base model's tokenizer.json from the local HF hub cache.
     Falls back to "unknown" when offline or cache is missing so training is
-    never blocked — but the hash will always be consistent on the same machine.
+    never blocked — but the hash will always be consistent for the same
+    snapshot revision regardless of which host runs the lookup.
+
+    Resolution order:
+      1. If *base_model_id* is itself a snapshot directory that exists on
+         disk, hash the tokenizer.json inside it.
+      2. If *base_model_id* looks like a snapshot path but does not exist on
+         this host (e.g., a Linux container path read from metadata on a
+         Windows host), parse the slug + commit out of the string and look
+         them up in the local HF hub cache.
+      3. Treat *base_model_id* as a repo id and let huggingface_hub resolve it.
+      4. Fall back to the last snapshot of the slug-derived directory.
     """
+    normalized = base_model_id.replace("\\", "/")
+
+    # 1. Direct path read — works inside the training container where the
+    #    snapshot directory the trainer wrote into metadata is also live.
+    if "/snapshots/" in normalized:
+        direct_tok = Path(base_model_id) / "tokenizer.json"
+        if direct_tok.exists():
+            return hashlib.sha256(direct_tok.read_bytes()).hexdigest()
+
+        # 2. Cross-host re-resolution: extract <slug>/snapshots/<commit> and
+        #    look it up in this host's HF cache. Lets a Windows host backfill
+        #    hashes from metadata that was written by the Linux container.
+        try:
+            parts = normalized.split("/snapshots/", 1)
+            slug_seg = parts[0].rstrip("/").split("/")[-1]
+            commit = parts[1].split("/", 1)[0]
+            if slug_seg.startswith("models--"):
+                import huggingface_hub.constants as _hfc
+                hub_cache = Path(
+                    getattr(_hfc, "HF_HUB_CACHE", Path.home() / ".cache" / "huggingface" / "hub")
+                )
+                tok_path = hub_cache / slug_seg / "snapshots" / commit / "tokenizer.json"
+                if tok_path.exists():
+                    return hashlib.sha256(tok_path.read_bytes()).hexdigest()
+        except Exception:
+            pass
+
+    # 3. Standard repo-id resolution via huggingface_hub.
     try:
         from huggingface_hub import hf_hub_download
         tok_path = hf_hub_download(base_model_id, "tokenizer.json", local_files_only=True)
         return hashlib.sha256(Path(tok_path).read_bytes()).hexdigest()
     except Exception:
         pass
+
+    # 4. Last-snapshot fallback for repo-id form (Qwen/Qwen3-8B → models--Qwen--Qwen3-8B).
     try:
         import huggingface_hub.constants as _hfc
         hub_cache = Path(
@@ -90,6 +171,89 @@ def _compute_base_model_tokenizer_hash(base_model_id: str) -> str:
     except Exception:
         pass
     return "unknown"
+
+
+def _zero_pad_adapter_to_rank(
+    src_dir: Path,
+    dst_dir: Path,
+    new_r: int,
+    new_alpha: int,
+) -> int:
+    """
+    Expand a saved LoRA adapter to a higher rank by zero-padding every B
+    (column-wise) and A (row-wise) matrix in the state dict. Lets a fresh
+    higher-rank PEFT model warm-start from a lower-rank checkpoint without
+    discarding any prior learning.
+
+    Mathematically:
+
+        B_new = [B_old | 0]        shape (d, new_r)
+        A_new = [A_old; 0]         shape (new_r, d)
+        B_new @ A_new              =  B_old @ A_old + 0  ==  B_old @ A_old
+
+    So the expanded adapter produces the exact same ΔW at step 0 as the
+    source. Training then refines the original rank slots AND fills the
+    zero-initialized new slots from the data — the "grow without restart"
+    property of LoRA. DoRA's lora_magnitude_vector is rank-independent and
+    is copied through untouched.
+
+    Returns the detected old rank for logging.
+    """
+    from safetensors.torch import load_file, save_file
+    import torch
+
+    src_dir = Path(src_dir)
+    dst_dir = Path(dst_dir)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mirror auxiliary files (tokenizer, special tokens, README, etc.) but
+    # skip the weights and adapter_config.json — those we rewrite.
+    for f in src_dir.iterdir():
+        if not f.is_file():
+            continue
+        if f.name in ("adapter_model.safetensors", "adapter_model.bin", "adapter_config.json"):
+            continue
+        shutil.copy2(f, dst_dir / f.name)
+
+    src_weights = src_dir / "adapter_model.safetensors"
+    if not src_weights.exists():
+        raise FileNotFoundError(f"No adapter_model.safetensors at {src_dir}")
+    state_dict = load_file(str(src_weights))
+
+    detected_old_r = 0
+    out: Dict[str, "torch.Tensor"] = {}
+    for key, tensor in state_dict.items():
+        if key.endswith("lora_A.weight"):
+            r_old, d = tensor.shape
+            detected_old_r = max(detected_old_r, r_old)
+            if r_old < new_r:
+                pad = torch.zeros((new_r - r_old, d), dtype=tensor.dtype, device=tensor.device)
+                tensor = torch.cat([tensor, pad], dim=0)
+        elif key.endswith("lora_B.weight"):
+            d, r_old = tensor.shape
+            detected_old_r = max(detected_old_r, r_old)
+            if r_old < new_r:
+                pad = torch.zeros((d, new_r - r_old), dtype=tensor.dtype, device=tensor.device)
+                tensor = torch.cat([tensor, pad], dim=1)
+        out[key] = tensor
+
+    save_file(out, str(dst_dir / "adapter_model.safetensors"))
+
+    # adapter_config.json must reflect the new rank/alpha or PEFT will
+    # instantiate a model of the wrong shape.
+    src_cfg = src_dir / "adapter_config.json"
+    if src_cfg.exists():
+        try:
+            cfg = json.loads(src_cfg.read_text(encoding="utf-8"))
+            cfg["r"] = new_r
+            cfg["lora_alpha"] = new_alpha
+            (dst_dir / "adapter_config.json").write_text(
+                json.dumps(cfg, indent=2), encoding="utf-8"
+            )
+        except (OSError, json.JSONDecodeError):
+            shutil.copy2(src_cfg, dst_dir / "adapter_config.json")
+
+    return detected_old_r
 
 
 def _write_metrics_summary(metrics_path: Path, output_path: Path) -> dict:
@@ -186,6 +350,7 @@ def _post_train_stage(
     note: str = "bootstrap",
     dataset_hash: str = "unknown",
     tokenizer_hash: str = "unknown",
+    base_model_hash: str = "unknown",
     trainer_version: str = "",
     experience_record_count: int = 0,
     synthetic_record_count: int = 0,
@@ -233,6 +398,43 @@ def _post_train_stage(
     _total = experience_record_count + synthetic_record_count
     _exp_pct = round(experience_record_count / _total * 100, 1) if _total > 0 else 0.0
 
+    # ── Base-model drift detection ─────────────────────────────────────────
+    # Compare the new base_model_hash against the previous version's hash.
+    # A mismatch (both known and different) means the base weights moved
+    # under us between training rounds — adapter compositions from previous
+    # versions may no longer apply cleanly, and merge-to-base later will
+    # need to pick a single base anchor. Record the drift in the new history
+    # entry so the merge tool can audit it; don't hard-block (operator may
+    # have intentionally upgraded the base, e.g., Qwen3 → Qwen3.5).
+    prev_base_hash: Optional[str] = None
+    for prev in reversed(old_history):
+        candidate = prev.get("base_model_hash") if isinstance(prev, dict) else None
+        if candidate and candidate != "unknown":
+            prev_base_hash = candidate
+            break
+    base_drift_warning: Optional[Dict[str, str]] = None
+    if (
+        prev_base_hash
+        and base_model_hash
+        and base_model_hash != "unknown"
+        and prev_base_hash != base_model_hash
+    ):
+        base_drift_warning = {
+            "previous_base_model_hash": prev_base_hash,
+            "new_base_model_hash": base_model_hash,
+            "message": (
+                "Base model snapshot differs from the previous adapter version. "
+                "Adapter weights are only meaningful relative to the base they "
+                "were trained against; merge-to-base from this generation forward "
+                "must use the new base."
+            ),
+        }
+        print(
+            f"  [WARN] base_model drift detected for {capability}_lora: "
+            f"prev={prev_base_hash[:12]}… new={base_model_hash[:12]}…",
+            flush=True,
+        )
+
     new_history_entry: Dict[str, Any] = {
         "version":                new_version,
         "status":                 "staging",
@@ -247,11 +449,14 @@ def _post_train_stage(
         "note":                   note,
         "dataset_hash":           dataset_hash,
         "tokenizer_hash":         tokenizer_hash,
+        "base_model_hash":        base_model_hash,
         "trainer_version":        _tv,
         "experience_record_count": experience_record_count,
         "synthetic_record_count":  synthetic_record_count,
         "experience_data_pct":     _exp_pct,
     }
+    if base_drift_warning:
+        new_history_entry["base_model_drift"] = base_drift_warning
 
     new_meta: Dict[str, Any] = {
         "name":                   f"{capability}_lora",
@@ -268,6 +473,7 @@ def _post_train_stage(
         "size_mb":                size_mb,
         "dataset_hash":           dataset_hash,
         "tokenizer_hash":         tokenizer_hash,
+        "base_model_hash":        base_model_hash,
         "trainer_version":        _tv,
         "experience_record_count": experience_record_count,
         "synthetic_record_count":  synthetic_record_count,
@@ -294,10 +500,18 @@ def _promote_to_active(
     eval_loss: float = 0.0,
     perplexity: Optional[float] = None,
     assistant_masking_enabled: Optional[bool] = None,
+    last_experience_timestamp: Optional[str] = None,
 ) -> None:
     """
     Under manifest file-lock: flip active/previous pointers and write v2 HistoryEntry.
     Also updates metadata.json status from 'staging' to 'active'.
+
+    *last_experience_timestamp* is the ISO-8601 timestamp of the newest
+    qualifying experience that contributed to this training run. Stored on
+    the role's metadata.json as the per-role retrain cursor so the next
+    scheduler tick can gate this role on accumulated new data alone.
+    Only advanced on successful promotion (failed runs leave the cursor
+    intact so retries are eligible immediately).
     """
     adapter_name = f"{capability}_lora"
     new_version  = new_meta["version"]
@@ -309,6 +523,8 @@ def _promote_to_active(
             meta = json.loads(meta_path.read_text())
             meta["status"] = "active"
             meta["updated_at"] = now_iso
+            if last_experience_timestamp:
+                meta["last_trained_experience_timestamp"] = last_experience_timestamp
             for entry in meta.get("history", []):
                 if entry.get("version") == new_version:
                     entry["status"] = "active"
@@ -316,6 +532,8 @@ def _promote_to_active(
                         entry["smoke"] = smoke_results
                     if eval_results:
                         entry["eval"] = eval_results
+                    if last_experience_timestamp:
+                        entry["last_trained_experience_timestamp"] = last_experience_timestamp
                     break
             meta_path.write_text(json.dumps(meta, indent=2))
         except (json.JSONDecodeError, OSError):
@@ -347,6 +565,7 @@ def _promote_to_active(
         },
         dataset_hash=new_meta.get("dataset_hash", "unknown"),
         tokenizer_hash=new_meta.get("tokenizer_hash", "unknown"),
+        base_model_hash=new_meta.get("base_model_hash", "unknown"),
         trainer_version=new_meta.get("trainer_version", _compute_trainer_version()),
         n_samples=last_history.get("n_samples", 0),
         final_loss=last_history.get("final_loss", 0.0),

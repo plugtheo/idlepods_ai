@@ -22,6 +22,7 @@ Output (auto-discovered by ModelRegistry._scan_adapters):
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -42,7 +43,16 @@ if str(_REPO_ROOT) not in sys.path:
 # lora_trainer.py and generate_data.py live in the same directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from generate_data import generate_datasets, TARGET_DIR as DATA_DIR
-from lora_trainer import LoRATrainer, _pre_train_backup, _post_train_version, _post_train_stage, _promote_to_active, _mark_failed
+from lora_trainer import (
+    LoRATrainer,
+    _pre_train_backup,
+    _post_train_version,
+    _post_train_stage,
+    _promote_to_active,
+    _mark_failed,
+    _compute_base_model_tokenizer_hash,
+    _compute_base_model_hash,
+)
 from shared.contracts.agent_prompts import AGENT_PROMPTS, BOOTSTRAP_CAP_TO_ROLE
 from shared.contracts.training import lookup_recipe
 from shared.contracts.experience import AgentContribution
@@ -256,6 +266,18 @@ async def train_capability(
             tmp.write(json.dumps(pair) + "\n")
         dataset_path = Path(tmp.name)
 
+    # Hashes must be computed BEFORE the dataset file is unlinked in the
+    # finally block; tokenizer and base-model hashes are safe anywhere after
+    # model_id is known. Computing them all here keeps the call site to
+    # _post_train_stage clean and guarantees they're never lost.
+    _h = hashlib.sha256()
+    with open(dataset_path, "rb") as _fh:
+        for _line in sorted(_fh.readlines()):
+            _h.update(_line)
+    dataset_hash   = _h.hexdigest()
+    tokenizer_hash  = _compute_base_model_tokenizer_hash(model_id)
+    base_model_hash = _compute_base_model_hash(model_id)
+
     # ── Pre-training backup (MUST happen before weights are overwritten) ───────
     # _pre_train_backup copies the current adapter weights to a versioned dir
     # so we have a real rollback target.  Calling this AFTER training would
@@ -306,6 +328,9 @@ async def train_capability(
         lora_alpha=recipe.alpha,
         final_loss=final_loss,
         note=note,
+        dataset_hash=dataset_hash,
+        tokenizer_hash=tokenizer_hash,
+        base_model_hash=base_model_hash,
     )
     new_version = new_meta["version"]
 

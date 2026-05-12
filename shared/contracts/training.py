@@ -64,6 +64,16 @@ class AdapterRecipe(BaseModel):
     sft_format: Literal["openai_messages"] = "openai_messages"
     tool_call_style: Literal["openai_native", "hermes", "none"] = "openai_native"
     tokenizer_pre_tokenizer: Optional[Literal["bytelevel", "metaspace"]] = None
+    # Auto rank-promotion ceiling. The rank policy refuses to bump r above
+    # this value. Default 256 matches vLLM's --max-lora-rank preallocation in
+    # docker/compose.yml; raise both together when growing capacity further.
+    # 256 is the practical 3090 ceiling — past it, merge-to-base via the
+    # frozen-cap path is more efficient than continuing to grow the adapter.
+    max_r_cap: int = 256
+    # Minimum successful promotions between rank bumps. Prevents thrashing —
+    # two consecutive bumps would let one noisy round drive a permanent
+    # capacity decision.
+    rank_promotion_cooldown: int = 2
 
 
 class RecipeRegistry(BaseModel):

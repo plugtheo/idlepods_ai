@@ -16,11 +16,13 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional, Tuple
 
 import httpx
 
+from shared.contracts.agent_prompts import ROLE_TO_BOOTSTRAP_CAP
 from shared.contracts.roles import TRAINABLE_ROLES
 from .config.settings import settings
 from .utils.experience_reader import check_diversity, load_experiences
@@ -86,20 +88,79 @@ def _base_model_for(role: str) -> str:
         raise RuntimeError(f"Cannot resolve base model from registry: {exc}") from exc
 
 
-def _count_role_pairs(records: list[dict], role_name: str, min_score: float) -> int:
+def _role_adapter_dir(role: str) -> str:
+    """Map a role name ('coder') to its adapter directory name ('coding_lora')."""
+    cap = ROLE_TO_BOOTSTRAP_CAP.get(role, role)
+    return f"{cap}_lora"
+
+
+def _get_role_cursor(role: str, output_dir: str) -> Optional[datetime]:
     """
-    Fast scan of experience records — counts contributions for *role_name* that
-    meet the quality floor.  No tokenisation; no SFT pair building.  Used to
-    skip roles with insufficient data before launching any subprocess.
+    Read the *last_trained_experience_timestamp* for *role* from its adapter's
+    metadata.json. Returns None when no cursor is recorded (first retrain ever).
+    """
+    meta_path = Path(output_dir) / _role_adapter_dir(role) / "metadata.json"
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    raw = meta.get("last_trained_experience_timestamp")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _parse_ts(ts_raw: Optional[str]) -> Optional[datetime]:
+    if not ts_raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _count_new_role_pairs(
+    records: list[dict],
+    role_name: str,
+    cursor: Optional[datetime],
+    min_score: float,
+) -> Tuple[int, Optional[datetime]]:
+    """
+    Count post-cursor records with a qualifying contribution for *role_name*,
+    plus the latest record timestamp seen (the new cursor candidate).
+
+    Records lacking a timestamp are excluded from the gate — the system cannot
+    tell whether they're new, and counting them risks an infinite-retrain loop
+    on legacy data. Conservative: skip. They are still eligible for *training*,
+    only the trigger gate ignores them.
     """
     n = 0
+    max_ts: Optional[datetime] = None
     for rec in records:
         if float(rec.get("final_score", 0.0)) < min_score:
             continue
-        for contrib in rec.get("contributions", []):
-            if contrib.get("role") == role_name and contrib.get("messages") and contrib.get("full_output"):
-                n += 1
-    return n
+        ts = _parse_ts(rec.get("timestamp"))
+        if ts is None:
+            continue
+        if cursor is not None and ts <= cursor:
+            continue
+        has_role_contrib = any(
+            contrib.get("role") == role_name
+            and contrib.get("messages")
+            and contrib.get("full_output")
+            for contrib in rec.get("contributions", [])
+        )
+        if not has_role_contrib:
+            continue
+        n += 1
+        if max_ts is None or ts > max_ts:
+            max_ts = ts
+    return n, max_ts
 
 
 def _run_local(records: list[dict]) -> None:
@@ -147,15 +208,45 @@ def _run_local(records: list[dict]) -> None:
             return -1
 
     try:
-        # ── Phase 1: fast data-count pre-check ──────────────────────────────
-        # Skip roles whose experience pairs won't even clear MIN_SFT_PAIRS
-        # without spawning a subprocess (no model/tokenizer loaded).
-        from shared.contracts.agent_prompts import ROLE_TO_BOOTSTRAP_CAP
+        # ── Phase 1: per-role cursor + threshold + freeze gate ───────────────
+        # Each role advances independently. A role is eligible for training
+        # this tick only when it (a) is NOT frozen at rank cap, AND (b) has
+        # accumulated >= min_new_experiences_per_role qualifying contributions
+        # SINCE its adapter's last_trained_experience_timestamp cursor. This
+        # prevents pointless retrains on quiet roles, lets high-traffic roles
+        # progress independently, and stops any role whose rank cap was hit +
+        # plateaued from continuing to spin (it's ready for merge instead).
+        from training.app.rank_policy import is_frozen
         eligible: list[str] = []
         for capability in TRAINABLE_ROLES:
-            n = _count_role_pairs(records, capability, settings.min_quality_score)
-            log.info("data_count_check role=%s qualifying_experience_pairs=%s", capability, n)
-            eligible.append(capability)  # curated data fills the gap; count is advisory
+            adapter_dir = Path(settings.output_dir) / _role_adapter_dir(capability)
+            if is_frozen(adapter_dir):
+                log.info(
+                    "skip role=%s reason=frozen_at_cap adapter_dir=%s",
+                    capability, adapter_dir,
+                )
+                continue
+
+            cursor = _get_role_cursor(capability, settings.output_dir)
+            n, _ = _count_new_role_pairs(
+                records, capability, cursor, settings.min_quality_score
+            )
+            cursor_disp = cursor.isoformat() if cursor else "none"
+            log.info(
+                "data_count_check role=%s qualifying_new_pairs=%s cursor=%s threshold=%s",
+                capability, n, cursor_disp, settings.min_new_experiences_per_role,
+            )
+            if n < settings.min_new_experiences_per_role:
+                log.info(
+                    "skip role=%s reason=insufficient_new_data new=%s threshold=%s",
+                    capability, n, settings.min_new_experiences_per_role,
+                )
+                continue
+            eligible.append(capability)
+
+        if not eligible:
+            log.info("No roles cleared per-role retrain threshold — nothing to do this tick")
+            return
 
         # ── Phase 2: probe each eligible role ────────────────────────────────
         # Trains 50 samples × 1 epoch in a temp dir, smoke-tests, exits 0/3.

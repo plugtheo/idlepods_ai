@@ -57,6 +57,16 @@ class TrainingSettings(BaseSettings):
         default=10_000,
         description="Cap on total SFT pairs per training run to bound GPU time.",
     )
+    min_new_experiences_per_role: int = Field(
+        default=100,
+        description=(
+            "Per-role retrain trigger threshold: number of new qualifying "
+            "experience contributions (post-cursor, score >= min_quality_score) "
+            "required before a role's adapter is re-trained. Prevents pointless "
+            "retrains on roles whose traffic has been quiet since the last "
+            "promotion. Cursor is the role adapter's last_trained_experience_timestamp."
+        ),
+    )
 
     # HuggingFace auth
     hf_token: str = Field("", description="HuggingFace Hub token for downloading gated models")

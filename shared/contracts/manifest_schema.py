@@ -25,6 +25,13 @@ class HistoryEntry(BaseModel):
     recipe: Dict[str, Any] = Field(default_factory=dict)
     dataset_hash: str
     tokenizer_hash: str
+    # HF commit hash (snapshot revision) of the base model the adapter was
+    # trained against. Adapter weights are only meaningful relative to the
+    # exact base they were trained on; a mismatch between this hash on
+    # consecutive history entries is the load-bearing invariant for the
+    # future merge-to-base path. Defaults to "unknown" for legacy entries
+    # written before the hash plumbing existed.
+    base_model_hash: str = "unknown"
     trainer_version: str
     n_samples: int
     final_loss: float

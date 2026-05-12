@@ -78,7 +78,9 @@ from training.bootstrap.lora_trainer import (
     _promote_to_active,
     _mark_failed,
     _compute_base_model_tokenizer_hash,
+    _compute_base_model_hash,
     _write_metrics_summary,
+    _zero_pad_adapter_to_rank,
 )
 from training.bootstrap.smoke_gate import run_smoke, run_regression_comparison, run_base_skill_check
 from shared.contracts.training import AdapterRecipe, lookup_recipe
@@ -126,6 +128,47 @@ _CAPABILITY_TO_ADAPTER: dict[str, str] = {
 # and are also sourced from settings so they remain visible without reading source.
 MIN_SFT_PAIRS        = _training_settings.min_sft_pairs
 MAX_TRAINING_SAMPLES = _training_settings.max_training_samples
+
+
+def _max_experience_timestamp(data_path: str, role_name: str, min_score: float) -> Optional[str]:
+    """
+    Scan the experience JSONL for the latest timestamp belonging to a record
+    that has a qualifying contribution for *role_name*. Returned as ISO-8601
+    string (same format the cursor stores). Used by _promote_to_active to
+    advance the per-role cursor on successful promotion.
+
+    Returns None when no record qualifies — leaving the cursor unchanged,
+    which keeps the next scheduler tick eligible to retry this role.
+    """
+    max_ts: Optional[str] = None
+    try:
+        with open(data_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if float(rec.get("final_score", 0.0)) < min_score:
+                    continue
+                ts = rec.get("timestamp")
+                if not ts:
+                    continue
+                has_role_contrib = any(
+                    contrib.get("role") == role_name
+                    and contrib.get("messages")
+                    and contrib.get("full_output")
+                    for contrib in rec.get("contributions", [])
+                )
+                if not has_role_contrib:
+                    continue
+                if max_ts is None or str(ts) > max_ts:
+                    max_ts = str(ts)
+    except OSError:
+        return None
+    return max_ts
 
 
 def _is_clean_output(text: str) -> bool:
@@ -597,6 +640,82 @@ def main() -> None:
             sys.exit(1)
     # ─────────────────────────────────────────────────────────────────────────
 
+    # ── Auto rank-promotion & freeze policy ────────────────────────────────
+    # Inspect prior adapter_diff_*.json reports for plateau signal; if all
+    # three conditions hold (loss flat, regression delta compressed, dataset
+    # grown), bump r/alpha (below cap) or set the frozen marker (at cap).
+    #
+    # Order matters:
+    #   1. Apply the existing override first so rank_policy sees the rank we
+    #      actually trained at last time (defense-in-depth on top of policy's
+    #      own history-based effective-rank lookup).
+    #   2. Check freeze at cap. If frozen, bail before any expensive work —
+    #      trainer_wrapper should have already skipped this role, but a direct
+    #      manual invocation must also respect the freeze.
+    #   3. Check rank promotion. If signals fired this round, the override
+    #      file gets a new r/alpha — re-apply it onto the recipe.
+    # recipes.yaml stays the source of truth for *intent*; the override file
+    # records the *current applied state* of automated decisions.
+    _policy_adapter_name = _CAPABILITY_TO_ADAPTER.get(role_name, f"{cap_label}_lora")
+    _policy_adapter_dir  = Path(args.output_dir) / _policy_adapter_name
+    try:
+        from training.app.rank_policy import (
+            maybe_promote_rank,
+            maybe_freeze_at_cap,
+            apply_override,
+            is_frozen,
+        )
+
+        # (1) Apply any pre-existing override so the recipe reflects current state.
+        _override = apply_override(_policy_adapter_dir)
+        if _override:
+            recipe = recipe.model_copy(update=_override)
+            print(
+                f"[trainer-entry] Applied existing rank override from "
+                f"{_policy_adapter_dir / 'runtime_recipe_override.json'}: {_override}",
+                flush=True,
+            )
+
+        # (2) Freeze gate: if we're at cap and signals fire, mark frozen and exit.
+        #     Also exits if a prior run already set the frozen flag.
+        maybe_freeze_at_cap(
+            adapter_dir=_policy_adapter_dir,
+            current_r=recipe.r,
+            current_alpha=recipe.alpha,
+            max_r_cap=recipe.max_r_cap,
+        )
+        if is_frozen(_policy_adapter_dir):
+            print(
+                f"[trainer-entry] role={role_name} is FROZEN at r={recipe.r} "
+                f"(cap={recipe.max_r_cap}) — skipping training. "
+                f"Merge the frozen adapter into a per-agent base model to retire it.",
+                flush=True,
+            )
+            sys.exit(0)
+
+        # (3) Rank promotion (no-op when frozen, at cap, in cooldown, or
+        #     signals haven't fired). If promoted, re-apply the override.
+        maybe_promote_rank(
+            adapter_dir=_policy_adapter_dir,
+            current_r=recipe.r,
+            current_alpha=recipe.alpha,
+            max_r_cap=recipe.max_r_cap,
+            rank_promotion_cooldown=recipe.rank_promotion_cooldown,
+        )
+        _override = apply_override(_policy_adapter_dir)
+        if _override:
+            recipe = recipe.model_copy(update=_override)
+            print(
+                f"[trainer-entry] Applied rank override after promotion check: {_override}",
+                flush=True,
+            )
+    except SystemExit:
+        raise
+    except Exception as _rp_exc:
+        # Policy must never block training. A failure here means we train at
+        # the YAML-defined recipe values; that's the safe fallback.
+        print(f"[trainer-entry] rank_policy error (proceeding with YAML recipe): {_rp_exc}", flush=True)
+
     print(
         f"[trainer-entry] recipe: peft_type={recipe.peft_type}  r={recipe.r}  "
         f"alpha={recipe.alpha}  sft_format={recipe.sft_format}",
@@ -837,9 +956,54 @@ def main() -> None:
     # point so retraining is incremental refinement, not from-scratch.  Only
     # active when the recipe opts in AND a backup exists.
     resume_from_checkpoint: Optional[str] = None
+    expanded_backup_dir: Optional[str] = None  # cleaned in the finally below
     if recipe.resume_from_prev_adapter and backup_path:
         resume_from_checkpoint = str(backup_path)
         print(f"[trainer-entry] Warm-start enabled: resuming from {backup_path}", flush=True)
+
+        # Zero-pad warm-start: if the auto-promoted recipe.r exceeds the
+        # backup adapter's saved rank, the saved B/A matrices have the wrong
+        # rank dimension for the fresh PEFT model and will fail to load.
+        # Expand the backup to the new rank in a temp dir (zero-padding the
+        # new rank slots preserves the prior learning bit-identically at
+        # init) and resume from there.
+        backup_cfg_path = Path(backup_path) / "adapter_config.json"
+        backup_r: Optional[int] = None
+        if backup_cfg_path.exists():
+            try:
+                backup_r = int(json.loads(backup_cfg_path.read_text()).get("r", 0)) or None
+            except (OSError, json.JSONDecodeError, ValueError):
+                backup_r = None
+        if backup_r is not None and recipe.r > backup_r:
+            print(
+                f"[trainer-entry] Rank promoted ({backup_r} → {recipe.r}). "
+                f"Zero-pad expanding backup so warm-start preserves prior learning.",
+                flush=True,
+            )
+            try:
+                expanded_backup_dir = tempfile.mkdtemp(prefix=f"lora_expand_{cap_label}_")
+                _zero_pad_adapter_to_rank(
+                    src_dir=Path(backup_path),
+                    dst_dir=Path(expanded_backup_dir),
+                    new_r=recipe.r,
+                    new_alpha=recipe.alpha,
+                )
+                resume_from_checkpoint = expanded_backup_dir
+                print(
+                    f"[trainer-entry] Expanded backup ready at {expanded_backup_dir}",
+                    flush=True,
+                )
+            except Exception as _exp_exc:
+                print(
+                    f"[trainer-entry] Zero-pad expand failed ({_exp_exc}) — "
+                    f"falling back to cold-start at promoted rank",
+                    flush=True,
+                )
+                resume_from_checkpoint = None
+                if expanded_backup_dir:
+                    import shutil as _sh
+                    _sh.rmtree(expanded_backup_dir, ignore_errors=True)
+                    expanded_backup_dir = None
 
     import time as _time
     _t_run_start = _time.monotonic()
@@ -869,6 +1033,9 @@ def main() -> None:
             data_file.unlink(missing_ok=True)
         except OSError:
             pass
+        if expanded_backup_dir:
+            import shutil as _sh
+            _sh.rmtree(expanded_backup_dir, ignore_errors=True)
 
     _run_duration_s = round(_time.monotonic() - _t_run_start, 1)
     print(
@@ -887,6 +1054,11 @@ def main() -> None:
         # Hash the base-model's tokenizer.json from the HF hub cache — stable
         # across runs and not affected by what PEFT saves (or doesn't save).
         tokenizer_hash = _compute_base_model_tokenizer_hash(args.base_model)
+        # HF snapshot commit hash — the canonical identifier for the base
+        # weights this adapter was trained against. Required for the future
+        # merge-to-base path: a mismatch on consecutive versions means base
+        # drift and the prior learning may no longer compose correctly.
+        base_model_hash = _compute_base_model_hash(args.base_model)
 
         _WEIGHT_FILES = ("adapter_model.safetensors", "adapter_model.bin")
         weight_file = next((adapter_dir / f for f in _WEIGHT_FILES if (adapter_dir / f).exists()), None)
@@ -919,6 +1091,7 @@ def main() -> None:
             note="self-training",
             dataset_hash=dataset_hash,
             tokenizer_hash=tokenizer_hash,
+            base_model_hash=base_model_hash,
         )
         # Persist full recipe dict and eval_loss into the history entry.
         if new_meta.get("history"):
@@ -1029,6 +1202,12 @@ def main() -> None:
                 sys.exit(2)
 
             eval_metrics = {k: v for k, v in smoke.items() if isinstance(v, (int, float))}
+            # Cursor advance: the latest timestamp of any experience record
+            # that contributed to this training run. trainer_wrapper's next
+            # tick will use this to gate retrains for this role.
+            cursor_ts = _max_experience_timestamp(
+                args.data_path, role_name, _training_settings.min_quality_score,
+            )
             _promote_to_active(
                 checkpoint_dir=Path(args.output_dir),
                 capability=cap_label,
@@ -1040,6 +1219,7 @@ def main() -> None:
                 eval_loss=result.get("eval_loss") or 0.0,
                 perplexity=result.get("perplexity"),
                 assistant_masking_enabled=result.get("assistant_masking_enabled"),
+                last_experience_timestamp=cursor_ts,
             )
             _write_adapter_diff_report(
                 checkpoint_dir=Path(args.output_dir),

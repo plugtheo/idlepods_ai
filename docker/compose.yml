@@ -50,7 +50,7 @@ services:
     command: >
       --model ${VLLM_MODEL_ID:-Qwen/Qwen3-8B}
       --enable-lora
-      --max-lora-rank 64
+      --max-lora-rank 256   # Safe rank limit for 3090-class GPUs; raise with max_r_cap in recipes.yaml when growing capacity further.
       --max-loras 8
       --port 8000
       --host 0.0.0.0
