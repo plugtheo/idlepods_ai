@@ -38,20 +38,22 @@ services:
   # ── Local vLLM servers ───────────────────────────────────────────────────
 
   vllm-primary:
-    # Pinned: Qwen3 architecture added in vLLM v0.8.5 (transformers >=4.51).
+    # Pinned: Qwen3 architecture added in vLLM v0.9.0 (transformers >=4.51).
     # Engine-level `--guided-decoding-backend` is honored through 0.8.x/0.9.x
     # (replaced by `--structured-outputs-config` only in 0.10+). xgrammar
     # >=0.1.10 is bundled and enforces JSON Schema `required` strictly.
-    image: vllm/vllm-openai:${VLLM_VERSION:-v0.8.5}
+    # Safe rank limit for 3090-class GPUs; raise with max_r_cap in recipes.yaml when growing capacity further.
+    image: vllm/vllm-openai:${VLLM_VERSION:-v0.9.0}
     runtime: nvidia
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - VLLM_ATTENTION_BACKEND=FLASHINFER
       - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
     command: >
       --model ${VLLM_MODEL_ID:-Qwen/Qwen3-8B}
       --enable-lora
-      --max-lora-rank 256   # Safe rank limit for 3090-class GPUs; raise with max_r_cap in recipes.yaml when growing capacity further.
-      --max-loras 8
+      --max-lora-rank 64
+      --max-loras 4
       --port 8000
       --host 0.0.0.0
       --enable-auto-tool-choice
@@ -64,8 +66,8 @@ services:
       --tokenizer-mode auto
     volumes:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
-      # LoRA adapters — written by Training Service; read by vLLM at runtime load
-      - ../data/lora_checkpoints:/lora_checkpoints
+      # LoRA adapters — written by Training Service; read by vLLM at runtime load.
+      - ../data/lora_checkpoints:/data/lora_checkpoints
     ports:
       - "8000:8000"
     networks:
@@ -100,6 +102,7 @@ services:
     volumes:
       - ../models.yaml:/config/models.yaml:ro
       - ../recipes.yaml:/config/recipes.yaml:ro
+      - lora_checkpoints:/data/lora_checkpoints
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')"]
       interval: 15s

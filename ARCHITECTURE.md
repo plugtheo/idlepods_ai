@@ -557,7 +557,7 @@ A post-training adapter is loaded as `<adapter>__staging` and run through fixed 
   ### Guards
 
   | Guard | Purpose |
-  |---|---|
+
   | `rank_promotion_cooldown=2` | Two consecutive successful promotions required between rank bumps. Prevents one noisy round
   driving a permanent capacity decision. |
   | `_SMOOTHING_WINDOW=3` | Three consecutive `adapter_diff` reports required before any signal can fire. Filters single-round
@@ -578,24 +578,6 @@ A post-training adapter is loaded as `<adapter>__staging` and run through fixed 
   | Override file isolation | `recipes.yaml` is read-only intent. Auto-applied state lives in `runtime_recipe_override.json` per
   adapter. Recipe text never mutates. |
 
-  ### File map
-
-  | File | Role |
-  |---|---|
-  | `shared/contracts/training.py` | `AdapterRecipe` with `max_r_cap`, `rank_promotion_cooldown`. |
-  | `training/app/rank_policy.py` | `maybe_promote_rank`, `maybe_freeze_at_cap`, `is_frozen`, `apply_override`. |
-  | `training/app/trainer_wrapper.py` | Phase-1 gate: skip frozen roles + per-role cursor + threshold check. |
-  | `training/app/trainer_entry.py` | Apply override → freeze check (exit if frozen) → promote check → re-apply override → train
-  at effective rank. Zero-pad warm-start when promoted rank > saved rank. |
-  | `training/bootstrap/lora_trainer.py` | `_zero_pad_adapter_to_rank`, `_compute_base_model_hash`,
-  `_compute_base_model_tokenizer_hash`, `_post_train_stage` (drift detection), `_promote_to_active` (cursor advance). |
-  | `training/bootstrap/backfill_hashes.py` | Idempotent CLI to backfill `tokenizer_hash` + `base_model_hash` on legacy adapters
-  without retraining. |
-  | `docker/compose.yml` | `vllm-primary --max-lora-rank 256 --max-loras 8`. Must match `AdapterRecipe.max_r_cap`. |
-  | `<adapter_dir>/runtime_recipe_override.json` | Per-adapter auto-applied state: `r`, `alpha`, promotion provenance, `frozen`
-  flag, freeze provenance. |
-  | `<adapter_dir>/metadata.json` | Per-adapter manifest entry: status, version, lora_r/alpha, hashes, cursor, full history. |
-  | `<adapter_dir>/reports/adapter_diff_*.json` | Per-run audit reports consumed by the policy as signal input. |
 
   ### Operational notes
 

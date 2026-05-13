@@ -600,11 +600,12 @@ def _promote_to_active(
         else:
             updated_history = [new_history_entry]
 
-        prev_path = (
-            str(previous_backup_path)
-            if previous_backup_path and Path(previous_backup_path).exists()
-            else old_active_path
-        )
+        if previous_backup_path and Path(previous_backup_path).exists():
+            prev_path = str(previous_backup_path)
+        elif old_active_version:
+            prev_path = old_active_path
+        else:
+            prev_path = ""
         m.adapters[adapter_name] = AdapterEntry(
             schema_version=2,
             active_version=new_version,
